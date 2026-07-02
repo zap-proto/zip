@@ -44,7 +44,7 @@ func main() {
 		zip.WithTags("validation"),
 	)
 
-	log.Fatal(app.ListenHTTP(":8080"))
+	log.Fatal(app.Listen("http://:8080"))
 }
 
 func validate(ctx context.Context, in *ValidateRequest) (*ValidateResponse, error) {

@@ -34,7 +34,8 @@ Every file from upstream has been deleted. We kept the name.
 | Adapters | `AdaptNetHTTP / AdaptNetHTTPFunc / AdaptNetHTTPMiddleware`; `app.Mount(prefix, http.Handler)`. |
 | WebSocket | `wsx.Upgrade(fn)` over fasthttp/websocket. |
 | Streaming | `c.SendStream(reader)` + `c.SendStreamWriter(fn)`. |
-| ZAP transport | `app.ListenZAP(addr)` serves the whole app over ZAP (via zap-proto/http); `app.ListenHTTP(addr)` is the plain-HTTP extra; `app.Serve(zapAddr, httpAddr)` runs both. Routes ARE the ZAP surface. |
+| Transport | ONE verb `app.Listen(addrs...)`; the address scheme selects the transport (`:9653`=ZAP default, `http://:8080`=HTTP, any `RegisterTransport`'d proto). `app.Listen(":9653", "http://:8080")` serves both from one call. Routes ARE the surface over every transport. |
+| Free MCP | Typed handlers auto-project to a Model Context Protocol tool surface at `/mcp` (JSON-RPC 2.0: initialize/tools/list/tools/call). Same op registry as OpenAPI (one schema, three projections: REST·OpenAPI·MCP), served over every transport → ZAP-native MCP for free. `Config.MCP.Disabled` to suppress. |
 | Named-service RPC (optional) | `zaprpc.Service`/`Registry`/`Dispatch` + `zaprpc.HTTPHandler(reg)` for a gRPC-style named-service surface on top of the transport. |
 
 ## Dependencies

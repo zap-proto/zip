@@ -31,7 +31,7 @@ func main() {
         })
     })
 
-    _ = app.Serve(":9653", ":8080") // ZAP primary + HTTP extra
+    _ = app.Listen(":9653", "http://:8080") // ZAP primary + HTTP extra, one verb
 }
 ```
 
@@ -56,11 +56,25 @@ func main() {
 - **SSE / streaming** — `c.SendStreamWriter` (Fiber v3 native).
 - **Drop-in migration** — `app.Mount("/legacy", chiRouter)` for any
   `http.Handler` (chi, gin, beego, net/http).
-- **ZAP transport** — `app.ListenZAP(":9653")` serves the whole app over
-  ZAP (TLS 1.3 + post-quantum, gRPC's replacement); `app.ListenHTTP(":8080")`
-  is the optional plain-HTTP extra; `app.Serve(zapAddr, httpAddr)` runs both.
-  Your routes ARE the ZAP surface — same handlers, middleware, and auth over
-  either transport, no separate RPC registration.
+- **Free MCP** — every typed handler (`zip.Get/Post[In,Out]`) is automatically a
+  Model Context Protocol tool at `/mcp` (JSON-RPC 2.0): `tools/list` projects the
+  same JSON Schema OpenAPI uses, `tools/call` runs the exact same `fn`. ONE op
+  registry → three projections (REST route · OpenAPI doc · MCP tool). Because
+  `/mcp` is an ordinary route, it's served over **every transport you Listen on**,
+  so **ZAP-native MCP is automatic** — an agent speaking ZAP gets the tool surface
+  with zero wiring. On by default; `Config.MCP.Disabled` to suppress.
+- **Transport is a value, not a method** — ONE verb, `app.Listen(addrs...)`, and
+  the address scheme selects the transport (mirrors `net.Listen(network, addr)`):
+  ```go
+  app.Listen(":9653")                   // ZAP (bare addr = the primary)
+  app.Listen(":9653", "http://:8080")   // ZAP + HTTP in one call
+  app.Listen("http://:8080")            // HTTP only
+  app.Listen("quic://:443")             // any RegisterTransport'd protocol
+  ```
+  ZAP (TLS 1.3 + post-quantum, gRPC's replacement) is the default; HTTP is built
+  in; `zip.RegisterTransport(scheme, fn)` slots in any future termination/
+  serialization protocol with ZERO change to the Listen API. Your routes ARE the
+  surface — same handlers, middleware, and auth over every transport.
 - **Named-service RPC (optional)** — `zaprpc.Registry` + `zaprpc.HTTPHandler(reg)`
   exposes generated `zapc` services by name at a route, for a gRPC-style
   service surface on top of the transport.

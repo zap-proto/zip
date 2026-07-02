@@ -112,5 +112,5 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Fatal(app.ListenHTTP(":8080"))
+	log.Fatal(app.Listen("http://:8080"))
 }

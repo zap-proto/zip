@@ -22,5 +22,5 @@ func main() {
 		return c.JSON(200, map[string]string{"status": "ok"})
 	})
 
-	log.Fatal(app.ListenHTTP(":8080"))
+	log.Fatal(app.Listen("http://:8080"))
 }
