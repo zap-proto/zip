@@ -1,99 +1,139 @@
-package zip
+package zip_test
 
 import (
+	"context"
+	"encoding/json"
 	"io"
-	"net"
 	"net/http"
+	"strings"
 	"testing"
-	"time"
 
-	"github.com/gofiber/fiber/v3"
-	"github.com/valyala/fasthttp"
-	zaphttp "github.com/zap-proto/http"
+	"github.com/zap-proto/zip"
 )
 
-// call drives the app's fasthttp handler in-process (no network).
-func call(a *App, method, path string) (int, string) {
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.Header.SetMethod(method)
-	ctx.Request.SetRequestURI(path)
-	a.Handler()(ctx)
-	return ctx.Response.StatusCode(), string(ctx.Response.Body())
-}
-
-func TestStaticRoute(t *testing.T) {
-	a := New()
-	a.Fiber().Get("/v1/health", func(c fiber.Ctx) error { return c.SendString("ok") })
-	if code, body := call(a, "GET", "/v1/health"); code != 200 || body != "ok" {
-		t.Fatalf("static route: got %d %q", code, body)
-	}
-}
-
-func TestDynamicMountAndUnmount(t *testing.T) {
-	a := New()
-	a.MountFast("/v1/bc/C", func(ctx *fasthttp.RequestCtx) {
-		ctx.SetStatusCode(200)
-		ctx.SetBodyString("C-chain")
+// TestBasicRouting hits the hello-world path through fiber.Test to
+// confirm the Sinatra idiom + JSON response work end-to-end.
+func TestBasicRouting(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "test", DisableStartupMessage: true})
+	app.Get("/hello", func(c *zip.Ctx) error {
+		return c.JSON(200, map[string]string{"message": "hi"})
 	})
-	if code, body := call(a, "POST", "/v1/bc/C/rpc"); code != 200 || body != "C-chain" {
-		t.Fatalf("dynamic mount: got %d %q", code, body)
-	}
-	a.Unmount("/v1/bc/C")
-	if code, _ := call(a, "POST", "/v1/bc/C/rpc"); code == 200 {
-		t.Fatalf("after unmount expected non-200, got %d", code)
-	}
-}
 
-func TestNetHTTPMount(t *testing.T) {
-	a := New()
-	a.Mount("/v1/info", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "info-ok")
-	}))
-	if code, body := call(a, "GET", "/v1/info"); code != 200 || body != "info-ok" {
-		t.Fatalf("net/http mount: got %d %q", code, body)
-	}
-}
-
-func TestLongestPrefixWins(t *testing.T) {
-	a := New()
-	a.MountFast("/v1", func(ctx *fasthttp.RequestCtx) { ctx.SetBodyString("root") })
-	a.MountFast("/v1/bc/C", func(ctx *fasthttp.RequestCtx) { ctx.SetBodyString("cchain") })
-	if _, body := call(a, "GET", "/v1/bc/C/rpc"); body != "cchain" {
-		t.Fatalf("longest-prefix: got %q", body)
-	}
-	if _, body := call(a, "GET", "/v1/status"); body != "root" {
-		t.Fatalf("prefix fallback: got %q", body)
-	}
-}
-
-// TestZAPPrimaryRoundTrip proves the SAME app served over the ZAP transport
-// returns identical results — ZAP is the primary path.
-func TestZAPPrimaryRoundTrip(t *testing.T) {
-	a := New()
-	a.MountFast("/v1/ping", func(ctx *fasthttp.RequestCtx) { ctx.SetBodyString("pong") })
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	req, _ := http.NewRequest("GET", "/hello", nil)
+	resp, err := app.Fiber().Test(req)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Test(): %v", err)
 	}
-	srv := &zaphttp.Server{Handler: a.Handler()}
-	go func() { _ = srv.Serve(ln) }()
-	defer srv.Close()
-	time.Sleep(50 * time.Millisecond)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("json: %v / body=%s", err, body)
+	}
+	if got["message"] != "hi" {
+		t.Fatalf("body=%s", body)
+	}
+}
 
-	tr := zaphttp.NewTransport(ln.Addr().String())
-	defer tr.CloseIdleConnections()
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI("http://zap/v1/ping")
-	req.Header.SetMethod("GET")
-	if err := tr.Do(req, resp); err != nil {
-		t.Fatalf("zap round-trip: %v", err)
+// TestHTTPError checks zip.HTTPError → JSON error response.
+func TestHTTPError(t *testing.T) {
+	app := zip.New(zip.Config{DisableStartupMessage: true})
+	app.Get("/boom", func(c *zip.Ctx) error {
+		return zip.ErrNotFound("nope")
+	})
+	req, _ := http.NewRequest("GET", "/boom", nil)
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("Test(): %v", err)
 	}
-	if got := string(resp.Body()); got != "pong" {
-		t.Fatalf("zap round-trip: got %q want pong", got)
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d, want 404", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "nope") {
+		t.Fatalf("body=%s", body)
+	}
+}
+
+// TestTyped exercises the generic typed handler + reflection-based
+// validation + OpenAPI route installation.
+func TestTyped(t *testing.T) {
+	type In struct {
+		Email string `json:"email" validate:"required,minlen=3"`
+	}
+	type Out struct {
+		OK bool `json:"ok"`
+	}
+	app := zip.New(zip.Config{DisableStartupMessage: true})
+	zip.Post(app, "/v1/test", func(ctx context.Context, in *In) (*Out, error) {
+		return &Out{OK: true}, nil
+	})
+
+	// Valid call.
+	req, _ := http.NewRequest("POST", "/v1/test",
+		strings.NewReader(`{"email":"z@hanzo.ai"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("Test(): %v", err)
+	}
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d body=%s", resp.StatusCode, body)
+	}
+
+	// Invalid call — missing email.
+	req2, _ := http.NewRequest("POST", "/v1/test",
+		strings.NewReader(`{}`))
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := app.Fiber().Test(req2)
+	if err != nil {
+		t.Fatalf("Test(): %v", err)
+	}
+	if resp2.StatusCode != 400 {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("status %d body=%s, want 400", resp2.StatusCode, body)
+	}
+}
+
+// TestGroup verifies app.Group prefixing.
+func TestGroup(t *testing.T) {
+	app := zip.New(zip.Config{DisableStartupMessage: true})
+	v1 := app.Group("/v1")
+	v1.Get("/ping", func(c *zip.Ctx) error {
+		return c.String(200, "pong")
+	})
+	req, _ := http.NewRequest("GET", "/v1/ping", nil)
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("Test(): %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+// TestIdentityHeaders confirms c.Org/User/Email map to X-* headers.
+func TestIdentityHeaders(t *testing.T) {
+	app := zip.New(zip.Config{DisableStartupMessage: true})
+	app.Get("/who", func(c *zip.Ctx) error {
+		return c.JSON(200, map[string]string{
+			"org":  c.Org(),
+			"user": c.User(),
+		})
+	})
+	req, _ := http.NewRequest("GET", "/who", nil)
+	req.Header.Set("X-Org-Id", "hanzo")
+	req.Header.Set("X-User-Id", "z")
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("Test(): %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"org":"hanzo"`) ||
+		!strings.Contains(string(body), `"user":"z"`) {
+		t.Fatalf("body=%s", body)
 	}
 }
