@@ -3,7 +3,7 @@
 // handler) rather than plain REST routes.
 //
 // It is DECOUPLED from the transport: zip's primary transport is ZAP, wired
-// once in the framework (App.ListenZAP serves the whole fiber handler over
+// once in the framework (App.Listen serves the whole fiber handler over
 // zap-proto/http — the routes ARE the ZAP surface, no registry needed). This
 // package is for the separate case where you want to expose generated
 // zapc <svc>_server.go services by name; mount it as an ordinary route with

@@ -9,7 +9,7 @@
 //	app.Get("/health", func(c *zip.Ctx) error {
 //	    return c.JSON(200, fiber.Map{"ok": true})
 //	})
-//	app.Serve(":9653", ":8080") // ZAP primary + HTTP extra
+//	app.Listen(":9653", "http://:8080") // ZAP primary + HTTP extra, one verb
 //
 // Public surface — types/functions exposed at the package root:
 //
@@ -29,7 +29,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	luxlog "github.com/luxfi/log"
-	zaphttp "github.com/zap-proto/http"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
 	"github.com/zap-proto/zip/runtime"
@@ -103,19 +102,26 @@ type Config struct {
 	// OpenAPI configures the auto-generated /.well-known/openapi.json
 	// served when typed handlers are registered.
 	OpenAPI OpenAPIConfig
+
+	// MCP configures the Model Context Protocol tool surface auto-derived from
+	// typed handlers (Get/Post[In,Out]). Enabled by default — it's free (the
+	// same op registry that feeds OpenAPI), served over every transport. Set
+	// MCP.Disabled to suppress.
+	MCP MCPConfig
 }
 
 // App is the zip application. It wraps *fiber.App and exposes the zip
 // handler signature alongside generic typed handlers.
 type App struct {
-	cfg     Config
-	logger  luxlog.Logger
-	loader  runtime.Loader
-	fiber   *fiber.App
-	ops     []*registeredOp
-	closers []func() error
-	zap     *zaphttp.Server // the ZAP (primary) listener, set by ListenZAP
-	zapMu   sync.Mutex
+	cfg         Config
+	logger      luxlog.Logger
+	loader      runtime.Loader
+	fiber       *fiber.App
+	ops         []*registeredOp
+	closers     []func() error
+	servers     []Server // the running transport listeners, set by Listen
+	srvMu       sync.Mutex
+	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
 }
 
 // New constructs an App with the given config. Defaults are applied
@@ -176,14 +182,14 @@ func (a *App) Logger() luxlog.Logger { return a.logger }
 
 // Shutdown gracefully stops both transports.
 func (a *App) Shutdown() error {
-	a.closeZAP()
+	a.closeServers()
 	_ = a.runClosers(context.Background())
 	return a.fiber.Shutdown()
 }
 
 // ShutdownWithContext gracefully stops both transports bounded by ctx.
 func (a *App) ShutdownWithContext(ctx context.Context) error {
-	a.closeZAP()
+	a.closeServers()
 	_ = a.runClosers(ctx)
 	return a.fiber.ShutdownWithContext(ctx)
 }

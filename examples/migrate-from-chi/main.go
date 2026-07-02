@@ -38,5 +38,5 @@ func main() {
 	// migration. Replace one path at a time with native zip handlers.
 	app.Mount("/legacy/chi", legacyHandler{})
 
-	log.Fatal(app.ListenHTTP(":8080"))
+	log.Fatal(app.Listen("http://:8080"))
 }

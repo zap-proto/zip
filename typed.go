@@ -15,8 +15,10 @@ import (
 // handler, and marshals Out → JSON response.
 type TypedHandler[In, Out any] func(ctx context.Context, in *In) (*Out, error)
 
-// registeredOp is the bookkeeping zip keeps for OpenAPI generation.
-// One op per typed route.
+// registeredOp is the bookkeeping zip keeps for a typed route — the ONE value
+// every projection reads: the REST route, the OpenAPI doc, and the MCP tool all
+// come from this. invoke is the transport-agnostic handler core (decode → run →
+// result), so a REST request and an MCP tools/call run the exact same fn.
 type registeredOp struct {
 	Method      string
 	Path        string
@@ -25,6 +27,7 @@ type registeredOp struct {
 	Tags        []string
 	InType      reflect.Type
 	OutType     reflect.Type
+	invoke      func(ctx context.Context, rawIn []byte) (any, error)
 }
 
 // Get registers a GET typed handler at path.
@@ -78,22 +81,37 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 	for _, o := range opts {
 		o(op)
 	}
+
+	// The transport-agnostic core: decode raw JSON args → In, validate, run fn,
+	// return Out (or a literal nil for a void result). REST and MCP both call
+	// THIS — one handler, many projections. A nil *Out becomes a nil `any`.
+	op.invoke = func(ctx context.Context, rawIn []byte) (any, error) {
+		var in In
+		if len(rawIn) > 0 {
+			if err := jsonenc.Unmarshal(rawIn, &in); err != nil {
+				return nil, ErrBadRequest("invalid json body: " + err.Error())
+			}
+		}
+		if err := validate(&in); err != nil {
+			return nil, ErrBadRequest(err.Error())
+		}
+		out, err := fn(ctx, &in)
+		if err != nil {
+			return nil, err
+		}
+		if out == nil {
+			return nil, nil
+		}
+		return out, nil
+	}
 	app.ops = append(app.ops, op)
 
 	handler := func(c fiber.Ctx) error {
-		var in In
+		var body []byte
 		if method != "GET" && method != "HEAD" {
-			if len(c.Body()) > 0 {
-				if err := jsonenc.Unmarshal(c.Body(), &in); err != nil {
-					return ErrBadRequest("invalid json body: " + err.Error())
-				}
-			}
+			body = c.Body()
 		}
-		// Validate via struct tags.
-		if err := validate(&in); err != nil {
-			return ErrBadRequest(err.Error())
-		}
-		out, err := fn(c.Context(), &in)
+		out, err := op.invoke(c.Context(), body)
 		if err != nil {
 			return err
 		}

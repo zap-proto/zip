@@ -68,7 +68,7 @@ func main() {
 	mustMount(app, "POST /v1/webhook", "goja", "./ext/webhook")
 	mustMount(app, "POST /v1/route", "starlark", "./ext/route")
 
-	log.Fatal(app.ListenHTTP(":8080"))
+	log.Fatal(app.Listen("http://:8080"))
 }
 
 func mustMount(app *zip.App, methodPath, rt, modulePath string) {

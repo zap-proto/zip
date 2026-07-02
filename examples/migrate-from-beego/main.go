@@ -42,5 +42,5 @@ func main() {
 	// Legacy beego app under /legacy/iam:
 	app.Mount("/legacy/iam", beegoStub{})
 
-	log.Fatal(app.ListenHTTP(":8080"))
+	log.Fatal(app.Listen("http://:8080"))
 }
