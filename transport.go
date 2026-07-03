@@ -97,7 +97,19 @@ func (a *App) Listen(addrs ...string) error {
 		if !ok {
 			return fmt.Errorf("zip: no transport registered for scheme %q (address %q)", scheme, raw)
 		}
-		servers = append(servers, tf(addr, h))
+		s := tf(addr, h)
+		// Push the App's per-conn wire tuning (ReadBufferSize / WriteBufferSize /
+		// Concurrency) into the transport's fasthttp.Server. Without this the
+		// built-in HTTP transport constructs a bare fasthttp.Server whose
+		// ReadBufferSize defaults to 4 KiB — capping total request-header size and
+		// returning 431 (Request Header Fields Too Large) above it, which silently
+		// dropped every zip.Config buffer knob at the wire. The transport, not just
+		// the fiber handler, must honor Config. A custom transport opts in by
+		// implementing tunableServer.
+		if t, ok := s.(tunableServer); ok {
+			t.applyConfig(a.cfg)
+		}
+		servers = append(servers, s)
 		a.logger.Info("zip listening", "transport", scheme, "addr", addr)
 	}
 
@@ -143,3 +155,26 @@ type httpServer struct {
 
 func (h *httpServer) ListenAndServe() error { return h.srv.ListenAndServe(h.addr) }
 func (h *httpServer) Close() error          { return h.srv.Shutdown() }
+
+// tunableServer is a transport whose underlying server accepts the App's
+// per-conn wire tuning. Listen applies it after construction so zip.Config's
+// buffer/concurrency knobs actually reach the socket. The built-in HTTP
+// transport implements it; a custom transport may too, or ignore the config.
+type tunableServer interface{ applyConfig(cfg Config) }
+
+// applyConfig copies the App's fasthttp tuning onto the HTTP transport's
+// server. Only non-zero knobs are applied, so an unset field falls through to
+// fasthttp's own default (4 KiB buffers, 256k concurrency) rather than zeroing
+// it. This is the seam that makes zip.Config{ReadBufferSize: 32768} raise the
+// 431 header ceiling on the wire.
+func (h *httpServer) applyConfig(cfg Config) {
+	if cfg.ReadBufferSize > 0 {
+		h.srv.ReadBufferSize = cfg.ReadBufferSize
+	}
+	if cfg.WriteBufferSize > 0 {
+		h.srv.WriteBufferSize = cfg.WriteBufferSize
+	}
+	if cfg.Concurrency > 0 {
+		h.srv.Concurrency = cfg.Concurrency
+	}
+}
