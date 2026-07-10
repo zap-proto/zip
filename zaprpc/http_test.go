@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 )
 
 // echoService is a tiny ZAP service: method "ping" returns its payload

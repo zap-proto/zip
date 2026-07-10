@@ -16,7 +16,7 @@ import (
 	"fmt"
 
 	"github.com/dop251/goja"
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 )
 
 // jsResponse captures what the JS handler wrote, so we can replay it onto

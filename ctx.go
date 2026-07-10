@@ -6,7 +6,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 	luxlog "github.com/luxfi/log"
 )
 

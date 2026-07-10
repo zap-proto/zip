@@ -3,7 +3,7 @@ package zip
 import (
 	"encoding/json"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
