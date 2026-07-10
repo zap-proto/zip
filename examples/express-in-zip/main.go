@@ -15,7 +15,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip"
 	"github.com/zap-proto/zip/middleware"

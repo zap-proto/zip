@@ -1,7 +1,7 @@
 package zip
 
 import (
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 )
 
 // Router is the path-mounting surface shared by *App and Group.
