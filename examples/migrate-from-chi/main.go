@@ -34,9 +34,11 @@ func main() {
 		return c.JSON(200, map[string]string{"id": c.Param("id")})
 	})
 
-	// Mount the legacy chi router under /legacy/chi for incremental
-	// migration. Replace one path at a time with native zip handlers.
-	app.Mount("/legacy/chi", legacyHandler{})
+	// Front the legacy chi router under /legacy/chi for incremental
+	// migration — one adapted wildcard route. Replace one path at a time
+	// with native zip handlers; a native route added later wins by
+	// specificity, no un-mount step needed.
+	app.All("/legacy/chi/*", zip.AdaptNetHTTP(legacyHandler{}))
 
 	log.Fatal(app.Listen("http://:8080"))
 }

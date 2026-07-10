@@ -12,10 +12,12 @@ import (
 	"github.com/zap-proto/fiber/v3/middleware/adaptor"
 )
 
-// AdaptNetHTTP wraps an http.Handler so it can be mounted on a zip
-// router. Use for stdlib code:
+// AdaptNetHTTP wraps an http.Handler so it can be served on a zip router
+// as an ordinary zip.Handler. To front a whole foreign subtree, register
+// it on a wildcard route — this is THE way to mount stdlib / chi / gin
+// code:
 //
-//	app.Mount("/legacy/net", zip.AdaptNetHTTP(httpHandler))
+//	app.All("/legacy/net/*", zip.AdaptNetHTTP(httpHandler))
 //
 // Migration tool — costs ~5% perf vs native Fiber. Replace with native
 // zip handlers when feasible.
@@ -40,13 +42,22 @@ func AdaptNetHTTPMiddleware(mw func(http.Handler) http.Handler) Handler {
 	return func(c *Ctx) error { return wrapped(c.fc) }
 }
 
-// Mount registers an http.Handler at the given prefix. Implicit
-// chi.Router and gin.Engine support flows through AdaptNetHTTP via
-// their respective ServeHTTP methods — both are http.Handlers.
+// Mount serves an http.Handler over the subtree under prefix.
 //
-//	app.Mount("/legacy/chi",  zip.AdaptNetHTTP(chiRouter))
-//	app.Mount("/legacy/gin",  zip.AdaptNetHTTP(ginEngine))
-//	app.Mount("/legacy/iam",  zip.AdaptNetHTTP(beegoApp.HandlerWrapper()))
+// Deprecated: use app.All(prefix+"/*", zip.AdaptNetHTTP(h)) — the two
+// primitives Mount is built from. Mount IS exactly that composition, kept as
+// a behaviour-identical alias so existing callers keep working; preferring
+// the explicit form leaves ONE way to put a route on the app. It also makes
+// the mounted subtree's nature plain: it is an ordinary wildcard route, so a
+// more specific static route wins even when registered later —
+// app.Get(prefix+"/health", …) beats the mount by specificity, not order.
+//
+// chi.Router, gin.Engine, and a beego HandlerWrapper are all http.Handlers,
+// so they mount the same way:
+//
+//	app.All("/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
+//	app.All("/legacy/gin/*", zip.AdaptNetHTTP(ginEngine))
+//	app.All("/legacy/iam/*", zip.AdaptNetHTTP(beegoApp.HandlerWrapper()))
 //
 // Migration tool — costs ~5% perf vs native Fiber.
 func (a *App) Mount(prefix string, h http.Handler) {

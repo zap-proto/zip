@@ -1,6 +1,6 @@
 // migrate-from-beego example — beego → zip migration via http.Handler
 // adapter. beego.BeeApp exposes Handlers as an http.Handler-compatible
-// surface; the same Mount() entry that fronted chi handles beego too.
+// surface; the same AdaptNetHTTP adapter that fronted chi handles beego too.
 //
 // In a real port:
 //
@@ -11,10 +11,10 @@
 //
 //	beeApp := web.NewHttpSever()  // your existing beego app
 //	zipApp := zip.New(zip.Config{AppName: "iam"})
-//	zipApp.Mount("/legacy/iam", beeApp.Handlers)
+//	zipApp.All("/legacy/iam/*", zip.AdaptNetHTTP(beeApp.Handlers))
 //
 // This example uses a stand-in http.Handler so the file builds without
-// pulling beego — same Mount() pattern in either case.
+// pulling beego — same adapter pattern in either case.
 package main
 
 import (
@@ -39,8 +39,8 @@ func main() {
 		return c.JSON(200, map[string]string{"status": "ok"})
 	})
 
-	// Legacy beego app under /legacy/iam:
-	app.Mount("/legacy/iam", beegoStub{})
+	// Legacy beego app under /legacy/iam — one adapted wildcard route:
+	app.All("/legacy/iam/*", zip.AdaptNetHTTP(beegoStub{}))
 
 	log.Fatal(app.Listen("http://:8080"))
 }
