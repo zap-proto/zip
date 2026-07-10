@@ -121,5 +121,8 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 		}
 		return c.JSON(out)
 	}
-	app.fiber.Add([]string{method}, path, handler)
+	// Buffer the fiber route so it sorts by specificity with the plain
+	// (untyped) routes at finalize; op is already registered above for the
+	// OpenAPI/MCP projections, which read app.ops independent of route order.
+	app.bufferRoute(method, path, func() { app.fiber.Add([]string{method}, path, handler) })
 }

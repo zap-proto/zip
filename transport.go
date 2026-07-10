@@ -69,7 +69,9 @@ func RegisterTransport(scheme string, tf TransportFunc) {
 
 // prepare installs the deferred projections (OpenAPI doc + MCP tool surface)
 // before any listener starts, so every transport exposes the same routes. Runs
-// exactly once even if Listen is called again.
+// exactly once even if Listen is called again. Called from finalize(), after
+// the specificity-sorted route set is registered, so these projections land
+// after it exactly as they did before.
 func (a *App) prepare() {
 	a.prepareOnce.Do(func() {
 		a.installOpenAPIRoutes()
@@ -85,7 +87,7 @@ func (a *App) Listen(addrs ...string) error {
 	if len(addrs) == 0 {
 		return fmt.Errorf("zip: Listen needs at least one address")
 	}
-	a.prepare()
+	a.finalize()
 	h := a.fiber.Handler()
 
 	servers := make([]Server, 0, len(addrs))

@@ -25,6 +25,8 @@ package zip
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/gofiber/fiber/v3"
@@ -122,6 +124,15 @@ type App struct {
 	servers     []Server // the running transport listeners, set by Listen
 	srvMu       sync.Mutex
 	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
+
+	// Route precedence is DATA (the pattern), not a PLACE (the call order).
+	// Static route registrations buffer here instead of touching fiber, then
+	// finalize() sorts them most-specific-first exactly once. See the
+	// "specificity-based route precedence" block below.
+	routesMu     sync.Mutex
+	routeBuf     []bufferedRoute
+	finalizeOnce sync.Once
+	finalized    bool
 }
 
 // New constructs an App with the given config. Defaults are applied
@@ -175,7 +186,12 @@ func New(cfg Config) *App {
 
 // Fiber returns the underlying *fiber.App. Use for one-off escape into
 // Fiber-only APIs (rare). Prefer staying on the zip surface.
-func (a *App) Fiber() *fiber.App { return a.fiber }
+//
+// Fiber() finalizes the app first: it flushes the specificity-sorted route
+// set into fiber. Anything you then register straight on the returned
+// *fiber.App follows fiber's native registration order AFTER the sorted set —
+// raw users own that ordering, same as before.
+func (a *App) Fiber() *fiber.App { a.finalize(); return a.fiber }
 
 // Logger returns the App's logger.
 func (a *App) Logger() luxlog.Logger { return a.logger }
@@ -195,12 +211,14 @@ func (a *App) ShutdownWithContext(ctx context.Context) error {
 }
 
 // Use registers zip-style middleware. Each Handler runs in order; calling
-// c.Next() (via c.Continue) chains to the next handler.
+// c.Next() (via c.Continue) chains to the next handler. Middleware is applied
+// immediately in DECLARATION order — it is never sorted. Because routes buffer
+// until finalize(), all Use middleware naturally flushes before any route.
 func (a *App) Use(handlers ...Handler) Router {
 	for _, h := range handlers {
 		a.fiber.Use(toFiberHandler(a, h))
 	}
-	return &routerAdapter{r: a.fiber, app: a}
+	return &rootRouter{a}
 }
 
 // UseFiber lets callers register raw fiber.Handler middleware (for the
@@ -211,7 +229,7 @@ func (a *App) UseFiber(handlers ...fiber.Handler) Router {
 		args = append(args, h)
 	}
 	a.fiber.Use(args...)
-	return &routerAdapter{r: a.fiber, app: a}
+	return &rootRouter{a}
 }
 
 // Get / Post / Put / Patch / Delete / Head / Options / All / Add register routes.
@@ -225,15 +243,18 @@ func (a *App) Options(path string, h Handler) Router {
 	return a.method("OPTIONS", path, h)
 }
 
-// All registers a handler for any HTTP method.
+// All registers a handler for any HTTP method. It buffers like the other
+// route verbs; "*" is its method token for sorting and conflict detection.
 func (a *App) All(path string, h Handler) Router {
-	a.fiber.All(path, toFiberHandler(a, h))
-	return &routerAdapter{r: a.fiber, app: a}
+	fh := toFiberHandler(a, h)
+	a.bufferRoute("*", path, func() { a.fiber.All(path, fh) })
+	return &rootRouter{a}
 }
 
 func (a *App) method(method, path string, h Handler) Router {
-	a.fiber.Add([]string{method}, path, toFiberHandler(a, h))
-	return &routerAdapter{r: a.fiber, app: a}
+	fh := toFiberHandler(a, h)
+	a.bufferRoute(method, path, func() { a.fiber.Add([]string{method}, path, fh) })
+	return &rootRouter{a}
 }
 
 // Group creates a path-prefixed router group.
@@ -262,3 +283,176 @@ func asHTTPError(err error) (*HTTPError, bool) {
 	}
 	return nil, false
 }
+
+// --- specificity-based route precedence (ServeMux-1.22 semantics) ---
+//
+// Fiber matches routes in REGISTRATION ORDER: the first registered pattern that
+// matches a request wins. That braids route PRECEDENCE (a property of the
+// pattern) with registration ORDER (a property of the call site) — which is why
+// consumers grew "subsystem order-int" hacks purely to make specific routes
+// (e.g. /v1/iam/keys) register before wildcards (/v1/iam/*). zip decomplects the
+// two: App.Get/Post/… buffer their (method, pattern, handler) instead of
+// touching fiber, and finalize() sorts the buffer MOST-SPECIFIC-FIRST before
+// registering into fiber — so fiber's first-match then yields most-specific-
+// wins, and the order you called Get/Post in no longer matters. This is exactly
+// what Go 1.22 did to net/http.ServeMux. One way, no order-ints, no config knob.
+
+// bufferedRoute is one deferred static registration. add performs the actual
+// fiber registration (unchanged from the immediate path); method+pattern drive
+// the specificity sort and the exact-duplicate check. App.All uses method "*".
+type bufferedRoute struct {
+	method  string
+	pattern string
+	add     func()
+}
+
+// bufferRoute defers a static route registration until finalize, where it is
+// sorted by specificity. Registering after finalize (i.e. after Listen/Fiber())
+// is a programming error — route tables are a startup-time concern.
+func (a *App) bufferRoute(method, pattern string, add func()) {
+	a.routesMu.Lock()
+	defer a.routesMu.Unlock()
+	if a.finalized {
+		panic("zip: register routes before Listen")
+	}
+	a.routeBuf = append(a.routeBuf, bufferedRoute{method: method, pattern: pattern, add: add})
+}
+
+// finalize sorts every buffered route most-specific-first, rejects an exact
+// (method, pattern) duplicate with a loud startup panic (never a silent
+// shadow), registers the sorted set into fiber, then installs the deferred
+// OpenAPI/MCP projections (which land AFTER the sorted set, exactly as before).
+// Runs exactly once; triggered by Listen and Fiber().
+func (a *App) finalize() {
+	a.finalizeOnce.Do(func() {
+		a.routesMu.Lock()
+		routes := a.routeBuf
+		a.routeBuf = nil
+		a.finalized = true
+		a.routesMu.Unlock()
+
+		// Exact (method, pattern) duplicate → conflict. Checked against a set
+		// (not sort adjacency) so equal-specificity siblings never mask it.
+		seen := make(map[string]struct{}, len(routes))
+		for _, r := range routes {
+			key := r.method + " " + r.pattern
+			if _, dup := seen[key]; dup {
+				panic("zip: route conflict: " + r.method + " " + r.pattern + " registered more than once")
+			}
+			seen[key] = struct{}{}
+		}
+
+		sort.SliceStable(routes, func(i, j int) bool {
+			return compareSpecificity(routes[i], routes[j]) < 0
+		})
+		for _, r := range routes {
+			r.add()
+		}
+		a.prepare()
+	})
+}
+
+// compareSpecificity orders two routes most-specific-first: it returns a
+// negative number when a is more specific than b (a sorts first), positive when
+// b is. It only returns 0 for identical (method, pattern), which finalize's set
+// check has already rejected as a conflict.
+func compareSpecificity(a, b bufferedRoute) int {
+	as, bs := routeSegs(a.pattern), routeSegs(b.pattern)
+	// 1. Segment by segment: at the first position whose KIND differs, the
+	//    more-specific kind wins — static literal (0) < :param (1) < wildcard * (2).
+	n := len(as)
+	if len(bs) < n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		if ka, kb := segKind(as[i]), segKind(bs[i]); ka != kb {
+			return ka - kb
+		}
+	}
+	// 2. More static segments wins.
+	if sa, sb := staticCount(as), staticCount(bs); sa != sb {
+		return sb - sa
+	}
+	// 3. Deeper (more segments) beats shallower.
+	if len(as) != len(bs) {
+		return len(bs) - len(as)
+	}
+	// 4. Determinism tie-breaks: longer literal first, then method.
+	if la, lb := literalLen(as), literalLen(bs); la != lb {
+		return lb - la
+	}
+	if a.method != b.method {
+		if a.method < b.method {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// routeSegs splits a pattern into its non-empty path segments.
+func routeSegs(pattern string) []string {
+	raw := strings.Split(pattern, "/")
+	segs := raw[:0]
+	for _, s := range raw {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
+	return segs
+}
+
+// segKind ranks one segment by specificity: static literal (0) is more specific
+// than a :param (1), which is more specific than a * wildcard (2).
+func segKind(seg string) int {
+	switch {
+	case seg == "":
+		return 0
+	case seg[0] == ':':
+		return 1
+	case seg[0] == '*':
+		return 2
+	default:
+		return 0
+	}
+}
+
+func staticCount(segs []string) int {
+	n := 0
+	for _, s := range segs {
+		if segKind(s) == 0 {
+			n++
+		}
+	}
+	return n
+}
+
+func literalLen(segs []string) int {
+	n := 0
+	for _, s := range segs {
+		if segKind(s) == 0 {
+			n += len(s)
+		}
+	}
+	return n
+}
+
+// rootRouter is the Router the App's own Get/Post/…/Use return. Unlike a Group
+// (a prefix scope that registers straight onto fiber in declaration order),
+// every route registered through it flows back through the App's specificity
+// buffer — so a fluent `app.Get(…).Post(…)` chain sorts with everything else
+// and registration order stays irrelevant. Group/Route still open prefix scopes.
+type rootRouter struct{ app *App }
+
+func (r *rootRouter) Use(h ...Handler) Router                { return r.app.Use(h...) }
+func (r *rootRouter) Get(p string, h Handler) Router         { return r.app.Get(p, h) }
+func (r *rootRouter) Post(p string, h Handler) Router        { return r.app.Post(p, h) }
+func (r *rootRouter) Put(p string, h Handler) Router         { return r.app.Put(p, h) }
+func (r *rootRouter) Patch(p string, h Handler) Router       { return r.app.Patch(p, h) }
+func (r *rootRouter) Delete(p string, h Handler) Router      { return r.app.Delete(p, h) }
+func (r *rootRouter) Head(p string, h Handler) Router        { return r.app.Head(p, h) }
+func (r *rootRouter) Options(p string, h Handler) Router     { return r.app.Options(p, h) }
+func (r *rootRouter) All(p string, h Handler) Router         { return r.app.All(p, h) }
+func (r *rootRouter) Group(p string, h ...Handler) Router    { return r.app.Group(p, h...) }
+func (r *rootRouter) Route(p string, fn func(Router)) Router { return r.app.Route(p, fn) }
+func (r *rootRouter) Fiber() fiber.Router                    { return r.app.Fiber() }
