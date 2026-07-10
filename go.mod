@@ -6,9 +6,9 @@ require (
 	github.com/dop251/goja v0.0.0-20260607120635-348e6bea910d
 	github.com/evanw/esbuild v0.28.1
 	github.com/fasthttp/websocket v1.5.12
-	github.com/gofiber/fiber/v3 v3.2.0
 	github.com/luxfi/log v1.4.3
 	github.com/valyala/fasthttp v1.70.0
+	github.com/zap-proto/fiber/v3 v3.2.1
 	github.com/zap-proto/go v1.3.0
 )
 

@@ -9,7 +9,7 @@ package zip
 import (
 	"net/http"
 
-	"github.com/gofiber/fiber/v3/middleware/adaptor"
+	"github.com/zap-proto/fiber/v3/middleware/adaptor"
 )
 
 // AdaptNetHTTP wraps an http.Handler so it can be mounted on a zip

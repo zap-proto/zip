@@ -3,7 +3,7 @@ package zaprpc
 import (
 	"fmt"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/zap-proto/fiber/v3"
 )
 
 // HTTP header hints. The envelope in the body is canonical; these are a
