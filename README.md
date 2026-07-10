@@ -65,7 +65,7 @@ Module path `github.com/zap-proto/zip`. Requires Go 1.26+.
 - **WebSocket & streaming** — `wsx.Upgrade(fn)` over fasthttp/websocket; `c.SendStreamWriter` for SSE / chunked responses.
 - **Extension routes** — `app.Module("POST /v1/eval", "wasm", "./policy")` mounts a sandboxed extension (wasm / goja / pyvm / starlark / v8go / native) as a route.
 - **Embedded JS/TS runtime** — run an Express-shaped JS/TS handler in-process via goja (pure Go, no CGO); esbuild transpiles TS ahead of it, for incremental migration to native Go.
-- **Drop-in migration** — `app.Mount("/legacy", h)` and `zip.AdaptNetHTTP(...)` accept any `http.Handler` (chi, gin, beego, `net/http`).
+- **Drop-in migration** — `app.All("/legacy/*", zip.AdaptNetHTTP(h))` fronts any `http.Handler` (chi, gin, beego, `net/http`) as one wildcard route; it obeys the same precedence, so a native route added later still wins.
 - **Composition by Mount** — a service is a set of subsystem packages exposing `func Mount(app *zip.App, deps Deps) error`; a standalone binary and a fused multi-subsystem binary are the same code with a different selection.
 - **Stdlib JSON only** — every JSON path goes through one internal helper backed by `encoding/json/v2` when built with `GOEXPERIMENT=jsonv2` (Go 1.25+), else `encoding/json`. No third-party JSON library.
 
