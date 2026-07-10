@@ -27,8 +27,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/zap-proto/fiber/v3"
 	luxlog "github.com/luxfi/log"
+	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
 	"github.com/zap-proto/zip/runtime"
@@ -113,14 +113,21 @@ type Config struct {
 // App is the zip application. It wraps *fiber.App and exposes the zip
 // handler signature alongside generic typed handlers.
 type App struct {
-	cfg         Config
-	logger      luxlog.Logger
-	loader      runtime.Loader
-	fiber       *fiber.App
-	ops         []*registeredOp
-	closers     []func() error
-	servers     []Server // the running transport listeners, set by Listen
-	srvMu       sync.Mutex
+	cfg     Config
+	logger  luxlog.Logger
+	loader  runtime.Loader
+	fiber   *fiber.App
+	ops     []*registeredOp
+	servers []Server // the running transport listeners, set by Listen
+	srvMu   sync.Mutex
+
+	// Teardown lifecycle. hooks are drained LIFO by Shutdown after
+	// in-flight requests finish; shuttingDown guards against re-running
+	// them and against post-shutdown registration. hookMu guards both.
+	hooks        []func(context.Context) error
+	shuttingDown bool
+	hookMu       sync.Mutex
+
 	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
 }
 
@@ -180,18 +187,19 @@ func (a *App) Fiber() *fiber.App { return a.fiber }
 // Logger returns the App's logger.
 func (a *App) Logger() luxlog.Logger { return a.logger }
 
-// Shutdown gracefully stops both transports.
+// Shutdown gracefully stops every transport, then runs teardown hooks.
+// The process is ending, so hooks receive context.Background() — no
+// cancellation or deadline. Use ShutdownWithContext to bound teardown.
+// Idempotent: a second call is a no-op and hooks run at most once.
 func (a *App) Shutdown() error {
-	a.closeServers()
-	_ = a.runClosers(context.Background())
-	return a.fiber.Shutdown()
+	return a.shutdown(context.Background())
 }
 
-// ShutdownWithContext gracefully stops both transports bounded by ctx.
+// ShutdownWithContext is Shutdown bounded by ctx: ctx bounds the in-flight
+// drain and is passed to every teardown hook (values and deadline).
+// Shares Shutdown's once-guard, so mixing the two still runs hooks once.
 func (a *App) ShutdownWithContext(ctx context.Context) error {
-	a.closeServers()
-	_ = a.runClosers(ctx)
-	return a.fiber.ShutdownWithContext(ctx)
+	return a.shutdown(ctx)
 }
 
 // Use registers zip-style middleware. Each Handler runs in order; calling
