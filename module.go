@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -127,10 +128,10 @@ func (a *App) ModuleFn(method, path, fn, runtimeName, modulePath string) error {
 	}
 	a.method(method, path, handler)
 
-	// Register a shutdown hook so the module's resources are released.
-	// fiber doesn't expose a graceful-shutdown hook list, so we stash the
-	// closer on the App and run them inline from Shutdown if needed.
-	a.appendCloser(mod.Close)
+	// Release the module's resources on shutdown. Runs as a teardown hook,
+	// i.e. AFTER in-flight requests drain, so a module stays live for any
+	// request still executing it.
+	a.OnShutdown(func(context.Context) error { return mod.Close() })
 	return nil
 }
 
