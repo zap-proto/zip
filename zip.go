@@ -211,6 +211,21 @@ func (a *App) Use(handlers ...Handler) Router {
 	return &routerAdapter{r: a.fiber, app: a}
 }
 
+// With returns a Router whose subsequent leaf registrations (Get/Post/…/All)
+// have mw wrapped around the handler at registration time — chi's idiom, pure
+// composition (RateLimit(CSRF(handler))). It does NOT touch the global Use
+// stack and does NOT route through c.Next(); it is the per-route counterpart to
+// Use. Routes registered on the returned Router still obey specificity
+// precedence exactly like any other route.
+//
+//	app.With(RateLimit, CSRF).Post("/v1/keys", mintKey)
+func (a *App) With(mw ...Middleware) Router {
+	return &wrapRouter{
+		inner: &routerAdapter{r: a.fiber, app: a},
+		wrap:  Chain(mw...),
+	}
+}
+
 // UseFiber lets callers register raw fiber.Handler middleware (for the
 // fiber/v3/middleware/* packages). zip middleware is preferred.
 func (a *App) UseFiber(handlers ...fiber.Handler) Router {
