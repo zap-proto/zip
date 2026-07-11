@@ -34,32 +34,15 @@ func AdaptNetHTTPFunc(h http.HandlerFunc) Handler {
 	return func(c *Ctx) error { return wrapped(c.fc) }
 }
 
-// AdaptNetHTTPMiddleware wraps a stdlib middleware (func(http.Handler) http.Handler).
+// AdaptNetHTTPMiddleware wraps a stdlib middleware (func(http.Handler) http.Handler)
+// as a zip.Handler. Register it on a wildcard route to front a foreign subtree
+// whose entry point is a net/http middleware (e.g. a gin engine bridged via
+// NoRoute) — this is THE net/http-middleware bridge:
+//
+//	app.All("/legacy/*", zip.AdaptNetHTTPMiddleware(mw))
 //
 // Migration tool — costs ~5% perf vs native Fiber.
 func AdaptNetHTTPMiddleware(mw func(http.Handler) http.Handler) Handler {
 	wrapped := adaptor.HTTPMiddleware(mw)
 	return func(c *Ctx) error { return wrapped(c.fc) }
-}
-
-// Mount serves an http.Handler over the subtree under prefix.
-//
-// Deprecated: use app.All(prefix+"/*", zip.AdaptNetHTTP(h)) — the two
-// primitives Mount is built from. Mount IS exactly that composition, kept as
-// a behaviour-identical alias so existing callers keep working; preferring
-// the explicit form leaves ONE way to put a route on the app. It also makes
-// the mounted subtree's nature plain: it is an ordinary wildcard route, so a
-// more specific static route wins even when registered later —
-// app.Get(prefix+"/health", …) beats the mount by specificity, not order.
-//
-// chi.Router, gin.Engine, and a beego HandlerWrapper are all http.Handlers,
-// so they mount the same way:
-//
-//	app.All("/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
-//	app.All("/legacy/gin/*", zip.AdaptNetHTTP(ginEngine))
-//	app.All("/legacy/iam/*", zip.AdaptNetHTTP(beegoApp.HandlerWrapper()))
-//
-// Migration tool — costs ~5% perf vs native Fiber.
-func (a *App) Mount(prefix string, h http.Handler) {
-	a.All(prefix+"/*", AdaptNetHTTP(h))
 }

@@ -20,7 +20,6 @@ type Router interface {
 	All(path string, h Handler) Router
 
 	Group(prefix string, handlers ...Handler) Router
-	Route(prefix string, fn func(r Router)) Router
 
 	// Fiber returns the underlying fiber.Router for one-off escape.
 	Fiber() fiber.Router
@@ -87,13 +86,6 @@ func (a *routerAdapter) Group(prefix string, handlers ...Handler) Router {
 	}
 	g := a.r.Group(prefix, args...)
 	return &routerAdapter{r: g, app: a.app}
-}
-
-func (a *routerAdapter) Route(prefix string, fn func(r Router)) Router {
-	g := a.r.Group(prefix)
-	r := &routerAdapter{r: g, app: a.app}
-	fn(r)
-	return r
 }
 
 func (a *routerAdapter) Fiber() fiber.Router { return a.r }
