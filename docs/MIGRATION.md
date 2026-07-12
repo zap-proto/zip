@@ -38,12 +38,12 @@ Common mappings:
 | `gin.Recovery()` | `middleware.Recover()` |
 | `gin.Logger()` | `middleware.Logger(app.Logger())` |
 
-For routes that are too complex to port today, mount the gin engine as
-a legacy adapter:
+For routes that are too complex to port today, front the gin engine as
+a legacy adapter on a wildcard route:
 
 ```go
 gin := buildExistingGinApp()
-app.Mount("/legacy/gin", gin)
+app.All("/legacy/gin/*", zip.AdaptNetHTTP(gin))
 ```
 
 ## From chi
@@ -56,7 +56,7 @@ chiRouter := chi.NewRouter()
 chiRouter.Get("/users", listUsers)
 
 app := zip.New(zip.Config{})
-app.Mount("/legacy/chi", chiRouter)
+app.All("/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
 ```
 
 Common mappings:
@@ -64,15 +64,16 @@ Common mappings:
 | chi | zip |
 |---|---|
 | `chi.NewRouter()` | `zip.New(zip.Config{})` |
-| `r.Route("/v1", fn)` | `app.Route("/v1", fn)` |
+| `r.Route("/v1", fn)` | `v1 := app.Group("/v1")` then register on `v1` |
 | `r.Group(fn)` | `app.Group("/", h1, h2)` |
 | `chi.URLParam(r, "id")` | `c.Param("id")` |
-| middleware (func(http.Handler) http.Handler) | `middleware.AdaptNetHTTPMiddleware(mw)` |
+| middleware (func(http.Handler) http.Handler) | `zip.AdaptNetHTTPMiddleware(mw)` |
 
 ## From beego
 
 beego `*web.HttpServer` exposes its handler chain via `BeeApp.Handlers`,
-which is an `http.Handler`. Mount it via `app.Mount`.
+which is an `http.Handler`. Front it on a wildcard route with
+`zip.AdaptNetHTTP`.
 
 ```go
 import "github.com/beego/beego/v2/server/web"
@@ -81,7 +82,7 @@ beeApp := web.NewHttpServer()
 // ... existing beego config
 
 app := zip.New(zip.Config{})
-app.Mount("/legacy/iam", beeApp.Handlers)
+app.All("/legacy/iam/*", zip.AdaptNetHTTP(beeApp.Handlers))
 ```
 
 Notes:
@@ -99,7 +100,7 @@ The zero-config path: any `http.Handler` works.
 existing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("hello"))
 })
-app.Mount("/legacy", existing)
+app.All("/legacy/*", zip.AdaptNetHTTP(existing))
 ```
 
 For middleware that takes `func(http.Handler) http.Handler`:
@@ -116,11 +117,11 @@ app.Use(zip.AdaptNetHTTPMiddleware(mw))
 
 ## Replacing adapters with native handlers
 
-Once a route's traffic warrants it, rewrite from `Mount` to native zip:
+Once a route's traffic warrants it, rewrite from the adapter to native zip:
 
 ```go
 // before
-app.Mount("/legacy/chi", chiRouter)
+app.All("/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
 
 // after (per-route migration)
 v1 := app.Group("/v1")
