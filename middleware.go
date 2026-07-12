@@ -48,8 +48,8 @@ func Chain(mw ...Middleware) Middleware {
 
 // wrapRouter decorates an inner Router so every leaf route it registers has its
 // Handler wrapped by a Middleware chain first (chi's With idiom). Non-leaf
-// operations delegate to the inner Router; Group and Route propagate the chain
-// so leaves registered beneath them stay wrapped. Registration still flows
+// operations delegate to the inner Router; Group propagates the chain so
+// leaves registered beneath it stay wrapped. Registration still flows
 // through the same fiber path as any other route, so specificity precedence is
 // unchanged — only the leaf handler is pre-wrapped.
 type wrapRouter struct {
@@ -70,13 +70,6 @@ func (w *wrapRouter) All(p string, h Handler) Router     { w.inner.All(p, w.wrap
 
 func (w *wrapRouter) Group(prefix string, handlers ...Handler) Router {
 	return &wrapRouter{inner: w.inner.Group(prefix, handlers...), wrap: w.wrap}
-}
-
-func (w *wrapRouter) Route(prefix string, fn func(r Router)) Router {
-	return &wrapRouter{
-		inner: w.inner.Route(prefix, func(r Router) { fn(&wrapRouter{inner: r, wrap: w.wrap}) }),
-		wrap:  w.wrap,
-	}
 }
 
 func (w *wrapRouter) Fiber() fiber.Router { return w.inner.Fiber() }

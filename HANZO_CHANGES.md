@@ -31,7 +31,7 @@ Every file from upstream has been deleted. We kept the name.
 | OpenAPI | Auto-generated at `/.well-known/openapi.json`; Swagger UI at `/docs`. |
 | Extension routes | `app.Module(method+path, runtime, dir)` — HIP-0105 surface. Loader is duck-typed (no hanzoai/base dep). |
 | Middleware | `Recover`, `Logger`, `RequestID`, `Timeout`, `MaxBody`, `CORS`, `RateLimit`, `Telemetry`. Auth + StripIdentityHeaders moved to hanzoai/gateway/middleware (HIP-0106). |
-| Adapters | `AdaptNetHTTP / AdaptNetHTTPFunc / AdaptNetHTTPMiddleware`; `app.Mount(prefix, http.Handler)`. |
+| Adapters | `AdaptNetHTTP / AdaptNetHTTPFunc / AdaptNetHTTPMiddleware`; front a foreign subtree via `app.All(prefix+"/*", zip.AdaptNetHTTP(h))`. |
 | WebSocket | `wsx.Upgrade(fn)` over fasthttp/websocket. |
 | Streaming | `c.SendStream(reader)` + `c.SendStreamWriter(fn)`. |
 | Transport | ONE verb `app.Listen(addrs...)`; the address scheme selects the transport (`:9653`=ZAP default, `http://:8080`=HTTP, any `RegisterTransport`'d proto). `app.Listen(":9653", "http://:8080")` serves both from one call. Routes ARE the surface over every transport. |

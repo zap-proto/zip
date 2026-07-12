@@ -38,29 +38,24 @@ type moduleResponse struct {
 	Body    json.RawMessage   `json:"body,omitempty"`
 }
 
-// Module mounts a single HIP-0105 extension at the given method+path.
-// The `methodPath` form is "METHOD /path" (e.g. "POST /v1/validate"),
-// matching the Sinatra/Express idiom. `runtime` selects the backing
-// engine ("wasm" | "goja" | "pyvm" | "starlark" | "v8go" | "native");
-// `modulePath` is the directory containing the extension.json manifest.
+// Module mounts a single HIP-0105 extension at the given method+path — the
+// one way to put an extension on the app. The `methodPath` form is
+// "METHOD /path" (e.g. "POST /v1/validate"), matching the Sinatra/Express
+// idiom. `runtime` selects the backing engine ("wasm" | "goja" | "pyvm" |
+// "starlark" | "v8go" | "native"); `modulePath` is the directory containing
+// the extension.json manifest.
 //
 //	app.Module("POST /v1/policy/eval", "wasm", "./extensions/policy")
 //	app.Module("POST /v1/transform",   "pyvm", "./extensions/transform")
 //	app.Module("POST /v1/webhook",     "goja", "./extensions/webhook")
 //
-// The extension's exported function name is inferred from the path's
-// last segment unless explicitly overridden via app.ModuleFn().
+// The extension's exported function name is inferred from the path's last
+// non-{param} segment, lowercased (e.g. "POST /v1/policy/eval" → "eval").
 func (a *App) Module(methodPath, runtimeName, modulePath string) error {
 	method, path, fn, err := parseModuleSpec(methodPath)
 	if err != nil {
 		return err
 	}
-	return a.ModuleFn(method, path, fn, runtimeName, modulePath)
-}
-
-// ModuleFn is the explicit form of Module — caller specifies the
-// guest's exported function name directly.
-func (a *App) ModuleFn(method, path, fn, runtimeName, modulePath string) error {
 	if a.loader == nil {
 		return fmt.Errorf("zip: app.Module requires Config.Loader to be set")
 	}

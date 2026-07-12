@@ -226,17 +226,6 @@ func (a *App) With(mw ...Middleware) Router {
 	}
 }
 
-// UseFiber lets callers register raw fiber.Handler middleware (for the
-// fiber/v3/middleware/* packages). zip middleware is preferred.
-func (a *App) UseFiber(handlers ...fiber.Handler) Router {
-	args := make([]any, 0, len(handlers))
-	for _, h := range handlers {
-		args = append(args, h)
-	}
-	a.fiber.Use(args...)
-	return &routerAdapter{r: a.fiber, app: a}
-}
-
 // Get / Post / Put / Patch / Delete / Head / Options / All / Add register routes.
 func (a *App) Get(path string, h Handler) Router    { return a.method("GET", path, h) }
 func (a *App) Post(path string, h Handler) Router   { return a.method("POST", path, h) }
@@ -259,7 +248,9 @@ func (a *App) method(method, path string, h Handler) Router {
 	return &routerAdapter{r: a.fiber, app: a}
 }
 
-// Group creates a path-prefixed router group.
+// Group creates a path-prefixed router group. The returned Router is the one
+// way to register nested routes under a prefix — register leaves and further
+// Groups directly on it; middleware scoped to the group goes on via its Use.
 func (a *App) Group(prefix string, handlers ...Handler) Router {
 	args := make([]any, 0, len(handlers))
 	for _, h := range handlers {
@@ -267,14 +258,6 @@ func (a *App) Group(prefix string, handlers ...Handler) Router {
 	}
 	g := a.fiber.Group(prefix, args...)
 	return &routerAdapter{r: g, app: a}
-}
-
-// Route runs fn against a path-prefixed router group.
-func (a *App) Route(prefix string, fn func(r Router)) Router {
-	g := a.fiber.Group(prefix)
-	r := &routerAdapter{r: g, app: a}
-	fn(r)
-	return r
 }
 
 // errors.As helper for HTTPError unwrapping in tests / external callers.

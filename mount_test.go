@@ -9,16 +9,15 @@ import (
 	"github.com/zap-proto/zip"
 )
 
-// These tests pin the composition contract behind App.Mount: a foreign
-// net/http.Handler mounts as an ordinary wildcard route via
+// These tests pin the one composition path for fronting a foreign
+// net/http.Handler: it mounts as an ordinary wildcard route via
 //
 //	app.All(prefix+"/*", zip.AdaptNetHTTP(h))
 //
-// which is exactly what the (deprecated) App.Mount does — so the two are
-// proven behaviour-identical here. The load-bearing property is specificity:
-// a static route registered AFTER the mount still wins, because the mounted
-// subtree is a normal route subject to the zap-proto/fiber fork's
-// most-specific-wins precedence — NOT a separate pre-router prefix dispatch.
+// The load-bearing property is specificity: a static route registered AFTER
+// the mount still wins, because the mounted subtree is a normal route subject
+// to the zap-proto/fiber fork's most-specific-wins precedence — NOT a separate
+// pre-router prefix dispatch.
 
 // call issues an in-memory request through fiber.Test and returns
 // (status, body). Empty body sends no request body.
@@ -106,26 +105,5 @@ func TestMount_BodyAndPathIntact(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("POST /api/echo/42?q=hi: response %q missing %q — request did not reach the handler intact", body, want)
 		}
-	}
-}
-
-// TestMount_DeprecatedAliasIdentical proves the deprecated App.Mount is a
-// behaviour-identical alias for the recommended form: it serves the subtree
-// AND yields to a later, more-specific static route exactly as All+Adapt does.
-func TestMount_DeprecatedAliasIdentical(t *testing.T) {
-	app := zip.New(zip.Config{DisableStartupMessage: true})
-
-	app.Mount("/legacy", echoHandler()) // deprecated verb, still supported
-	app.Get("/legacy/health", func(c *zip.Ctx) error {
-		return c.String(200, "static-health")
-	})
-
-	// Subtree served by the mount.
-	if status, body := call(t, app, "GET", "/legacy/foo", ""); status != 200 || !strings.Contains(body, "net/http path=/legacy/foo") {
-		t.Fatalf("GET /legacy/foo via Mount: status=%d body=%q, want the mount to serve it", status, body)
-	}
-	// Later static route still wins — identical to app.All + AdaptNetHTTP.
-	if status, body := call(t, app, "GET", "/legacy/health", ""); status != 200 || body != "static-health" {
-		t.Fatalf("GET /legacy/health via Mount: status=%d body=%q, want static to win (Mount must be identical to All+AdaptNetHTTP)", status, body)
 	}
 }
