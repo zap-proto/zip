@@ -44,49 +44,49 @@ func (a *routerAdapter) Use(handlers ...Handler) Router {
 
 func (a *routerAdapter) Get(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Get(path, h, mw...)
+	a.r.Get(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) Post(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Post(path, h, mw...)
+	a.r.Post(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) Put(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Put(path, h, mw...)
+	a.r.Put(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) Patch(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Patch(path, h, mw...)
+	a.r.Patch(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) Delete(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Delete(path, h, mw...)
+	a.r.Delete(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) Head(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Head(path, h, mw...)
+	a.r.Head(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) Options(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.Options(path, h, mw...)
+	a.r.Options(normPath(path), h, mw...)
 	return a
 }
 
 func (a *routerAdapter) All(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a.app, handlers)
-	a.r.All(path, h, mw...)
+	a.r.All(normPath(path), h, mw...)
 	return a
 }
 
@@ -107,6 +107,16 @@ func (a *routerAdapter) Fiber() fiber.Router { return a.r }
 // and Next() descends), so the chain passes through verbatim: first element,
 // then the rest. Registering a route with no handler is a programmer error
 // and panics at boot, never at request time.
+// normPath maps the empty leaf to the group root: Get("") on a Group("/x")
+// means "/x" (the gin/express idiom). fiber never matches an empty path, so
+// the normalization lives here — one place, every route method.
+func normPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
 func splitChain(app *App, handlers []Handler) (fiber.Handler, []any) {
 	if len(handlers) == 0 {
 		panic("zip: route registered with no handler")

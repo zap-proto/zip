@@ -245,13 +245,13 @@ func (a *App) Options(path string, handlers ...Handler) Router {
 // All registers a handler for any HTTP method.
 func (a *App) All(path string, handlers ...Handler) Router {
 	h, mw := splitChain(a, handlers)
-	a.fiber.All(path, h, mw...)
+	a.fiber.All(normPath(path), h, mw...)
 	return &routerAdapter{r: a.fiber, app: a}
 }
 
 func (a *App) method(method, path string, handlers []Handler) Router {
 	h, mw := splitChain(a, handlers)
-	a.fiber.Add([]string{method}, path, h, mw...)
+	a.fiber.Add([]string{method}, normPath(path), h, mw...)
 	return &routerAdapter{r: a.fiber, app: a}
 }
 
