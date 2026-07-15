@@ -44,3 +44,18 @@ func TestRouteChainGateStops(t *testing.T) {
 		t.Fatalf("status=%d reached=%v, want 401,false", resp.StatusCode, reached)
 	}
 }
+
+// TestEmptyLeafIsGroupRoot pins the gin/express idiom: Get("") on a group is
+// the group root.
+func TestEmptyLeafIsGroupRoot(t *testing.T) {
+	app := zip.New(zip.Config{DisableStartupMessage: true})
+	g := app.Group("/tm")
+	g.Get("", func(c *zip.Ctx) error { return c.NoContent(204) })
+	resp, err := app.Fiber().Test(httptest.NewRequest(http.MethodGet, "/tm", nil))
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if resp.StatusCode != 204 {
+		t.Fatalf("GET /tm = %d, want 204 (empty leaf = group root)", resp.StatusCode)
+	}
+}
