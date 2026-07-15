@@ -1,0 +1,14 @@
+# ~7-line canonical caller — all real config lives in /hanzo.yml.
+# Runs on OUR zap-proto arc scale set (never a GitHub-hosted runner).
+name: CI/CD
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+jobs:
+  cicd:
+    uses: hanzoai/ci/.github/workflows/build.yml@v1
+    with:
+      runner: '["zap-proto-build-linux-amd64"]'
+    secrets: inherit
