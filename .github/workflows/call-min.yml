@@ -1,0 +1,5 @@
+name: call-min
+on: workflow_dispatch
+jobs:
+  call:
+    uses: zap-proto/zip/.github/workflows/reuse-min.yml@main
