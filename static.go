@@ -15,8 +15,16 @@ import (
 type StaticOption func(*staticConfig)
 
 type staticConfig struct {
+	fallback    string
 	index       string // dir-request index document (e.g. "index.html"); "" disables.
 	stripPrefix string // request-path prefix to strip; "" uses the route's "*" capture.
+}
+
+// WithFallback serves name (e.g. "index.html") when the requested file does
+// not exist — the SPA deep-link idiom: client-side routes resolve to the app
+// shell instead of 404/next-route. Traversal-invalid paths still fail closed.
+func WithFallback(name string) StaticOption {
+	return func(c *staticConfig) { c.fallback = name }
 }
 
 // WithIndex serves name (e.g. "index.html") for directory and root requests.
@@ -70,6 +78,9 @@ func Static(fsys fs.FS, opts ...StaticOption) Handler {
 			return c.Next() // dir/root with no index → let a later route win
 		}
 		f, info, ok := cfg.open(fsys, name)
+		if !ok && cfg.fallback != "" && name != cfg.fallback {
+			f, info, ok = cfg.open(fsys, cfg.fallback) // SPA fallback: serve the shell
+		}
 		if !ok {
 			return c.Next() // missing → SPA catch-all / next route wins
 		}
