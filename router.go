@@ -101,20 +101,22 @@ func (a *routerAdapter) Group(prefix string, handlers ...Handler) Router {
 
 func (a *routerAdapter) Fiber() fiber.Router { return a.r }
 
-// splitChain enforces the one registration order — middleware first, the
-// final handler LAST (gin/express order) — and flips it to fiber's
-// handler-first calling convention. Registering a route with no handler is a
-// programmer error and panics at boot, never at request time.
+// splitChain adapts one registration chain — middleware first, the final
+// handler LAST (gin/express order) — to fiber's variadic signature. fiber
+// executes route handlers in ARGUMENT order (the first argument enters first
+// and Next() descends), so the chain passes through verbatim: first element,
+// then the rest. Registering a route with no handler is a programmer error
+// and panics at boot, never at request time.
 func splitChain(app *App, handlers []Handler) (fiber.Handler, []any) {
 	if len(handlers) == 0 {
 		panic("zip: route registered with no handler")
 	}
-	last := toFiberHandler(app, handlers[len(handlers)-1])
-	mw := make([]any, 0, len(handlers)-1)
-	for _, h := range handlers[:len(handlers)-1] {
-		mw = append(mw, toFiberHandler(app, h))
+	first := toFiberHandler(app, handlers[0])
+	rest := make([]any, 0, len(handlers)-1)
+	for _, h := range handlers[1:] {
+		rest = append(rest, toFiberHandler(app, h))
 	}
-	return last, mw
+	return first, rest
 }
 
 // toFiberHandler turns a zip.Handler into a fiber.Handler, materialising
