@@ -130,6 +130,69 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 	}
 }
 
+// TestHTTPTransport_ServerHeaderCoversPreRoutingErrors proves fasthttp's OWN
+// pre-routing error responses (431 on header overflow) carry the App's
+// ServerHeader and NEVER the framework default "fasthttp"/"zip". Those bytes are
+// written before any fiber middleware runs, so ProductionHeaders cannot brand
+// them — the transport must. A REAL socket; Fiber().Test() cannot observe this
+// path (which is exactly how the leak hid from the in-memory suite).
+func TestHTTPTransport_ServerHeaderCoversPreRoutingErrors(t *testing.T) {
+	// 9 KiB header overflows fasthttp's default 4 KiB read buffer -> 431, emitted
+	// before routing.
+	req := "GET /v1/health HTTP/1.1\r\nHost: api.lux.network\r\nX-Big: " +
+		strings.Repeat("A", 9000) + "\r\nConnection: close\r\n\r\n"
+
+	// Branded: the pre-routing 431 carries Server: <brand>, never the framework.
+	brand := zip.New(zip.Config{AppName: "brand", DisableStartupMessage: true, ServerHeader: "hanzo"})
+	brand.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	const brandAddr = "127.0.0.1:19703"
+	go func() { _ = brand.Listen("http://" + brandAddr) }()
+	defer func() { _ = brand.Shutdown() }()
+	waitDialable(t, brandAddr)
+	resp := rawHTTPResponse(t, brandAddr, req)
+	if !strings.HasPrefix(resp, "HTTP/1.1 431") {
+		t.Fatalf("want a 431 pre-routing error, got:\n%s", resp)
+	}
+	low := strings.ToLower(resp)
+	for _, bad := range []string{"server: fasthttp", "server: zip", "server: fiber"} {
+		if strings.Contains(low, bad) {
+			t.Errorf("pre-routing 431 leaked framework name %q:\n%s", bad, resp)
+		}
+	}
+	if !strings.Contains(low, "server: hanzo") {
+		t.Errorf("pre-routing 431 missing Server: hanzo:\n%s", resp)
+	}
+
+	// Suppressed: ServerHeader "-" emits NO Server header on the pre-routing error.
+	quiet := zip.New(zip.Config{AppName: "quiet", DisableStartupMessage: true, ServerHeader: "-"})
+	quiet.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	const quietAddr = "127.0.0.1:19704"
+	go func() { _ = quiet.Listen("http://" + quietAddr) }()
+	defer func() { _ = quiet.Shutdown() }()
+	waitDialable(t, quietAddr)
+	if low := strings.ToLower(rawHTTPResponse(t, quietAddr, req)); strings.Contains(low, "server:") {
+		t.Errorf(`ServerHeader "-" still emitted a Server header on the pre-routing error:\n%s`, low)
+	}
+}
+
+// rawHTTPResponse writes rawRequest verbatim and returns the FULL raw response
+// (status line + headers + body) so a test can inspect response headers the
+// status code alone hides. Relies on Connection: close so the read ends at EOF.
+func rawHTTPResponse(t *testing.T, addr, rawRequest string) string {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.WriteString(c, rawRequest); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	b, _ := io.ReadAll(c)
+	return string(b)
+}
+
 // rawHTTPStatus opens a raw TCP conn, writes rawRequest verbatim (so the test
 // controls exact header bytes, unlike a buffered client), and returns the
 // response status code from the status line.
