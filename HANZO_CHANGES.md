@@ -25,12 +25,13 @@ Every file from upstream has been deleted. We kept the name.
 | Area | Implementation |
 |---|---|
 | Core | `*fiber.App` under the hood; `zip.App` is the public type. |
-| Ctx | `fiber.Ctx` interface wrapped + `Org/User/UserEmail/IsAdmin/RequestID` accessors. |
+| Ctx | `fiber.Ctx` interface wrapped + `Org/User/UserEmail/IsAdmin/RequestID/Host` accessors. |
 | Typed handlers | Generic `zip.Get[In, Out](app, path, fn)` etc. with reflection-build OpenAPI 3.1. |
 | Validation | ~120 LOC reflection: `required`, `min/max`, `minlen/maxlen` struct tags. |
 | OpenAPI | Auto-generated at `/.well-known/openapi.json`; Swagger UI at `/docs`. |
 | Extension routes | `app.Module(method+path, runtime, dir)` — HIP-0105 surface. Loader is duck-typed (no hanzoai/base dep). |
-| Middleware | `Recover`, `Logger`, `RequestID`, `Timeout`, `MaxBody`, `CORS`, `RateLimit`, `Telemetry`. Auth + StripIdentityHeaders moved to hanzoai/gateway/middleware (HIP-0106). |
+| Middleware | `Recover`, `Logger`, `RequestID`, `Timeout`, `MaxBody`, `CORS`, `RateLimit`, `Telemetry`, `ProductionHeaders`. Auth + StripIdentityHeaders moved to hanzoai/gateway/middleware (HIP-0106). |
+| Production headers | `ProductionHeaders(cfg)` stamps the Stripe/CF/GitHub-grade posture on every response (success/error/404): `Server` = white-label brand by Host (injected `Brand func(host) string`, never the framework name), `X-Api-Version` (brand-neutral), `X-Content-Type-Options: nosniff`, and `Strict-Transport-Security` when `HSTS`. X-Request-Id stays owned by `RequestID`. Never emits X-Powered-By or any framework/version string. |
 | Adapters | `AdaptNetHTTP / AdaptNetHTTPFunc / AdaptNetHTTPMiddleware`; front a foreign subtree via `app.All(prefix+"/*", zip.AdaptNetHTTP(h))`. |
 | WebSocket | `wsx.Upgrade(fn)` over fasthttp/websocket. |
 | Streaming | `c.SendStream(reader)` + `c.SendStreamWriter(fn)`. |
