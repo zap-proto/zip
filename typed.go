@@ -82,9 +82,13 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 		o(op)
 	}
 
-	// The transport-agnostic core: decode raw JSON args → In, validate, run fn,
-	// return Out (or a literal nil for a void result). REST and MCP both call
-	// THIS — one handler, many projections. A nil *Out becomes a nil `any`.
+	// The op's stable identity, resolved once (after opts) and handed to the
+	// authorizer on every invoke — REST and MCP alike.
+	meta := Op{Method: op.Method, Path: op.Path, OperationID: opName(op)}
+
+	// The transport-agnostic core: decode raw JSON args → In, validate, authorize,
+	// run fn, return Out (or a literal nil for a void result). REST and MCP both
+	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
 	op.invoke = func(ctx context.Context, rawIn []byte) (any, error) {
 		var in In
 		if len(rawIn) > 0 {
@@ -94,6 +98,13 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 		}
 		if err := validate(&in); err != nil {
 			return nil, ErrBadRequest(err.Error())
+		}
+		// Authorize the DECODED input — the exact value the handler will bind — so
+		// the decision cannot diverge from execution. Runs for REST and MCP alike.
+		if auth := app.authorizer; auth != nil {
+			if err := auth(ctx, meta, &in); err != nil {
+				return nil, err
+			}
 		}
 		out, err := fn(ctx, &in)
 		if err != nil {

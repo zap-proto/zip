@@ -119,7 +119,13 @@ type App struct {
 	fiber   *fiber.App
 	ops     []*registeredOp
 	servers []Server // the running transport listeners, set by Listen
-	srvMu   sync.Mutex
+
+	// authorizer, when set via Authorize, runs at every typed op's invoke seam
+	// on the decoded In — the one place REST and MCP both funnel the value the
+	// handler will act on. nil leaves every decoded request unauthorized.
+	authorizer Authorizer
+
+	srvMu sync.Mutex
 
 	// Teardown lifecycle. hooks are drained LIFO by Shutdown after
 	// in-flight requests finish; shuttingDown guards against re-running
