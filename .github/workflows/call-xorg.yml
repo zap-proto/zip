@@ -1,0 +1,5 @@
+name: call-xorg
+on: workflow_dispatch
+jobs:
+  call:
+    uses: hanzoai/ci/.github/workflows/min.yml@main
