@@ -177,4 +177,22 @@ func (h *httpServer) applyConfig(cfg Config) {
 	if cfg.Concurrency > 0 {
 		h.srv.Concurrency = cfg.Concurrency
 	}
+	// The transport's OWN pre-routing responses — 431 (header overflow), 400
+	// (parse error), request timeouts — are written by fasthttp BEFORE the fiber
+	// handler runs, so no middleware (including ProductionHeaders) can brand
+	// them. Left unset, fasthttp stamps its framework default "Server: fasthttp"
+	// — a stack leak on exactly the malformed-request path an attacker probes.
+	// Propagate the App's ServerHeader onto the transport server so those
+	// responses carry the same value as the handled ones; "-" suppresses the
+	// header entirely (NoDefaultServerHeader), matching New()'s suppress semantic.
+	switch cfg.ServerHeader {
+	case "-":
+		h.srv.NoDefaultServerHeader = true
+	case "":
+		// Unreachable via New (which defaults to "zip"), but a direct transport
+		// caller with no ServerHeader still must not leak "fasthttp".
+		h.srv.NoDefaultServerHeader = true
+	default:
+		h.srv.Name = cfg.ServerHeader
+	}
 }
