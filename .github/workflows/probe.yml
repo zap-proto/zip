@@ -1,7 +1,0 @@
-name: probe
-on: workflow_dispatch
-jobs:
-  probe:
-    runs-on: zap-proto-build-linux-amd64
-    steps:
-      - run: echo "our runner works"

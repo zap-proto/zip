@@ -9,4 +9,7 @@ on:
   pull_request:
 jobs:
   cicd:
-    uses: hanzoai/ci/.github/workflows/build.yml@main
+    uses: hanzoai/ci/.github/workflows/build.yml@v1
+    with:
+      runner: '["zap-proto-build-linux-amd64"]'
+    secrets: inherit
