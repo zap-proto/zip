@@ -222,3 +222,10 @@ func errorHandler(c fiber.Ctx, err error) error {
 func (c *Ctx) Redirect(code int, location string) error {
 	return c.fc.Redirect().Status(code).To(location)
 }
+
+// SetContext replaces the request's context.Context — the boundary idiom: a
+// middleware derives a request-scoped context (values, gates, deadlines) ONCE
+// and every later c.Context() returns it. One context per request, one setter.
+func (c *Ctx) SetContext(ctx context.Context) {
+	c.fc.SetContext(ctx)
+}
