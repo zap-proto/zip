@@ -59,14 +59,50 @@ type wrapRouter struct {
 
 func (w *wrapRouter) Use(handlers ...Handler) Router { w.inner.Use(handlers...); return w }
 
-func (w *wrapRouter) Get(p string, h Handler) Router     { w.inner.Get(p, w.wrap(h)); return w }
-func (w *wrapRouter) Post(p string, h Handler) Router    { w.inner.Post(p, w.wrap(h)); return w }
-func (w *wrapRouter) Put(p string, h Handler) Router     { w.inner.Put(p, w.wrap(h)); return w }
-func (w *wrapRouter) Patch(p string, h Handler) Router   { w.inner.Patch(p, w.wrap(h)); return w }
-func (w *wrapRouter) Delete(p string, h Handler) Router  { w.inner.Delete(p, w.wrap(h)); return w }
-func (w *wrapRouter) Head(p string, h Handler) Router    { w.inner.Head(p, w.wrap(h)); return w }
-func (w *wrapRouter) Options(p string, h Handler) Router { w.inner.Options(p, w.wrap(h)); return w }
-func (w *wrapRouter) All(p string, h Handler) Router     { w.inner.All(p, w.wrap(h)); return w }
+func (w *wrapRouter) Get(p string, hs ...Handler) Router {
+	w.inner.Get(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) Post(p string, hs ...Handler) Router {
+	w.inner.Post(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) Put(p string, hs ...Handler) Router {
+	w.inner.Put(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) Patch(p string, hs ...Handler) Router {
+	w.inner.Patch(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) Delete(p string, hs ...Handler) Router {
+	w.inner.Delete(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) Head(p string, hs ...Handler) Router {
+	w.inner.Head(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) Options(p string, hs ...Handler) Router {
+	w.inner.Options(p, w.wrapChain(hs)...)
+	return w
+}
+func (w *wrapRouter) All(p string, hs ...Handler) Router {
+	w.inner.All(p, w.wrapChain(hs)...)
+	return w
+}
+
+// wrapChain wraps the FINAL handler (the terminal) with w.wrap and passes any
+// preceding middleware through untouched — With() composes around the leaf,
+// never around the chain's middleware.
+func (w *wrapRouter) wrapChain(hs []Handler) []Handler {
+	if len(hs) == 0 {
+		return hs
+	}
+	out := append([]Handler(nil), hs...)
+	out[len(out)-1] = w.wrap(out[len(out)-1])
+	return out
+}
 
 func (w *wrapRouter) Group(prefix string, handlers ...Handler) Router {
 	return &wrapRouter{inner: w.inner.Group(prefix, handlers...), wrap: w.wrap}

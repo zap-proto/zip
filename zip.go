@@ -226,25 +226,32 @@ func (a *App) With(mw ...Middleware) Router {
 	}
 }
 
-// Get / Post / Put / Patch / Delete / Head / Options / All / Add register routes.
-func (a *App) Get(path string, h Handler) Router    { return a.method("GET", path, h) }
-func (a *App) Post(path string, h Handler) Router   { return a.method("POST", path, h) }
-func (a *App) Put(path string, h Handler) Router    { return a.method("PUT", path, h) }
-func (a *App) Patch(path string, h Handler) Router  { return a.method("PATCH", path, h) }
-func (a *App) Delete(path string, h Handler) Router { return a.method("DELETE", path, h) }
-func (a *App) Head(path string, h Handler) Router   { return a.method("HEAD", path, h) }
-func (a *App) Options(path string, h Handler) Router {
-	return a.method("OPTIONS", path, h)
+// Get / Post / Put / Patch / Delete / Head / Options / All register routes.
+// Chains are gin/express order: middleware first, the final handler last.
+func (a *App) Get(path string, handlers ...Handler) Router  { return a.method("GET", path, handlers) }
+func (a *App) Post(path string, handlers ...Handler) Router { return a.method("POST", path, handlers) }
+func (a *App) Put(path string, handlers ...Handler) Router  { return a.method("PUT", path, handlers) }
+func (a *App) Patch(path string, handlers ...Handler) Router {
+	return a.method("PATCH", path, handlers)
+}
+func (a *App) Delete(path string, handlers ...Handler) Router {
+	return a.method("DELETE", path, handlers)
+}
+func (a *App) Head(path string, handlers ...Handler) Router { return a.method("HEAD", path, handlers) }
+func (a *App) Options(path string, handlers ...Handler) Router {
+	return a.method("OPTIONS", path, handlers)
 }
 
 // All registers a handler for any HTTP method.
-func (a *App) All(path string, h Handler) Router {
-	a.fiber.All(path, toFiberHandler(a, h))
+func (a *App) All(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a, handlers)
+	a.fiber.All(path, h, mw...)
 	return &routerAdapter{r: a.fiber, app: a}
 }
 
-func (a *App) method(method, path string, h Handler) Router {
-	a.fiber.Add([]string{method}, path, toFiberHandler(a, h))
+func (a *App) method(method, path string, handlers []Handler) Router {
+	h, mw := splitChain(a, handlers)
+	a.fiber.Add([]string{method}, path, h, mw...)
 	return &routerAdapter{r: a.fiber, app: a}
 }
 

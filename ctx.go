@@ -6,8 +6,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/zap-proto/fiber/v3"
 	luxlog "github.com/luxfi/log"
+	"github.com/zap-proto/fiber/v3"
 )
 
 // Ctx wraps fiber.Ctx and adds the Hanzo identity surface (Org/User/Email
@@ -211,4 +211,9 @@ func errorHandler(c fiber.Ctx, err error) error {
 	}
 	c.Status(500)
 	return c.JSON(&HTTPError{Status: 500, Msg: err.Error()})
+}
+
+// Redirect sends an HTTP redirect to location with the given status code.
+func (c *Ctx) Redirect(code int, location string) error {
+	return c.fc.Redirect().Status(code).To(location)
 }

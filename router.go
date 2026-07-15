@@ -10,14 +10,17 @@ import (
 type Router interface {
 	Use(handlers ...Handler) Router
 
-	Get(path string, h Handler) Router
-	Post(path string, h Handler) Router
-	Put(path string, h Handler) Router
-	Patch(path string, h Handler) Router
-	Delete(path string, h Handler) Router
-	Head(path string, h Handler) Router
-	Options(path string, h Handler) Router
-	All(path string, h Handler) Router
+	// Route registration takes ONE chain in gin/express order: zero or more
+	// middleware first, the final handler LAST. fiber wants handler-first;
+	// splitChain flips it in exactly one place.
+	Get(path string, handlers ...Handler) Router
+	Post(path string, handlers ...Handler) Router
+	Put(path string, handlers ...Handler) Router
+	Patch(path string, handlers ...Handler) Router
+	Delete(path string, handlers ...Handler) Router
+	Head(path string, handlers ...Handler) Router
+	Options(path string, handlers ...Handler) Router
+	All(path string, handlers ...Handler) Router
 
 	Group(prefix string, handlers ...Handler) Router
 
@@ -39,43 +42,51 @@ func (a *routerAdapter) Use(handlers ...Handler) Router {
 	return a
 }
 
-func (a *routerAdapter) Get(path string, h Handler) Router {
-	a.r.Get(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Get(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Get(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) Post(path string, h Handler) Router {
-	a.r.Post(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Post(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Post(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) Put(path string, h Handler) Router {
-	a.r.Put(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Put(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Put(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) Patch(path string, h Handler) Router {
-	a.r.Patch(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Patch(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Patch(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) Delete(path string, h Handler) Router {
-	a.r.Delete(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Delete(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Delete(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) Head(path string, h Handler) Router {
-	a.r.Head(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Head(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Head(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) Options(path string, h Handler) Router {
-	a.r.Options(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) Options(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.Options(path, h, mw...)
 	return a
 }
 
-func (a *routerAdapter) All(path string, h Handler) Router {
-	a.r.All(path, toFiberHandler(a.app, h))
+func (a *routerAdapter) All(path string, handlers ...Handler) Router {
+	h, mw := splitChain(a.app, handlers)
+	a.r.All(path, h, mw...)
 	return a
 }
 
@@ -89,6 +100,22 @@ func (a *routerAdapter) Group(prefix string, handlers ...Handler) Router {
 }
 
 func (a *routerAdapter) Fiber() fiber.Router { return a.r }
+
+// splitChain enforces the one registration order — middleware first, the
+// final handler LAST (gin/express order) — and flips it to fiber's
+// handler-first calling convention. Registering a route with no handler is a
+// programmer error and panics at boot, never at request time.
+func splitChain(app *App, handlers []Handler) (fiber.Handler, []any) {
+	if len(handlers) == 0 {
+		panic("zip: route registered with no handler")
+	}
+	last := toFiberHandler(app, handlers[len(handlers)-1])
+	mw := make([]any, 0, len(handlers)-1)
+	for _, h := range handlers[:len(handlers)-1] {
+		mw = append(mw, toFiberHandler(app, h))
+	}
+	return last, mw
+}
 
 // toFiberHandler turns a zip.Handler into a fiber.Handler, materialising
 // the per-request *Ctx and forwarding errors to fiber's error chain (which
