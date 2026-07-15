@@ -1,5 +1,0 @@
-name: call-xorg3
-on: workflow_dispatch
-jobs:
-  call:
-    uses: hanzoai/ci/.github/workflows/min3.yml@main
