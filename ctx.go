@@ -71,6 +71,11 @@ func (c *Ctx) Query(name string) string { return c.fc.Query(name) }
 // Header returns a request header.
 func (c *Ctx) Header(name string) string { return c.fc.Get(name) }
 
+// Host returns the request Host (authority) — the value of the X-Forwarded-Host
+// or Host header, port included when present. Used for white-label brand-by-host
+// resolution (see middleware.ProductionHeaders).
+func (c *Ctx) Host() string { return c.fc.Host() }
+
 // SetHeader sets a response header.
 func (c *Ctx) SetHeader(name, value string) { c.fc.Set(name, value) }
 
