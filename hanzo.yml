@@ -1,0 +1,12 @@
+# Canonical CI config for zap-proto/zip — read by the hanzoai/ci reusable
+# (.github/workflows/cicd.yml). zip is a LIBRARY: no images, no deploy — CI's
+# whole job is proving the framework contract on every push, on OUR arc pool.
+test:
+  - name: go-vet
+    run: go vet ./...
+  - name: go-test
+    # The full suite includes the load-bearing contract pins: route-chain
+    # ORDER (middleware-first/handler-last — an inversion here silently breaks
+    # every auth gate in every app built on zip), the no-Next abort, empty-leaf
+    # group roots, static fallback, and the zaprpc/runtime/middleware packages.
+    run: go test -count=1 -timeout 10m ./...
