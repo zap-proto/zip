@@ -1,0 +1,5 @@
+name: call-x7
+on: workflow_dispatch
+jobs:
+  call:
+    uses: hanzoai/ci/.github/workflows/min7.yml@main

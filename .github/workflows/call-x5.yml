@@ -1,0 +1,5 @@
+name: call-x5
+on: workflow_dispatch
+jobs:
+  call:
+    uses: hanzoai/ci/.github/workflows/min5.yml@main
