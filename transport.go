@@ -32,10 +32,22 @@ type Server interface {
 	Close() error
 }
 
-// TransportFunc builds a Server that serves handler on addr. Register one per
-// address scheme with RegisterTransport — that is the ONLY extension point;
-// the Listen API never changes as protocols are added.
-type TransportFunc func(addr string, handler fasthttp.RequestHandler) Server
+// Client is the call side of a transport: anything that can complete a
+// request. *zaphttp.Transport and *fasthttp.HostClient already satisfy it, so
+// giving a scheme a Dial is a one-liner.
+type Client interface {
+	Do(req *fasthttp.Request, resp *fasthttp.Response) error
+}
+
+// Transport is one address scheme in both directions: Serve terminates bytes
+// arriving here, Dial originates bytes going there. They are the same concept
+// — a wire — so they live in one value rather than two registries that drift.
+// A scheme may leave either half nil; Listen and Mount each say which they
+// needed.
+type Transport struct {
+	Serve func(addr string, handler fasthttp.RequestHandler) Server
+	Dial  func(addr string) Client
+}
 
 // DefaultScheme is the transport a bare address (no "scheme://") uses. ZAP is
 // the primary transport (TLS 1.3 + post-quantum, gRPC's replacement), so the
@@ -44,27 +56,48 @@ const DefaultScheme = "zap"
 
 var (
 	transportsMu sync.RWMutex
-	transports   = map[string]TransportFunc{
-		"zap": func(addr string, h fasthttp.RequestHandler) Server {
-			return &zaphttp.Server{Addr: addr, Handler: h}
+	transports   = map[string]Transport{
+		"zap": {
+			Serve: func(addr string, h fasthttp.RequestHandler) Server {
+				return &zaphttp.Server{Addr: addr, Handler: h}
+			},
+			Dial: func(addr string) Client { return zaphttp.NewTransport(addr) },
 		},
-		"http": func(addr string, h fasthttp.RequestHandler) Server {
-			return &httpServer{addr: addr, srv: &fasthttp.Server{Handler: h}}
+		"http": {
+			Serve: func(addr string, h fasthttp.RequestHandler) Server {
+				return &httpServer{addr: addr, srv: &fasthttp.Server{Handler: h}}
+			},
+			Dial: func(addr string) Client { return &fasthttp.HostClient{Addr: addr} },
 		},
 	}
 )
 
 // RegisterTransport adds (or replaces) a transport keyed by address scheme, so
-// any future termination/serialization protocol slots in with ZERO change to
-// the Listen API. Call before Listen.
+// any future protocol slots into both Listen and Mount with ZERO change to
+// either API. Call before Listen or Mount.
 //
-//	zip.RegisterTransport("quic", func(addr string, h fasthttp.RequestHandler) zip.Server {
-//		return myquic.NewServer(addr, h)
+//	zip.RegisterTransport("quic", zip.Transport{
+//		Serve: func(addr string, h fasthttp.RequestHandler) zip.Server {
+//			return myquic.NewServer(addr, h)
+//		},
+//		Dial: func(addr string) zip.Client { return myquic.NewClient(addr) },
 //	})
-func RegisterTransport(scheme string, tf TransportFunc) {
+func RegisterTransport(scheme string, t Transport) {
 	transportsMu.Lock()
 	defer transportsMu.Unlock()
-	transports[scheme] = tf
+	transports[scheme] = t
+}
+
+// transportFor resolves a raw address to its scheme, bare address, and wire.
+func transportFor(raw string) (scheme, addr string, t Transport, err error) {
+	scheme, addr = splitScheme(raw)
+	transportsMu.RLock()
+	t, ok := transports[scheme]
+	transportsMu.RUnlock()
+	if !ok {
+		return scheme, addr, t, fmt.Errorf("zip: no transport registered for scheme %q (address %q)", scheme, raw)
+	}
+	return scheme, addr, t, nil
 }
 
 // prepare installs the deferred projections (OpenAPI doc + MCP tool surface)
@@ -90,14 +123,14 @@ func (a *App) Listen(addrs ...string) error {
 
 	servers := make([]Server, 0, len(addrs))
 	for _, raw := range addrs {
-		scheme, addr := splitScheme(raw)
-		transportsMu.RLock()
-		tf, ok := transports[scheme]
-		transportsMu.RUnlock()
-		if !ok {
-			return fmt.Errorf("zip: no transport registered for scheme %q (address %q)", scheme, raw)
+		scheme, addr, t, err := transportFor(raw)
+		if err != nil {
+			return err
 		}
-		s := tf(addr, h)
+		if t.Serve == nil {
+			return fmt.Errorf("zip: transport %q cannot serve (dial-only)", scheme)
+		}
+		s := t.Serve(addr, h)
 		// Push the App's per-conn wire tuning (ReadBufferSize / WriteBufferSize /
 		// Concurrency) into the transport's fasthttp.Server. Without this the
 		// built-in HTTP transport constructs a bare fasthttp.Server whose
@@ -124,6 +157,52 @@ func (a *App) Listen(addrs ...string) error {
 		go func(s Server) { errc <- s.ListenAndServe() }(s)
 	}
 	return <-errc
+}
+
+// Mount delegates every request under prefix to the service at addr. Listen
+// serves here; Mount delegates there — one registry, one scheme vocabulary,
+// opposite directions. A bare address uses ZAP (DefaultScheme), so a
+// colocated service is mounted by address alone:
+//
+//	app.Mount("/v1/billing", "billing.hanzo.svc:9653")      // ZAP
+//	app.Mount("/v1/legacy",  "http://legacy.internal:8080") // HTTP
+//
+// The mounted service keeps the whole path — /v1/billing/invoices arrives as
+// /v1/billing/invoices — so its routes ARE the surface, exactly as they are
+// when it is linked in. Nothing is re-encoded in between: the inbound
+// fasthttp request object is handed to the client and the reply is written
+// straight back, so a mount costs a connection, not a copy.
+//
+// This is how a service ships as its own binary. The mounting binary links
+// zip and a transport, never the mounted service's dependency graph, so its
+// link time does not grow when that service does, and the service redeploys
+// without relinking it. Moving a service between Mount and a linked-in route
+// tree is a deployment decision, not a code change.
+func (a *App) Mount(prefix, addr string) error {
+	scheme, hostport, t, err := transportFor(addr)
+	if err != nil {
+		return err
+	}
+	if t.Dial == nil {
+		return fmt.Errorf("zip: transport %q cannot dial (serve-only)", scheme)
+	}
+	client := t.Dial(hostport)
+	a.logger.Info("zip mounting", "prefix", prefix, "transport", scheme, "addr", hostport)
+
+	h := func(c *Ctx) error {
+		req, resp := c.fc.Request(), c.fc.Response()
+		req.SetHost(hostport)
+		if err := client.Do(req, resp); err != nil {
+			// The upstream, not this hop, is what failed.
+			return Errorf(502, "mount %s: %v", prefix, err)
+		}
+		return nil
+	}
+
+	prefix = strings.TrimSuffix(normPath(prefix), "/")
+	a.All(prefix, h)
+	a.All(prefix+"/*", h)
+	return nil
 }
 
 // closeServers stops every running listener. Called from Shutdown.
