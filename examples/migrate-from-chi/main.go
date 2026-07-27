@@ -38,7 +38,7 @@ func main() {
 	// migration — one adapted wildcard route. Replace one path at a time
 	// with native zip handlers; a native route added later wins by
 	// specificity, no un-mount step needed.
-	app.All("/legacy/chi/*", zip.AdaptNetHTTP(legacyHandler{}))
+	app.Group("/legacy/chi").All("/*", zip.AdaptNetHTTP(legacyHandler{}))
 
 	log.Fatal(app.Listen("http://:8080"))
 }

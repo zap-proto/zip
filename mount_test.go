@@ -12,7 +12,7 @@ import (
 // These tests pin the one composition path for fronting a foreign
 // net/http.Handler: it mounts as an ordinary wildcard route via
 //
-//	app.All(prefix+"/*", zip.AdaptNetHTTP(h))
+//	app.Group(prefix).All("/*", zip.AdaptNetHTTP(h))
 //
 // The load-bearing property is specificity: a static route registered AFTER
 // the mount still wins, because the mounted subtree is a normal route subject

@@ -11,7 +11,7 @@
 //
 //	beeApp := web.NewHttpSever()  // your existing beego app
 //	zipApp := zip.New(zip.Config{AppName: "iam"})
-//	zipApp.All("/legacy/iam/*", zip.AdaptNetHTTP(beeApp.Handlers))
+//	zipApp.Group("/legacy/iam").All("/*", zip.AdaptNetHTTP(beeApp.Handlers))
 //
 // This example uses a stand-in http.Handler so the file builds without
 // pulling beego — same adapter pattern in either case.
@@ -40,7 +40,7 @@ func main() {
 	})
 
 	// Legacy beego app under /legacy/iam — one adapted wildcard route:
-	app.All("/legacy/iam/*", zip.AdaptNetHTTP(beegoStub{}))
+	app.Group("/legacy/iam").All("/*", zip.AdaptNetHTTP(beegoStub{}))
 
 	log.Fatal(app.Listen("http://:8080"))
 }
