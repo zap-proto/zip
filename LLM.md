@@ -4,10 +4,11 @@
 on. Built on the `zap-proto/fiber` fork over fasthttp. ZAP is the primary
 transport; HTTP is a secondary view of the same routes.
 
-**Canonical checkout: `~/work/zap/zip`.** Two impostors exist:
-`~/work/hanzo/zap-zip` is a stale duplicate clone of this same module, and
-`~/work/hanzo/zip` is `github.com/hanzoai/zip`, a dead fork. Nothing should
-import the fork; nothing should be edited in the duplicate.
+**Canonical checkout: `~/work/zap/zip`.** Both impostors are retired.
+`~/work/hanzo/zap-zip` was a stale duplicate clone of this same module and has
+been deleted; every ref it held is on `origin`, so `git clone` restores it if
+anyone ever needs it. `~/work/hanzo/zip` is `github.com/hanzoai/zip`, a dead
+fork, now carrying a `DEPRECATED.md` pointing here — nothing should import it.
 
 ## The four verbs
 
