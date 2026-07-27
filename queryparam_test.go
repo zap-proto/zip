@@ -21,12 +21,12 @@ func stringReader(s string) io.Reader { return strings.NewReader(s) }
 // searchIn exercises every kind the URL binder converts, plus a body-only
 // field, plus a path param that shares its name with a query key.
 type searchIn struct {
-	Owner   string  `json:"owner"` // path param on the member route
-	Q       string  `json:"q"`
-	Limit   int     `json:"limit"`
-	Offset  uint32  `json:"offset"`
-	Score   float64 `json:"score"`
-	Debug   bool    `json:"debug"`
+	Owner   string   `json:"owner"` // path param on the member route
+	Q       string   `json:"q"`
+	Limit   int      `json:"limit"`
+	Offset  uint32   `json:"offset"`
+	Score   float64  `json:"score"`
+	Debug   bool     `json:"debug"`
 	Ignored []string `json:"ignored"` // not a scalar: never URL-bound
 }
 

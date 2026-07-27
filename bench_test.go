@@ -42,9 +42,9 @@ import (
 // zipTaxRoutes covers the routing shapes a wrapper tax should be constant
 // across: a static route and a single-param route.
 var zipTaxRoutes = []struct {
-	name   string
-	route  string // registration pattern
-	path   string // concrete request path
+	name  string
+	route string // registration pattern
+	path  string // concrete request path
 }{
 	{"static", "/v1/health", "/v1/health"},
 	{"param", "/v1/tracker/:id", "/v1/tracker/trk_abc123"},

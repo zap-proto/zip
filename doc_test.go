@@ -46,11 +46,11 @@ func TestDoc_ReachesTheSpec(t *testing.T) {
 	got := string(raw)
 
 	for _, want := range []string{
-		`newest first`,                       // description
-		`Maximum invoices to return.`,        // In field doc
-		`Invoice ids, newest first.`,         // Out field doc
-		`"limit":25`,                         // request example
-		`"invoices":["inv_2","inv_1"]`,       // response example
+		`newest first`,                 // description
+		`Maximum invoices to return.`,  // In field doc
+		`Invoice ids, newest first.`,   // Out field doc
+		`"limit":25`,                   // request example
+		`"invoices":["inv_2","inv_1"]`, // response example
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("spec is missing %q", want)

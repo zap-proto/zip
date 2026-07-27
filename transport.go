@@ -70,10 +70,29 @@ var (
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
 				return &httpServer{addr: addr, srv: &fasthttp.Server{Handler: h}}
 			},
-			Dial: func(addr string) Client { return &fasthttp.HostClient{Addr: addr} },
+			Dial: func(addr string) Client { return &fasthttp.HostClient{Addr: withPort(addr, "80")} },
+		},
+		// Dial-only: terminating TLS is the ingress's job, so nothing in the
+		// fleet serves https directly — but reaching something that does (an
+		// api.* host, a third party) is an ordinary Mount, and a CLI talking to
+		// a published API is the same call. One registry entry, both directions
+		// covered by the half that exists.
+		"https": {
+			Dial: func(addr string) Client {
+				return &fasthttp.HostClient{Addr: withPort(addr, "443"), IsTLS: true}
+			},
 		},
 	}
 )
+
+// withPort defaults the port of a tcp address, because a URL usually omits it
+// and a dialer never can. A unix path is returned untouched.
+func withPort(addr, port string) string {
+	if networkOf(addr) == "unix" || strings.LastIndex(addr, ":") > strings.LastIndex(addr, "]") {
+		return addr
+	}
+	return addr + ":" + port
+}
 
 // RegisterTransport adds (or replaces) a transport keyed by address scheme, so
 // any future protocol slots into both Listen and Mount with ZERO change to

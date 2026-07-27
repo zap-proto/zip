@@ -116,10 +116,7 @@ func bindURL(in any, values map[string]string) {
 		if !fv.CanSet() {
 			continue
 		}
-		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-		if name == "" {
-			name = f.Name
-		}
+		name := jsonFieldName(f)
 		for k, val := range values {
 			if strings.EqualFold(k, name) {
 				setScalar(fv, val)
