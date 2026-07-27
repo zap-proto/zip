@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -389,6 +390,41 @@ func TestLoad_MultiplePrefixes(t *testing.T) {
 	status, body := call(t, app, "GET", "/v1/other/anything", "")
 	if status != 200 || !strings.Contains(body, `"echo":"/v1/other/anything"`) {
 		t.Fatalf("/v1/other/anything: status=%d body=%q — the second prefix did not reach the plugin", status, body)
+	}
+
+	// And the status report must name BOTH. Reporting only the first understates
+	// what goes dark when this plugin does, which is the one question a fleet
+	// view exists to answer.
+	got := app.Plugins()
+	if len(got) != 1 {
+		t.Fatalf("Plugins() returned %d, want 1", len(got))
+	}
+	if want := []string{"/v1/demo", "/v1/other"}; !slices.Equal(got[0].Prefixes, want) {
+		t.Fatalf("Prefixes = %v, want %v", got[0].Prefixes, want)
+	}
+	if got[0].Prefix != "/v1/demo" {
+		t.Fatalf("Prefix = %q, want the first prefix", got[0].Prefix)
+	}
+}
+
+// TestPlugins_RemotePrefixes proves the same for a plugin this host did NOT
+// start: an Addr mount records every subtree it answers, so a fleet view of a
+// split deploy reports the whole reachable surface rather than one prefix of it.
+func TestPlugins_RemotePrefixes(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(
+		zip.Plugin{Name: "remote", Addr: "127.0.0.1:1"}, "/v1/remote", "/v1/legacy",
+	)); err != nil {
+		t.Fatalf("Add(Load remote): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	got := app.Plugins()
+	if len(got) != 1 || got[0].Source != "remote" {
+		t.Fatalf("Plugins() = %+v, want one remote", got)
+	}
+	if want := []string{"/v1/remote", "/v1/legacy"}; !slices.Equal(got[0].Prefixes, want) {
+		t.Fatalf("Prefixes = %v, want %v", got[0].Prefixes, want)
 	}
 }
 
