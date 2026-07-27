@@ -47,7 +47,7 @@ func Chain(mw ...Middleware) Middleware {
 }
 
 // wrapRouter decorates an inner Router so every leaf route it registers has its
-// Handler wrapped by a Middleware chain first (chi's With idiom). Non-leaf
+// Handler wrapped by a Middleware chain first (see With). Non-leaf
 // operations delegate to the inner Router; Group propagates the chain so
 // leaves registered beneath it stay wrapped. Registration still flows
 // through the same fiber path as any other route, so specificity precedence is

@@ -40,7 +40,7 @@ type moduleResponse struct {
 
 // Module mounts a single HIP-0105 extension at the given method+path — the
 // one way to put an extension on the app. The `methodPath` form is
-// "METHOD /path" (e.g. "POST /v1/validate"), matching the Sinatra/Express
+// "METHOD /path" (e.g. "POST /v1/validate"), matching the
 // idiom. `runtime` selects the backing engine ("wasm" | "goja" | "pyvm" |
 // "starlark" | "v8go" | "native"); `modulePath` is the directory containing
 // the extension.json manifest.

@@ -208,21 +208,32 @@ func (a *App) Mount(prefix, addr string) error {
 	}
 	client := t.Dial(hostport)
 	a.logger.Info("zip mounting", "prefix", prefix, "transport", scheme, "addr", hostport)
+	a.mountVia(prefix, func() (Client, string) { return client, hostport })
+	return nil
+}
 
+// mountVia registers prefix once, resolving the target per request. The
+// indirection is what makes a plugin reloadable: a reload swaps what `to`
+// returns, so the router is never touched twice. Re-registering routes on
+// every reload would grow the route table without bound — the leak that makes
+// naive hot-reload untenable.
+func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	h := func(c *Ctx) error {
+		client, host := to()
+		if client == nil {
+			return Errorf(503, "mount %s: no instance running", prefix)
+		}
 		req, resp := c.fc.Request(), c.fc.Response()
-		req.SetHost(hostport)
+		req.SetHost(host)
 		if err := client.Do(req, resp); err != nil {
 			// The upstream, not this hop, is what failed.
 			return Errorf(502, "mount %s: %v", prefix, err)
 		}
 		return nil
 	}
-
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
 	a.All(prefix, h)
 	a.All(prefix+"/*", h)
-	return nil
 }
 
 // closeServers stops every running listener. Called from Shutdown.
