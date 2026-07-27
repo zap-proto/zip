@@ -31,18 +31,15 @@ import (
 //	g.All("/*", zip.AdaptNetHTTP(httpHandler)) // everything else
 //	g.Get("/health", nativeHealth)             // still wins
 //
+// A bare func is adapted through http.HandlerFunc, which is itself an
+// http.Handler — there is no separate func-shaped adapter:
+//
+//	app.Get("/legacy", zip.AdaptNetHTTP(http.HandlerFunc(myFunc)))
+//
 // Migration tool — costs ~5% perf vs native Fiber. Replace with native
 // zip handlers when feasible.
 func AdaptNetHTTP(h http.Handler) Handler {
 	wrapped := adaptor.HTTPHandler(h)
-	return func(c *Ctx) error { return wrapped(c.fc) }
-}
-
-// AdaptNetHTTPFunc wraps an http.HandlerFunc.
-//
-// Migration tool — costs ~5% perf vs native Fiber.
-func AdaptNetHTTPFunc(h http.HandlerFunc) Handler {
-	wrapped := adaptor.HTTPHandlerFunc(h)
 	return func(c *Ctx) error { return wrapped(c.fc) }
 }
 

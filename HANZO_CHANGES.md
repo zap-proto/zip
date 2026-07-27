@@ -32,7 +32,7 @@ Every file from upstream has been deleted. We kept the name.
 | Extension routes | `app.Module(method+path, runtime, dir)` — HIP-0105 surface. Loader is duck-typed (no hanzoai/base dep). |
 | Middleware | `Recover`, `Logger`, `RequestID`, `Timeout`, `MaxBody`, `CORS`, `RateLimit`, `Telemetry`, `ProductionHeaders`. Auth + StripIdentityHeaders moved to hanzoai/gateway/middleware (HIP-0106). |
 | Production headers | `ProductionHeaders(cfg)` stamps the Stripe/CF/GitHub-grade posture on every response (success/error/404): `Server` = white-label brand by Host (injected `Brand func(host) string`, never the framework name), `X-Api-Version` (brand-neutral), `X-Content-Type-Options: nosniff`, and `Strict-Transport-Security` when `HSTS`. X-Request-Id stays owned by `RequestID`. Never emits X-Powered-By or any framework/version string. |
-| Adapters | `AdaptNetHTTP / AdaptNetHTTPFunc / AdaptNetHTTPMiddleware`; front a foreign subtree via `app.All(prefix+"/*", zip.AdaptNetHTTP(h))`. |
+| Adapters | `AdaptNetHTTP / AdaptNetHTTPMiddleware`; front a foreign subtree via `app.All(prefix+"/*", zip.AdaptNetHTTP(h))`. A bare func adapts as `AdaptNetHTTP(http.HandlerFunc(fn))` — `http.HandlerFunc` IS an `http.Handler`, so there is no separate func adapter. |
 | WebSocket | `wsx.Upgrade(fn)` over fasthttp/websocket. |
 | Streaming | `c.SendStream(reader)` + `c.SendStreamWriter(fn)`. |
 | Transport | ONE verb `app.Listen(addrs...)`; the address scheme selects the transport (`:9653`=ZAP default, `http://:8080`=HTTP, any `RegisterTransport`'d proto). `app.Listen(":9653", "http://:8080")` serves both from one call. Routes ARE the surface over every transport. |
