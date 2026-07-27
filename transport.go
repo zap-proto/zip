@@ -19,10 +19,13 @@ import (
 //	app.Listen(":9653")                  // ZAP (the primary; bare addr = ZAP)
 //	app.Listen(":9653", "http://:8080")  // ZAP + HTTP in one call
 //	app.Listen("http://:8080")           // HTTP only
+//	app.Listen("/run/hanzo/app.sock")    // ZAP on a unix socket
 //	app.Listen("quic://:443")            // any RegisterTransport'd proto
 //
 // This mirrors net.Listen(network, addr): the network is a value, not a
-// ListenTCP/ListenUDP method explosion.
+// ListenTCP/ListenUDP method explosion. The scheme names the PROTOCOL and the
+// address names where it is spoken — a path is a unix socket, a host:port is
+// tcp — so there is never a second scheme for the same wire.
 
 // Server is a running transport listener bound to one address. Both
 // zap-proto/http.Server and the built-in HTTP server satisfy it, as does any
@@ -59,9 +62,9 @@ var (
 	transports   = map[string]Transport{
 		"zap": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
-				return &zaphttp.Server{Addr: addr, Handler: h}
+				return &zaphttp.Server{Network: networkOf(addr), Addr: addr, Handler: h}
 			},
-			Dial: func(addr string) Client { return zaphttp.NewTransport(addr) },
+			Dial: func(addr string) Client { return zaphttp.Dial(networkOf(addr), addr) },
 		},
 		"http": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
@@ -86,6 +89,23 @@ func RegisterTransport(scheme string, t Transport) {
 	transportsMu.Lock()
 	defer transportsMu.Unlock()
 	transports[scheme] = t
+}
+
+// networkOf reads the plumbing off the address shape, the way the address
+// already tells you: a filesystem path is a unix socket, anything else is
+// host:port. The scheme names the PROTOCOL (zap) and the address names where
+// it is spoken, so there is no second scheme for the same wire.
+//
+//	zap://:9653                      -> tcp
+//	zap://billing.hanzo.svc:9653     -> tcp
+//	zap:///run/hanzo/billing.sock    -> unix
+//	/run/hanzo/billing.sock          -> unix (bare address, DefaultScheme)
+//	@hanzo-billing                   -> unix (Linux abstract socket)
+func networkOf(addr string) string {
+	if strings.HasPrefix(addr, "/") || strings.HasPrefix(addr, "./") || strings.HasPrefix(addr, "@") {
+		return "unix"
+	}
+	return "tcp"
 }
 
 // transportFor resolves a raw address to its scheme, bare address, and wire.
