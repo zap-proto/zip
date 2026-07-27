@@ -355,6 +355,7 @@ func start(spec Plugin) (*instance, error) {
 	// The child's output is the operator's only window into it, so it goes
 	// where the host's own does rather than being swallowed.
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	tieToHost(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("start: %w", err)

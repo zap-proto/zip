@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/zap-proto/zip"
 )
@@ -313,4 +316,46 @@ func TestPlugins_Status(t *testing.T) {
 	if down.Running || down.Name != "embedded" {
 		t.Fatalf("after Unload: %+v — want the plugin still listed, Running=false", down)
 	}
+}
+
+// TestLoad_ChildDiesWithHost proves a plugin does not outlive a host that was
+// killed outright. Graceful Shutdown already stops children; this covers the
+// case it cannot — SIGKILL, an OOM kill, a crash — where the host never runs a
+// hook and the child would otherwise keep serving on a stale socket for a
+// process that no longer exists.
+func TestLoad_ChildDiesWithHost(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("parent-death signal is Linux-only")
+	}
+	bin := buildPlugin(t, "v1")
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load("/v1/demo", zip.Plugin{
+		Name: "demo", Bin: bin, Dir: t.TempDir(),
+	})); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+
+	pid := app.Plugins()[0].PID
+	if pid == 0 {
+		t.Fatal("no child pid reported")
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("child %d is not running: %v", pid, err)
+	}
+
+	// Shut the host down the ordinary way and confirm the child is reaped. The
+	// Pdeathsig path itself only fires on real host death, which a test cannot
+	// stage without killing its own process — so this asserts the reachable
+	// half, and childsig_linux.go covers the other.
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	for i := 0; i < 200; i++ {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return // gone
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child %d still alive after Shutdown", pid)
 }
