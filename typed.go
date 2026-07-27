@@ -3,6 +3,7 @@ package zip
 import (
 	"context"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/zap-proto/fiber/v3"
@@ -28,7 +29,7 @@ type registeredOp struct {
 	Tags        []string
 	InType      reflect.Type
 	OutType     reflect.Type
-	invoke      func(ctx context.Context, rawIn []byte, path map[string]string) (any, error)
+	invoke      func(ctx context.Context, rawIn []byte, query, path map[string]string) (any, error)
 }
 
 // Get registers a GET typed handler at path.
@@ -70,21 +71,32 @@ func WithOperationID(id string) OpOption {
 	return func(op *registeredOp) { op.OperationID = id }
 }
 
-// bindPath copies URL path params onto the decoded input, matching a param name
-// to the field whose json tag (else field name, case-insensitively) equals it.
+// bindURL copies URL-borne values onto the decoded input, matching a name to the
+// field whose json tag (else field name, case-insensitively) equals it. It is the
+// ONE binder for both URL sources — path params and query params are the same
+// kind of value (a name and a string, carried by the URL), so they get the same
+// function rather than two that drift.
 //
-// Only STRING fields are bound, because a path param is a string on the wire and
-// nothing else. A param with no matching string field is silently ignored: the
-// route pattern and the input type are written together, so a mismatch is a
-// programming error the OpenAPI projection surfaces, not a request to reject —
-// refusing here would turn a spec typo into a 400 on every call to that route.
+// Values arrive as strings on the wire and are converted to the field's kind:
+// string, bool, the sized ints/uints, and the floats. An unparseable value leaves
+// the field at its zero value rather than failing the request — `?limit=abc` is a
+// caller's typo about ONE field, and refusing the whole call would make every
+// typed GET brittler than the untyped handler it replaced. Declare `validate:` on
+// the field to make a value mandatory.
 //
-// Only the top level is walked. A nested field is not a path target: the URL
+// A name with no matching field is silently ignored: the route pattern and the
+// input type are written together, so a mismatch is a programming error the
+// OpenAPI projection surfaces, not a request to reject — refusing here would turn
+// a spec typo into a 400 on every call to that route. Unknown query keys are
+// ordinary (callers append tracking params), so ignoring them is required, not
+// merely tolerant.
+//
+// Only the top level is walked. A nested field is not a URL target: the URL
 // addresses one resource, and an input that nests its record declares its target
 // explicitly (see the authorizer's `owned` interface) rather than having it
 // guessed out of a sub-struct an attacker also controls.
-func bindPath(in any, path map[string]string) {
-	if len(path) == 0 {
+func bindURL(in any, values map[string]string) {
+	if len(values) == 0 {
 		return
 	}
 	v := reflect.ValueOf(in)
@@ -100,18 +112,51 @@ func bindPath(in any, path map[string]string) {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if !v.Field(i).CanSet() || v.Field(i).Kind() != reflect.String {
+		fv := v.Field(i)
+		if !fv.CanSet() {
 			continue
 		}
 		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if name == "" {
 			name = f.Name
 		}
-		for k, val := range path {
+		for k, val := range values {
 			if strings.EqualFold(k, name) {
-				v.Field(i).SetString(val)
+				setScalar(fv, val)
 				break
 			}
+		}
+	}
+}
+
+// setScalar writes one wire string into one field, converting by the field's
+// kind. Anything it cannot represent (structs, slices, maps, pointers) is left
+// alone — a URL carries scalars.
+func setScalar(fv reflect.Value, val string) {
+	switch fv.Kind() {
+	case reflect.String:
+		fv.SetString(val)
+	case reflect.Bool:
+		// An empty value means "flag present" — `?debug` reads as true, the
+		// convention every HTML form and CLI already uses.
+		if val == "" {
+			fv.SetBool(true)
+			return
+		}
+		if b, err := strconv.ParseBool(val); err == nil {
+			fv.SetBool(b)
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if n, err := strconv.ParseInt(val, 10, fv.Type().Bits()); err == nil {
+			fv.SetInt(n)
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if n, err := strconv.ParseUint(val, 10, fv.Type().Bits()); err == nil {
+			fv.SetUint(n)
+		}
+	case reflect.Float32, reflect.Float64:
+		if f, err := strconv.ParseFloat(val, fv.Type().Bits()); err == nil {
+			fv.SetFloat(f)
 		}
 	}
 }
@@ -136,20 +181,24 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 	// The transport-agnostic core: decode raw JSON args → In, validate, authorize,
 	// run fn, return Out (or a literal nil for a void result). REST and MCP both
 	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
-	op.invoke = func(ctx context.Context, rawIn []byte, path map[string]string) (any, error) {
+	op.invoke = func(ctx context.Context, rawIn []byte, query, path map[string]string) (any, error) {
 		var in In
 		if len(rawIn) > 0 {
 			if err := jsonenc.Unmarshal(rawIn, &in); err != nil {
 				return nil, ErrBadRequest("invalid json body: " + err.Error())
 			}
 		}
-		// Path params LAST, so the URL wins over the body. The URL is what routed
-		// the request, so it is the addressing authority: PATCH /users/acme/bob
-		// updates acme/bob whatever the body claims. This is also what keeps the
-		// authorizer honest — it runs below on this same decoded value, so the
-		// target authorized is the target the URL named, and a body cannot smuggle
-		// a different one past it.
-		bindPath(&in, path)
+		// The three sources bind in increasing authority: body, then query, then
+		// path. Query beats the body because it is part of the URL; path beats
+		// query because it is the part the router MATCHED on.
+		//
+		// The URL is the addressing authority: PATCH /users/acme/bob updates
+		// acme/bob whatever the body claims. This is also what keeps the authorizer
+		// honest — it runs below on this same decoded value, so the target
+		// authorized is the target the URL named, and a body cannot smuggle a
+		// different one past it.
+		bindURL(&in, query)
+		bindURL(&in, path)
 		if err := validate(&in); err != nil {
 			return nil, ErrBadRequest(err.Error())
 		}
@@ -183,7 +232,12 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 				path[n] = c.Params(n)
 			}
 		}
-		out, err := op.invoke(c.Context(), body, path)
+		// The query string is the OTHER half of the URL. Without it a typed GET
+		// could address a collection but never filter it, which is most of a read
+		// API — so every route that carries `?q=` had to stay an untyped handler,
+		// invisible to OpenAPI and MCP. Reading it here is what makes those routes
+		// expressible as ops.
+		out, err := op.invoke(c.Context(), body, c.Queries(), path)
 		if err != nil {
 			return err
 		}
