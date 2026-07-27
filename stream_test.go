@@ -37,7 +37,7 @@ func TestListenZAP_Streams(t *testing.T) {
 	defer func() { _ = app.Shutdown() }()
 
 	// Wait for the ZAP listener.
-	tr := zaphttp.NewTransport(addr)
+	tr := zaphttp.Dial("tcp", addr)
 	defer tr.CloseIdleConnections()
 	for i := 0; i < 50; i++ {
 		req := fasthttp.AcquireRequest()

@@ -1,12 +1,55 @@
 package zip_test
 
 import (
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/zip"
 )
+
+// TestMount_OverUnixSocket proves the plumbing is read off the address shape
+// rather than off a second scheme: the SAME "zap" transport serves and dials a
+// unix socket when the address is a path. This is the colocated plugin case —
+// no port to allocate, filesystem permissions as the ACL — carrying byte-identical
+// ZAP frames to the tcp case.
+func TestMount_OverUnixSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "billing.sock")
+
+	plugin := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
+	plugin.Get("/v1/billing/invoices", func(c *zip.Ctx) error {
+		return c.JSON(200, map[string]string{"servedBy": "over-uds"})
+	})
+	go func() { _ = plugin.Listen(sock) }() // bare path => zap scheme, unix network
+	defer func() { _ = plugin.Shutdown() }()
+	waitSocket(t, sock)
+
+	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
+	if err := core.Mount("/v1/billing", sock); err != nil {
+		t.Fatalf("Mount over unix socket: %v", err)
+	}
+
+	status, body := call(t, core, "GET", "/v1/billing/invoices", "")
+	if status != 200 || !strings.Contains(body, `"servedBy":"over-uds"`) {
+		t.Fatalf("through unix mount: status=%d body=%q, want the plugin's JSON", status, body)
+	}
+}
+
+// waitSocket blocks until path accepts a unix connection.
+func waitSocket(t *testing.T, path string) {
+	t.Helper()
+	for i := 0; i < 300; i++ {
+		if c, err := net.Dial("unix", path); err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("unix socket %s never became reachable", path)
+}
 
 // These tests pin the plugin mechanism: Listen serves here, Mount delegates
 // there, and both read the transport off the address scheme through one
