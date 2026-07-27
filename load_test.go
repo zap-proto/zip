@@ -1,6 +1,10 @@
 package zip_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,5 +168,78 @@ func TestLoad_AlreadyRunning(t *testing.T) {
 	}
 	if got := version(t, app); !strings.Contains(got, `"version":"external"`) {
 		t.Fatalf("body=%q, want the already-running instance", got)
+	}
+}
+
+// TestLoad_FromRelease proves the release-artifact path: a host that carries no
+// plugin binary installs one over HTTP, verifies it, and serves its routes.
+// This is what decouples the two build cycles — the host never compiles it.
+func TestLoad_FromRelease(t *testing.T) {
+	bin := buildPlugin(t, "v1")
+	sum := sha256.Sum256(bin)
+
+	var served int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served++
+		_, _ = w.Write(bin)
+	}))
+	defer srv.Close()
+
+	cache := t.TempDir()
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load("/v1/demo", zip.Plugin{
+		Name: "demo", URL: srv.URL + "/demo", Sum: hex.EncodeToString(sum[:]), Dir: cache,
+	})); err != nil {
+		t.Fatalf("Add(Load from release): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
+		t.Fatalf("body=%q, want the installed plugin's response", got)
+	}
+
+	// A second load at the same digest must reuse the cached binary rather than
+	// download again — that is what makes a restart offline.
+	app2 := zip.New(zip.Config{AppName: "host2", DisableStartupMessage: true})
+	if err := app2.Add(zip.Load("/v1/demo", zip.Plugin{
+		Name: "demo", URL: srv.URL + "/demo", Sum: hex.EncodeToString(sum[:]), Dir: cache,
+	})); err != nil {
+		t.Fatalf("second Add: %v", err)
+	}
+	defer func() { _ = app2.Shutdown() }()
+	if served != 1 {
+		t.Fatalf("server was hit %d times, want 1 — the digest cache did not hold", served)
+	}
+}
+
+// TestLoad_ReleaseRejectsBadSum proves a substituted or corrupted download is
+// never executed. This is the whole reason Sum is mandatory with URL.
+func TestLoad_ReleaseRejectsBadSum(t *testing.T) {
+	bin := buildPlugin(t, "v1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bin)
+	}))
+	defer srv.Close()
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	err := app.Add(zip.Load("/v1/demo", zip.Plugin{
+		Name: "demo", URL: srv.URL + "/demo", Dir: t.TempDir(),
+		Sum: strings.Repeat("00", 32), // wrong on purpose
+	}))
+	if err == nil {
+		t.Fatal("a mismatched Sum was accepted — the binary would have been executed")
+	}
+	if !strings.Contains(err.Error(), "does not match Sum") {
+		t.Fatalf("err = %v, want it to name the digest mismatch", err)
+	}
+}
+
+// TestLoad_ReleaseRequiresSum proves a URL without a Sum is refused outright,
+// rather than trusting the network.
+func TestLoad_ReleaseRequiresSum(t *testing.T) {
+	app := zip.New(zip.Config{DisableStartupMessage: true})
+	err := app.Add(zip.Load("/v1/demo", zip.Plugin{Name: "demo", URL: "https://example.test/x"}))
+	if err == nil || !strings.Contains(err.Error(), "unverified") {
+		t.Fatalf("err = %v, want a refusal naming the unverified download", err)
 	}
 }

@@ -2,8 +2,12 @@ package zip
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,9 +30,20 @@ import (
 //
 //	app.Add(zip.Load("/v1/billing", zip.Plugin{Name: "billing", Bin: billingBin}))
 //
-// The same call reaches an already-running instance by setting Addr instead,
-// so one binary covers embedded-subprocess and separately-deployed without a
-// second code path.
+// Or the host carries no plugin at all and installs one from its repository's
+// releases, which is what fully decouples the two build cycles — the host
+// relinks in well under a second and never compiles a plugin:
+//
+//	app.Add(zip.Load("/v1/billing", zip.Plugin{
+//	    Name: "billing",
+//	    URL:  "https://github.com/hanzoai/billing/releases/download/v1.2.3/billing-linux-arm64",
+//	    Sum:  "9f2c…",   // required: an unverified download is refused
+//	}))
+//
+// Or it reaches an instance already running elsewhere, by setting Addr. All
+// four are the same call and the same type, so one host binary covers
+// embedded, installed, on-disk and remote without a second code path — and
+// which one a deployment uses is configuration.
 //
 // A plugin is an ordinary zip app — no SDK, no schema. It serves routes and
 // the host mounts them:
@@ -81,8 +96,19 @@ type Plugin struct {
 	Addr string   // already running here — start nothing, just mount
 	Bin  []byte   // the binary, normally go:embed'd
 	Path string   // ...or where it lives on disk
+	URL  string   // ...or a release artifact to fetch (requires Sum)
 	Args []string // passed after argv[0]
 	Env  []string // added to the child's environment
+
+	// Sum is the hex SHA-256 of the binary at URL, and is REQUIRED with it.
+	// Fetching code over a network and executing it is the one place a plugin
+	// host becomes an arbitrary-code-execution vector, so an unverified
+	// download is refused rather than trusted.
+	//
+	// It doubles as the cache key: a binary already present under this digest
+	// is reused, so a restart costs no download and a rollback to a previously
+	// run version is free and offline.
+	Sum string
 
 	// Dir is where an embedded binary is extracted and its socket created.
 	// Empty means the system temp dir, which on many hosts is a tmpfs — i.e.
@@ -153,8 +179,11 @@ func (a *App) load(prefix string, spec Plugin) error {
 	if spec.Addr != "" {
 		return a.Mount(prefix, spec.Addr)
 	}
-	if len(spec.Bin) == 0 && spec.Path == "" {
-		return fmt.Errorf("zip: Load(%s): plugin %q has no Addr, Bin, or Path", prefix, spec.Name)
+	if len(spec.Bin) == 0 && spec.Path == "" && spec.URL == "" {
+		return fmt.Errorf("zip: Load(%s): plugin %q has no Addr, Bin, Path, or URL", prefix, spec.Name)
+	}
+	if spec.URL != "" && spec.Sum == "" {
+		return fmt.Errorf("zip: Load(%s): plugin %q has URL but no Sum — refusing to run an unverified download", prefix, spec.Name)
 	}
 
 	p := &plugin{name: spec.Name, prefix: prefix, spec: spec}
@@ -267,11 +296,21 @@ func start(spec Plugin) (*instance, error) {
 		return nil, err
 	}
 	bin := spec.Path
-	if len(spec.Bin) > 0 {
+	switch {
+	case len(spec.Bin) > 0:
 		bin = filepath.Join(dir, spec.Name)
 		if err := os.WriteFile(bin, spec.Bin, 0o700); err != nil {
 			_ = os.RemoveAll(dir)
 			return nil, fmt.Errorf("write binary: %w", err)
+		}
+	case spec.URL != "":
+		// Cached beside dir rather than inside it, so the download survives
+		// this instance and a reload or restart reuses it.
+		var err error
+		bin, err = fetch(spec)
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			return nil, err
 		}
 	}
 
@@ -305,6 +344,63 @@ func start(spec Plugin) (*instance, error) {
 	}
 	in.client = t.Dial(sock)
 	return in, nil
+}
+
+// fetch downloads spec.URL, verifies it against spec.Sum, and returns the path
+// to the cached executable. A binary already cached under that digest is reused
+// without touching the network, so a restart is offline and a rollback to a
+// previously run version costs nothing.
+//
+// The digest is checked BEFORE the file is made executable or given its final
+// name, so a truncated or substituted download is never runnable — the failure
+// mode is a missing plugin, not a wrong one.
+func fetch(spec Plugin) (string, error) {
+	cache := filepath.Join(spec.Dir, "zip-plugins")
+	if spec.Dir == "" {
+		cache = filepath.Join(os.TempDir(), "zip-plugins")
+	}
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		return "", fmt.Errorf("plugin cache: %w", err)
+	}
+	final := filepath.Join(cache, spec.Name+"-"+spec.Sum)
+	if _, err := os.Stat(final); err == nil {
+		return final, nil // already verified once; the name IS the digest
+	}
+
+	resp, err := http.Get(spec.URL)
+	if err != nil {
+		return "", fmt.Errorf("fetch %s: %w", spec.URL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetch %s: %s", spec.URL, resp.Status)
+	}
+
+	tmp, err := os.CreateTemp(cache, spec.Name+"-*.part")
+	if err != nil {
+		return "", fmt.Errorf("plugin cache: %w", err)
+	}
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	sum := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, sum), resp.Body); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("fetch %s: %w", spec.URL, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); got != spec.Sum {
+		return "", fmt.Errorf("plugin %s: sha256 %s does not match Sum %s — refusing to run it", spec.Name, got, spec.Sum)
+	}
+	if err := os.Chmod(tmp.Name(), 0o700); err != nil {
+		return "", err
+	}
+	// Rename last: the digest-named file exists only once it is verified, so a
+	// concurrent host either sees nothing or sees a good binary.
+	if err := os.Rename(tmp.Name(), final); err != nil {
+		return "", err
+	}
+	return final, nil
 }
 
 // idleCloser is the optional half of Client that owns pooled connections.
