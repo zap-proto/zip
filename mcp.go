@@ -124,7 +124,9 @@ func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
 		return fc.JSON(mcpErr(req.ID, -32602, "unknown tool: "+params.Name))
 	}
 
-	out, err := op.invoke(fc.Context(), params.Arguments)
+	// No path params over MCP: a tools/call carries every argument in its JSON
+	// arguments object, so the body IS the whole input.
+	out, err := op.invoke(fc.Context(), params.Arguments, nil)
 	if err != nil {
 		return fc.JSON(mcpResult(req.ID, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},

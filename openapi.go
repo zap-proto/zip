@@ -107,6 +107,21 @@ func (a *App) buildOpenAPI() map[string]any {
 			}
 		}
 
+		// Path parameters. OpenAPI requires every templated segment to be declared,
+		// so they are derived from the route pattern itself — the same string the
+		// router matches on, so the spec cannot describe a parameter the route does
+		// not have (or omit one it does).
+		if params := colonParams(op.Path); len(params) > 0 {
+			decls := make([]any, len(params))
+			for i, p := range params {
+				decls[i] = map[string]any{
+					"name": p, "in": "path", "required": true,
+					"schema": map[string]any{"type": "string"},
+				}
+			}
+			opObj["parameters"] = decls
+		}
+
 		// 200 response.
 		outName := typeName(op.OutType)
 		if op.OutType != nil && outName != "" {
@@ -150,6 +165,17 @@ func defaultOpID(method, path string) string {
 	clean = strings.ReplaceAll(clean, "}", "")
 	clean = strings.ReplaceAll(clean, ":", "")
 	return strings.ToLower(method) + clean
+}
+
+// colonParams lists the ":name" params of a fiber route pattern, in order.
+func colonParams(path string) []string {
+	var out []string
+	for _, p := range strings.Split(path, "/") {
+		if strings.HasPrefix(p, ":") && len(p) > 1 {
+			out = append(out, p[1:])
+		}
+	}
+	return out
 }
 
 func closeColonParams(path string) string {

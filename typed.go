@@ -3,6 +3,7 @@ package zip
 import (
 	"context"
 	"reflect"
+	"strings"
 
 	"github.com/zap-proto/fiber/v3"
 
@@ -27,7 +28,7 @@ type registeredOp struct {
 	Tags        []string
 	InType      reflect.Type
 	OutType     reflect.Type
-	invoke      func(ctx context.Context, rawIn []byte) (any, error)
+	invoke      func(ctx context.Context, rawIn []byte, path map[string]string) (any, error)
 }
 
 // Get registers a GET typed handler at path.
@@ -69,6 +70,52 @@ func WithOperationID(id string) OpOption {
 	return func(op *registeredOp) { op.OperationID = id }
 }
 
+// bindPath copies URL path params onto the decoded input, matching a param name
+// to the field whose json tag (else field name, case-insensitively) equals it.
+//
+// Only STRING fields are bound, because a path param is a string on the wire and
+// nothing else. A param with no matching string field is silently ignored: the
+// route pattern and the input type are written together, so a mismatch is a
+// programming error the OpenAPI projection surfaces, not a request to reject —
+// refusing here would turn a spec typo into a 400 on every call to that route.
+//
+// Only the top level is walked. A nested field is not a path target: the URL
+// addresses one resource, and an input that nests its record declares its target
+// explicitly (see the authorizer's `owned` interface) rather than having it
+// guessed out of a sub-struct an attacker also controls.
+func bindPath(in any, path map[string]string) {
+	if len(path) == 0 {
+		return
+	}
+	v := reflect.ValueOf(in)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !v.Field(i).CanSet() || v.Field(i).Kind() != reflect.String {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "" {
+			name = f.Name
+		}
+		for k, val := range path {
+			if strings.EqualFold(k, name) {
+				v.Field(i).SetString(val)
+				break
+			}
+		}
+	}
+}
+
 func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
 	var inZero In
 	var outZero Out
@@ -89,13 +136,20 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 	// The transport-agnostic core: decode raw JSON args → In, validate, authorize,
 	// run fn, return Out (or a literal nil for a void result). REST and MCP both
 	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
-	op.invoke = func(ctx context.Context, rawIn []byte) (any, error) {
+	op.invoke = func(ctx context.Context, rawIn []byte, path map[string]string) (any, error) {
 		var in In
 		if len(rawIn) > 0 {
 			if err := jsonenc.Unmarshal(rawIn, &in); err != nil {
 				return nil, ErrBadRequest("invalid json body: " + err.Error())
 			}
 		}
+		// Path params LAST, so the URL wins over the body. The URL is what routed
+		// the request, so it is the addressing authority: PATCH /users/acme/bob
+		// updates acme/bob whatever the body claims. This is also what keeps the
+		// authorizer honest — it runs below on this same decoded value, so the
+		// target authorized is the target the URL named, and a body cannot smuggle
+		// a different one past it.
+		bindPath(&in, path)
 		if err := validate(&in); err != nil {
 			return nil, ErrBadRequest(err.Error())
 		}
@@ -122,7 +176,14 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 		if method != "GET" && method != "HEAD" {
 			body = c.Body()
 		}
-		out, err := op.invoke(c.Context(), body)
+		var path map[string]string
+		if names := c.Route().Params; len(names) > 0 {
+			path = make(map[string]string, len(names))
+			for _, n := range names {
+				path[n] = c.Params(n)
+			}
+		}
+		out, err := op.invoke(c.Context(), body, path)
 		if err != nil {
 			return err
 		}
