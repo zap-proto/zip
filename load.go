@@ -84,6 +84,13 @@ type Plugin struct {
 	Args []string // passed after argv[0]
 	Env  []string // added to the child's environment
 
+	// Dir is where an embedded binary is extracted and its socket created.
+	// Empty means the system temp dir, which on many hosts is a tmpfs — i.e.
+	// RAM. A plugin binary is tens to hundreds of megabytes, so extracting one
+	// there spends real memory and fails outright when the tmpfs is full. Point
+	// this at disk for anything but a small plugin.
+	Dir string
+
 	// Start bounds how long to wait for the plugin to listen. Zero means 10s.
 	// A plugin that has not bound by then is a startup failure, not a slow
 	// one — nothing is mounted onto a process that never came up.
@@ -255,7 +262,7 @@ func start(spec Plugin) (*instance, error) {
 	// One private directory per instance holds the extracted binary and the
 	// socket, so a reload's new instance never collides with the old one's
 	// socket path and cleanup is a single RemoveAll.
-	dir, err := os.MkdirTemp("", "zip-"+spec.Name+"-")
+	dir, err := os.MkdirTemp(spec.Dir, "zip-"+spec.Name+"-")
 	if err != nil {
 		return nil, err
 	}
