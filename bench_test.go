@@ -30,6 +30,7 @@ package zip_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/valyala/fasthttp"
@@ -66,6 +67,13 @@ func getFctx(path string) *fasthttp.RequestCtx {
 // c.fc.Status(204)+return nil; the fiber baseline is c.Status(204)+return nil.
 // The only difference under test is zip's wrapper (the &Ctx materialised per
 // request). Expect ~constant delta across routing shapes.
+//
+// The RequestCtx is reused across iterations, so each one must start where a
+// real request starts: with the previous request's user values cleared. Both
+// transports do exactly this before dispatching (zap-proto/http's serveConn;
+// fasthttp's keep-alive loop, via Request.Reset). Without it an iteration
+// inherits the last one's request-scoped state and the wrapper looks free —
+// it would report 0 allocs/op for a path that allocates one *Ctx per request.
 func Benchmark_ZipTax(b *testing.B) {
 	za := zip.New(benchConfig())
 	fa := fiber.New()
@@ -81,6 +89,7 @@ func Benchmark_ZipTax(b *testing.B) {
 		b.Run(r.name+"/zip", func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
+				fctx.ResetUserValues()
 				zh(fctx)
 			}
 			if fctx.Response.StatusCode() != 204 {
@@ -90,12 +99,47 @@ func Benchmark_ZipTax(b *testing.B) {
 		b.Run(r.name+"/fiber", func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
+				fctx.ResetUserValues()
 				fh(fctx)
 			}
 			if fctx.Response.StatusCode() != 204 {
 				b.Fatalf("fiber: status %d", fctx.Response.StatusCode())
 			}
 		})
+	}
+}
+
+// Benchmark_ChainTax measures the wrapper tax along the other axis a real
+// service moves on: how many handlers the request passes through. Benchmark_ZipTax
+// fixes that at one; every deployed service runs a Use stack above its leaf, so
+// this is the number the fleet actually pays. Handlers are pass-through, so the
+// only thing growing with depth is zip's wrapper.
+func Benchmark_ChainTax(b *testing.B) {
+	for _, mw := range []int{0, 1, 3, 5} {
+		za := zip.New(benchConfig())
+		fa := fiber.New()
+		for i := 0; i < mw; i++ {
+			za.Use(func(c *zip.Ctx) error { return c.Continue() })
+			fa.Use(func(c fiber.Ctx) error { return c.Next() })
+		}
+		za.Get("/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })
+		fa.Get("/v1/health", func(c fiber.Ctx) error { c.Status(204); return nil })
+
+		for name, h := range map[string]fasthttp.RequestHandler{
+			"zip": za.Fiber().Handler(), "fiber": fa.Handler(),
+		} {
+			b.Run(fmt.Sprintf("mw=%d/%s", mw, name), func(b *testing.B) {
+				fctx := getFctx("/v1/health")
+				b.ReportAllocs()
+				for b.Loop() {
+					fctx.ResetUserValues()
+					h(fctx)
+				}
+				if fctx.Response.StatusCode() != 204 {
+					b.Fatalf("%s: status %d", name, fctx.Response.StatusCode())
+				}
+			})
+		}
 	}
 }
 
