@@ -243,3 +243,74 @@ func TestLoad_ReleaseRequiresSum(t *testing.T) {
 		t.Fatalf("err = %v, want a refusal naming the unverified download", err)
 	}
 }
+
+// TestPlugins_Status proves a host can report what it is actually running —
+// the primitive a fleet view needs, since deployment config says what was
+// INTENDED and only the process knows what is TRUE.
+func TestPlugins_Status(t *testing.T) {
+	v1, v2 := buildPlugin(t, "v1"), buildPlugin(t, "v2")
+	sum := sha256.Sum256(v1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(v1)
+	}))
+	defer srv.Close()
+
+	cache := t.TempDir()
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(
+		zip.Load("/v1/embedded", zip.Plugin{Name: "embedded", Bin: v1, Dir: cache}),
+		zip.Load("/v1/installed", zip.Plugin{
+			Name: "installed", URL: srv.URL + "/x", Sum: hex.EncodeToString(sum[:]), Dir: cache,
+		}),
+	); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	got := app.Plugins()
+	if len(got) != 2 {
+		t.Fatalf("Plugins() returned %d, want 2", len(got))
+	}
+	// Sorted by name, so this order is stable and a diff between hosts is too.
+	if got[0].Name != "embedded" || got[1].Name != "installed" {
+		t.Fatalf("not sorted by name: %v", []string{got[0].Name, got[1].Name})
+	}
+	if got[0].Source != "embedded" || got[1].Source != "url" {
+		t.Fatalf("sources = %q/%q, want embedded/url", got[0].Source, got[1].Source)
+	}
+	// The digest IS the version — it cannot drift from the bits running.
+	if got[1].Version != hex.EncodeToString(sum[:]) {
+		t.Fatalf("installed Version = %q, want the artifact digest", got[1].Version)
+	}
+	for _, p := range got {
+		if !p.Running || p.PID == 0 || p.Since.IsZero() {
+			t.Fatalf("%s: running=%v pid=%d since=%v — want a live instance", p.Name, p.Running, p.PID, p.Since)
+		}
+		if p.Reloads != 0 {
+			t.Fatalf("%s: Reloads=%d before any reload", p.Name, p.Reloads)
+		}
+	}
+
+	// A reload must be visible: the counter climbs and Since resets.
+	before := got[0].Since
+	if err := app.Reload("embedded", v2); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	after := app.Plugins()[0]
+	if after.Reloads != 1 {
+		t.Fatalf("Reloads = %d after one reload, want 1", after.Reloads)
+	}
+	if !after.Since.After(before) {
+		t.Fatalf("Since did not advance on reload (%v -> %v)", before, after.Since)
+	}
+
+	// Unload must read as "deployed but down", not as absent — its routes are
+	// still registered and answering 503.
+	if err := app.Unload("embedded"); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+	down := app.Plugins()[0]
+	if down.Running || down.Name != "embedded" {
+		t.Fatalf("after Unload: %+v — want the plugin still listed, Running=false", down)
+	}
+}

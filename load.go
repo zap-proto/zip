@@ -135,8 +135,28 @@ type plugin struct {
 	prefix string
 	spec   Plugin
 
-	cur atomic.Pointer[instance]
-	mu  sync.Mutex
+	cur     atomic.Pointer[instance]
+	mu      sync.Mutex
+	reloads atomic.Int64
+
+	// stopping tracks the goroutines draining replaced instances. Reload and
+	// Unload retire an instance asynchronously so the caller is not blocked for
+	// the drain window, which means a child can outlive the call that replaced
+	// it. Shutdown waits on this: a host that exits must not leave a child
+	// holding its stdout, or the process appears to hang after main returns.
+	stopping sync.WaitGroup
+}
+
+// retire stops in asynchronously, tracked so Shutdown can wait for it.
+func (p *plugin) retire(in *instance, grace time.Duration) {
+	if in == nil {
+		return
+	}
+	p.stopping.Add(1)
+	go func() {
+		defer p.stopping.Done()
+		stop(in, grace)
+	}()
 }
 
 // instance is one running child process and everything that must be released
@@ -145,8 +165,9 @@ type instance struct {
 	cmd    *exec.Cmd
 	dir    string
 	sock   string
-	client Client
-	exited chan error // cmd.Wait's single result
+	client  Client
+	exited  chan error // cmd.Wait's single result
+	started time.Time
 }
 
 // target is the hot path: what the mounted route should talk to right now.
@@ -177,7 +198,19 @@ func (a *App) load(prefix string, spec Plugin) error {
 		return fmt.Errorf("zip: Load(%s) needs a Plugin.Name", prefix)
 	}
 	if spec.Addr != "" {
-		return a.Mount(prefix, spec.Addr)
+		if err := a.Mount(prefix, spec.Addr); err != nil {
+			return err
+		}
+		// Recorded even though this host did not start it, so Plugins() reports
+		// the whole surface a request can reach rather than only the children.
+		// A fleet view that silently omits remote mounts is worse than none.
+		a.plugMu.Lock()
+		if a.plugins == nil {
+			a.plugins = map[string]*plugin{}
+		}
+		a.plugins[spec.Name] = &plugin{name: spec.Name, prefix: prefix, spec: spec}
+		a.plugMu.Unlock()
+		return nil
 	}
 	if len(spec.Bin) == 0 && spec.Path == "" && spec.URL == "" {
 		return fmt.Errorf("zip: Load(%s): plugin %q has no Addr, Bin, Path, or URL", prefix, spec.Name)
@@ -216,6 +249,9 @@ func (a *App) load(prefix string, spec Plugin) error {
 		if cur := p.cur.Swap(nil); cur != nil {
 			stop(cur, 0)
 		}
+		// Wait out any instance a Reload or Unload is still draining, so no
+		// child survives this host.
+		p.stopping.Wait()
 		return nil
 	})
 	return nil
@@ -254,6 +290,7 @@ func (a *App) Reload(name string, bin []byte) error {
 
 	prev := p.cur.Swap(next) // every request from here uses next
 	p.spec = spec
+	p.reloads.Add(1)
 	a.logger.Info("zip reloaded plugin", "name", name,
 		"pid", next.cmd.Process.Pid, "addr", next.sock)
 
@@ -262,7 +299,7 @@ func (a *App) Reload(name string, bin []byte) error {
 		if drain <= 0 {
 			drain = 5 * time.Second
 		}
-		go stop(prev, drain)
+		p.retire(prev, drain)
 	}
 	return nil
 }
@@ -279,9 +316,7 @@ func (a *App) Unload(name string) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if prev := p.cur.Swap(nil); prev != nil {
-		go stop(prev, 0)
-	}
+	p.retire(p.cur.Swap(nil), 0)
 	return nil
 }
 
@@ -331,7 +366,7 @@ func start(spec Plugin) (*instance, error) {
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
-	in := &instance{cmd: cmd, dir: dir, sock: sock, exited: exited}
+	in := &instance{cmd: cmd, dir: dir, sock: sock, exited: exited, started: time.Now()}
 	if err := waitListening(sock, spec.Start, exited); err != nil {
 		stop(in, 0)
 		return nil, err

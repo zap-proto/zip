@@ -32,7 +32,7 @@ func TestListenZAP_Streams(t *testing.T) {
 		})
 	})
 
-	const addr = "127.0.0.1:19655"
+	addr := freeAddr(t)
 	go func() { _ = app.Listen(addr) }() // bare addr = ZAP
 	defer func() { _ = app.Shutdown() }()
 

@@ -24,7 +24,7 @@ func TestListen_ZAP(t *testing.T) {
 		return c.JSON(200, map[string]string{"status": "ok", "transport": "zap"})
 	})
 
-	const addr = "127.0.0.1:19653"
+	addr := freeAddr(t)
 	go func() { _ = app.Listen(addr) }() // bare addr = ZAP (DefaultScheme)
 	defer func() { _ = app.Shutdown() }()
 
@@ -62,8 +62,8 @@ func TestListen_DualTransport(t *testing.T) {
 		return c.JSON(200, map[string]string{"status": "ok"})
 	})
 
-	const zapAddr = "127.0.0.1:19654"
-	const httpAddr = "127.0.0.1:18080"
+	zapAddr := freeAddr(t)
+	httpAddr := freeAddr(t)
 	go func() { _ = app.Listen(zapAddr, "http://"+httpAddr) }() // ONE call, both transports
 	defer func() { _ = app.Shutdown() }()
 	waitReachable(t, zapAddr)
@@ -110,7 +110,7 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 	// Control: no ReadBufferSize -> fasthttp's 4 KiB default -> 431.
 	ctrl := zip.New(zip.Config{AppName: "ctrl", DisableStartupMessage: true})
 	ctrl.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
-	const ctrlAddr = "127.0.0.1:19701"
+	ctrlAddr := freeAddr(t)
 	go func() { _ = ctrl.Listen("http://" + ctrlAddr) }()
 	defer func() { _ = ctrl.Shutdown() }()
 	waitDialable(t, ctrlAddr)
@@ -121,7 +121,7 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 	// Fixed: ReadBufferSize 32 KiB -> the SAME 9 KiB header is accepted.
 	fixed := zip.New(zip.Config{AppName: "fixed", DisableStartupMessage: true, ReadBufferSize: 32768})
 	fixed.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
-	const fixedAddr = "127.0.0.1:19702"
+	fixedAddr := freeAddr(t)
 	go func() { _ = fixed.Listen("http://" + fixedAddr) }()
 	defer func() { _ = fixed.Shutdown() }()
 	waitDialable(t, fixedAddr)
@@ -145,7 +145,7 @@ func TestHTTPTransport_ServerHeaderCoversPreRoutingErrors(t *testing.T) {
 	// Branded: the pre-routing 431 carries Server: <brand>, never the framework.
 	brand := zip.New(zip.Config{AppName: "brand", DisableStartupMessage: true, ServerHeader: "hanzo"})
 	brand.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
-	const brandAddr = "127.0.0.1:19703"
+	brandAddr := freeAddr(t)
 	go func() { _ = brand.Listen("http://" + brandAddr) }()
 	defer func() { _ = brand.Shutdown() }()
 	waitDialable(t, brandAddr)
@@ -166,7 +166,7 @@ func TestHTTPTransport_ServerHeaderCoversPreRoutingErrors(t *testing.T) {
 	// Suppressed: ServerHeader "-" emits NO Server header on the pre-routing error.
 	quiet := zip.New(zip.Config{AppName: "quiet", DisableStartupMessage: true, ServerHeader: "-"})
 	quiet.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
-	const quietAddr = "127.0.0.1:19704"
+	quietAddr := freeAddr(t)
 	go func() { _ = quiet.Listen("http://" + quietAddr) }()
 	defer func() { _ = quiet.Shutdown() }()
 	waitDialable(t, quietAddr)
