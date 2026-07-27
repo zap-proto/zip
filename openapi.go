@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
@@ -84,6 +85,19 @@ func (a *App) buildOpenAPI() map[string]any {
 			"operationId": op.OperationID,
 			"summary":     op.Summary,
 		}
+		// Prose and examples extracted from the source by cmd/zipdoc. Absent
+		// when the generator has not run, which degrades to the schema-only
+		// spec rather than failing — a spec without descriptions is still a
+		// usable spec.
+		doc, hasDoc := docFor(op.Method, op.Path)
+		if hasDoc {
+			if doc.Description != "" {
+				opObj["description"] = doc.Description
+			}
+			if op.Summary == "" {
+				opObj["summary"] = firstSentence(doc.Description)
+			}
+		}
 		if op.OperationID == "" {
 			opObj["operationId"] = defaultOpID(op.Method, op.Path)
 		}
@@ -95,14 +109,17 @@ func (a *App) buildOpenAPI() map[string]any {
 		if op.Method != "GET" && op.Method != "HEAD" && op.Method != "DELETE" {
 			inName := typeName(op.InType)
 			if op.InType != nil && inName != "" {
-				schemas[inName] = schemaOf(op.InType, schemas)
+				schemas[inName] = schemaOfDoc(op.InType, schemas, docFields(hasDoc, doc))
+				media := map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/" + inName}}
+				// An example is what makes a spec explorable — it is the
+				// difference between a reference someone reads and one they can
+				// press "try it" on.
+				if hasDoc && len(doc.Example) > 0 {
+					media["example"] = json.RawMessage(doc.Example)
+				}
 				opObj["requestBody"] = map[string]any{
 					"required": true,
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/" + inName},
-						},
-					},
+					"content":  map[string]any{"application/json": media},
 				}
 			}
 		}
@@ -125,15 +142,15 @@ func (a *App) buildOpenAPI() map[string]any {
 		// 200 response.
 		outName := typeName(op.OutType)
 		if op.OutType != nil && outName != "" {
-			schemas[outName] = schemaOf(op.OutType, schemas)
+			schemas[outName] = schemaOfDoc(op.OutType, schemas, docFields(hasDoc, doc))
+			respMedia := map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/" + outName}}
+			if hasDoc && len(doc.Response) > 0 {
+				respMedia["example"] = json.RawMessage(doc.Response)
+			}
 			opObj["responses"] = map[string]any{
 				"200": map[string]any{
 					"description": "ok",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/" + outName},
-						},
-					},
+					"content":     map[string]any{"application/json": respMedia},
 				},
 			}
 		} else {
@@ -205,6 +222,13 @@ func typeName(t reflect.Type) string {
 // schemaOf builds a minimal JSON Schema for t. Handles structs, primitives,
 // slices, and pointers. Anonymous types become "object" without a ref.
 func schemaOf(t reflect.Type, registry map[string]any) map[string]any {
+	return schemaOfDoc(t, registry, nil)
+}
+
+// schemaOfDoc is schemaOf with the extraction in hand, so a field's doc comment
+// becomes its description. Keyed by "Type.field" because an In and an Out can
+// both have a "limit" and they are not the same thing.
+func schemaOfDoc(t reflect.Type, registry map[string]any, fields map[string]string) map[string]any {
 	if t == nil {
 		return map[string]any{"type": "object"}
 	}
@@ -224,12 +248,12 @@ func schemaOf(t reflect.Type, registry map[string]any) map[string]any {
 	case reflect.Slice, reflect.Array:
 		return map[string]any{
 			"type":  "array",
-			"items": schemaOf(t.Elem(), registry),
+			"items": schemaOfDoc(t.Elem(), registry, fields),
 		}
 	case reflect.Map:
 		return map[string]any{
 			"type":                 "object",
-			"additionalProperties": schemaOf(t.Elem(), registry),
+			"additionalProperties": schemaOfDoc(t.Elem(), registry, fields),
 		}
 	case reflect.Struct:
 		props := map[string]any{}
@@ -243,7 +267,13 @@ func schemaOf(t reflect.Type, registry map[string]any) map[string]any {
 			if name == "-" {
 				continue
 			}
-			props[name] = schemaOf(f.Type, registry)
+			fs := schemaOfDoc(f.Type, registry, fields)
+			if fields != nil {
+				if d := fields[t.Name()+"."+name]; d != "" {
+					fs["description"] = d
+				}
+			}
+			props[name] = fs
 			if tag := f.Tag.Get("validate"); strings.Contains(tag, "required") {
 				required = append(required, name)
 			}
@@ -258,6 +288,27 @@ func schemaOf(t reflect.Type, registry map[string]any) map[string]any {
 		return out
 	}
 	return map[string]any{"type": "object"}
+}
+
+// firstSentence is the summary when none was given explicitly: a doc comment's
+// opening sentence is already written to be one, which is why Go documents that
+// convention in the first place.
+// docFields is the field map when the generator ran, nil otherwise.
+func docFields(has bool, d Doc) map[string]string {
+	if !has {
+		return nil
+	}
+	return d.Fields
+}
+
+func firstSentence(s string) string {
+	if i := strings.Index(s, ". "); i >= 0 {
+		return s[:i+1]
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 func jsonFieldName(f reflect.StructField) string {
