@@ -22,6 +22,13 @@ func main() {
 	app.All("/*", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"echo": c.Path(), "version": version})
 	})
+	// Crashes the process the way a real bug does — a panic on a goroutine,
+	// which no handler recover() can catch. Used to prove the host survives a
+	// plugin dying and brings it back.
+	app.Get("/v1/demo/crash", func(c *zip.Ctx) error {
+		go func() { panic("testplugin: deliberate crash") }()
+		return c.JSON(200, map[string]string{"crashing": "true"})
+	})
 	// Addr is the whole plugin side of the contract: serve where the host said.
 	_ = app.Listen(zip.Addr(":9999"))
 }

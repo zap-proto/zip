@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -136,9 +137,11 @@ type plugin struct {
 	prefixes []string // every subtree this plugin answers
 	spec     Plugin
 
-	cur     atomic.Pointer[instance]
-	mu      sync.Mutex
-	reloads atomic.Int64
+	cur      atomic.Pointer[instance]
+	mu       sync.Mutex
+	reloads  atomic.Int64
+	restarts atomic.Int64
+	closed   bool // Shutdown ran; the supervisor must stop resurrecting it
 
 	// stopping tracks the goroutines draining replaced instances. Reload and
 	// Unload retire an instance asynchronously so the caller is not blocked for
@@ -163,12 +166,18 @@ func (p *plugin) retire(in *instance, grace time.Duration) {
 // instance is one running child process and everything that must be released
 // when it stops.
 type instance struct {
-	cmd    *exec.Cmd
-	dir    string
-	sock   string
+	cmd     *exec.Cmd
+	dir     string
+	sock    string
 	client  Client
-	exited  chan error // cmd.Wait's single result
 	started time.Time
+
+	// done is CLOSED when the child has exited, and exitErr holds why. A
+	// closed channel broadcasts: the supervisor, a drain, and Shutdown can all
+	// observe the same exit. A single-value channel would let whoever read
+	// first starve the others.
+	done    chan struct{}
+	exitErr error
 }
 
 // target is the hot path: what the mounted route should talk to right now.
@@ -256,8 +265,12 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	for _, pre := range prefixes {
 		a.mountVia(pre, p.target)
 	}
+	go a.supervise(p, in)
 
 	a.OnShutdown(func(context.Context) error {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 		if cur := p.cur.Swap(nil); cur != nil {
 			stop(cur, 0)
 		}
@@ -364,23 +377,28 @@ func start(spec Plugin) (*instance, error) {
 	sock := filepath.Join(dir, spec.Name+".sock")
 	cmd := exec.Command(bin, spec.Args...)
 	cmd.Env = append(append(os.Environ(), spec.Env...), AddrEnv+"="+sock)
-	// The child's output is the operator's only window into it, so it goes
-	// where the host's own does rather than being swallowed.
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	// The child's output is the operator's only window into it, so it goes where
+	// the host's own does rather than being swallowed — but tagged, because an
+	// untagged line in a merged stream is worse than useless: you can see that
+	// something is wrong and not which plugin is wrong. Tagging is the whole
+	// difference between one log stream and N attributable ones.
+	cmd.Stdout = &tagWriter{w: os.Stdout, tag: []byte("[" + spec.Name + "] ")}
+	cmd.Stderr = &tagWriter{w: os.Stderr, tag: []byte("[" + spec.Name + "] ")}
 	tieToHost(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	// Exactly one Wait for this process's lifetime; everything else reads the
-	// result off this channel. Two Waits is an error, and a child nobody waits
-	// on becomes a zombie.
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	// Exactly one Wait for this process's lifetime; everyone else observes the
+	// close. Two Waits is an error, and a child nobody waits on is a zombie.
+	in := &instance{cmd: cmd, dir: dir, sock: sock, started: time.Now(), done: make(chan struct{})}
+	go func() {
+		in.exitErr = cmd.Wait()
+		close(in.done)
+	}()
 
-	in := &instance{cmd: cmd, dir: dir, sock: sock, exited: exited, started: time.Now()}
-	if err := waitListening(sock, spec.Start, exited); err != nil {
+	if err := waitListening(sock, spec.Start, in.done, in); err != nil {
 		stop(in, 0)
 		return nil, err
 	}
@@ -463,14 +481,14 @@ func stop(in *instance, grace time.Duration) {
 	}
 	if grace > 0 {
 		select {
-		case <-in.exited: // already gone; nothing to wait out
+		case <-in.done: // already gone; nothing to wait out
 		case <-time.After(grace):
 		}
 	}
 	if in.cmd != nil && in.cmd.Process != nil {
 		_ = in.cmd.Process.Kill()
 		select {
-		case <-in.exited:
+		case <-in.done:
 		case <-time.After(5 * time.Second):
 		}
 	}
@@ -487,7 +505,7 @@ func stop(in *instance, grace time.Duration) {
 // waitListening blocks until the socket accepts, the child exits, or the
 // deadline passes. Watching the child matters: a plugin that dies immediately
 // should say so, not time out.
-func waitListening(sock string, limit time.Duration, exited <-chan error) error {
+func waitListening(sock string, limit time.Duration, done <-chan struct{}, in *instance) error {
 	if limit <= 0 {
 		limit = 10 * time.Second
 	}
@@ -498,13 +516,105 @@ func waitListening(sock string, limit time.Duration, exited <-chan error) error 
 			return nil
 		}
 		select {
-		case err := <-exited:
-			return fmt.Errorf("exited before listening: %v", err)
+		case <-done:
+			return fmt.Errorf("exited before listening: %v", in.exitErr)
 		default:
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("did not listen on %s within %s", sock, limit)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// tagWriter prefixes each line a plugin writes with its name, so a host serving
+// several plugins produces one stream that is still attributable. It splits on
+// newlines rather than on Write calls, because a child may emit a line across
+// several writes or several lines in one.
+type tagWriter struct {
+	w       io.Writer
+	tag     []byte
+	mu      sync.Mutex
+	midline bool // a previous Write ended without a newline
+}
+
+func (t *tagWriter) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := len(p)
+	for len(p) > 0 {
+		if !t.midline {
+			if _, err := t.w.Write(t.tag); err != nil {
+				return 0, err
+			}
+			t.midline = true
+		}
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			_, err := t.w.Write(p)
+			return n, err
+		}
+		if _, err := t.w.Write(p[:i+1]); err != nil {
+			return 0, err
+		}
+		t.midline = false
+		p = p[i+1:]
+	}
+	return n, nil
+}
+
+// supervise watches one instance and brings the plugin back if it dies on its
+// own. Without this a crashed plugin is invisible and permanent: the child is
+// gone but cur still points at it, so every request gets a connection error
+// dressed up as a 502, Plugins() keeps reporting Running, and only a manual
+// Reload recovers. A plugin is a separate process precisely so a panic cannot
+// take the host down — that is only true if the host notices.
+//
+// An instance replaced by Reload or Unload also "exits", which is expected and
+// not a crash. The compare-and-swap distinguishes them: only the instance that
+// is still current when it dies was unexpected.
+func (a *App) supervise(p *plugin, in *instance) {
+	<-in.done
+	if !p.cur.CompareAndSwap(in, nil) {
+		return // replaced deliberately; its retirement is already someone's job
+	}
+	a.logger.Error("zip plugin exited unexpectedly",
+		"name", p.name, "pid", in.cmd.Process.Pid, "err", in.exitErr)
+	stop(in, 0)
+
+	// Restart with backoff. Requests answer 503 in the gap — "deployed but
+	// down", which is the truth — rather than 502, which would blame the
+	// upstream for a process that no longer exists.
+	//
+	// Backoff is capped and retried indefinitely rather than given up on: the
+	// common cause is a dependency that is itself restarting, and a plugin that
+	// recovers on its own is worth far more than one that stays dead because a
+	// retry budget ran out while nobody was watching.
+	delay := 100 * time.Millisecond
+	for {
+		p.mu.Lock()
+		shuttingDown := p.closed
+		spec := p.spec
+		p.mu.Unlock()
+		if shuttingDown {
+			return
+		}
+		time.Sleep(delay)
+		if delay *= 2; delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+		next, err := start(spec)
+		if err != nil {
+			a.logger.Error("zip plugin restart failed", "name", p.name, "err", err)
+			continue
+		}
+		if !p.cur.CompareAndSwap(nil, next) {
+			stop(next, 0) // a Reload beat us to it
+			return
+		}
+		p.restarts.Add(1)
+		a.logger.Info("zip plugin restarted", "name", p.name, "pid", next.cmd.Process.Pid)
+		go a.supervise(p, next)
+		return
 	}
 }

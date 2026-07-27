@@ -400,3 +400,104 @@ func TestLoad_NoPrefix(t *testing.T) {
 		t.Fatalf("err = %v, want a refusal naming the missing prefix", err)
 	}
 }
+
+// TestPlugins_Usage proves per-plugin resource accounting is real. This is the
+// observability a monolith cannot offer at any price: one process has one RSS
+// and one CPU clock, and nothing inside it can be attributed to a subsystem.
+// Running a service as its own process turns "which app is eating the memory"
+// into a question with an exact, kernel-measured answer.
+func TestPlugins_Usage(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("resource accounting reads /proc")
+	}
+	bin := buildPlugin(t, "v1")
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(
+		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()}, "/v1/demo",
+	)); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	// Drive it so there is CPU to account for.
+	for i := 0; i < 20; i++ {
+		if status, _ := call(t, app, "GET", "/v1/demo/version", ""); status != 200 {
+			t.Fatalf("request %d: status %d", i, status)
+		}
+	}
+
+	u := app.Plugins()[0].Usage
+	if u.RSS <= 0 {
+		t.Fatalf("RSS = %d, want a real resident set for a running child", u.RSS)
+	}
+	if u.Threads <= 0 {
+		t.Fatalf("Threads = %d, want at least one", u.Threads)
+	}
+	if u.FDs <= 0 {
+		t.Fatalf("FDs = %d, want at least the socket", u.FDs)
+	}
+	// A Go runtime always has several threads and holds more than a trivial
+	// resident set, so these also guard against parsing the wrong /proc fields.
+	if u.Threads > 10000 || u.RSS > 1<<40 {
+		t.Fatalf("implausible usage %+v — likely misparsed /proc fields", u)
+	}
+	t.Logf("plugin usage: cpu=%v rss=%.1fMB threads=%d fds=%d",
+		u.CPU, float64(u.RSS)/(1<<20), u.Threads, u.FDs)
+}
+
+// TestPlugins_SurvivesPanic proves the central safety claim of running a plugin
+// as its own process: a panic in the plugin cannot take the host down, the host
+// NOTICES rather than serving from a corpse, and the plugin comes back on its
+// own.
+//
+// Without a supervisor the failure is silent and permanent — the child is gone
+// but the mount still points at it, so every request gets a connection error
+// dressed as a 502 and the status keeps reporting Running.
+func TestPlugins_SurvivesPanic(t *testing.T) {
+	bin := buildPlugin(t, "v1")
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(
+		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()}, "/v1/demo",
+	)); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	first := app.Plugins()[0].PID
+	if status, _ := call(t, app, "GET", "/v1/demo/version", ""); status != 200 {
+		t.Fatalf("before crash: status %d", status)
+	}
+
+	// Panic it on a goroutine — unrecoverable, so the process really dies.
+	if status, _ := call(t, app, "GET", "/v1/demo/crash", ""); status != 200 {
+		t.Fatalf("crash trigger: status %d", status)
+	}
+
+	// THE HOST MUST SURVIVE. If a plugin panic could kill the host, none of
+	// this architecture is worth anything.
+	deadline := time.Now().Add(20 * time.Second)
+	var restarted bool
+	for time.Now().Before(deadline) {
+		ps := app.Plugins()
+		if len(ps) != 1 {
+			t.Fatalf("plugin vanished from status: %+v", ps)
+		}
+		if ps[0].Restarts > 0 && ps[0].Running && ps[0].PID != first {
+			restarted = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !restarted {
+		t.Fatalf("plugin did not come back: %+v", app.Plugins()[0])
+	}
+
+	// And it serves again, on the same routes, with no re-registration.
+	if status, body := call(t, app, "GET", "/v1/demo/version", ""); status != 200 ||
+		!strings.Contains(body, `"version":"v1"`) {
+		t.Fatalf("after restart: status=%d body=%q", status, body)
+	}
+	t.Logf("survived: pid %d -> %d, restarts=%d", first, app.Plugins()[0].PID, app.Plugins()[0].Restarts)
+}
