@@ -9,6 +9,7 @@ import (
 	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
+	"github.com/zap-proto/zip/internal/jsontag"
 )
 
 // OpenAPIConfig configures the auto-generated /.well-known/openapi.json
@@ -128,15 +129,30 @@ func (a *App) buildOpenAPI() map[string]any {
 		// so they are derived from the route pattern itself — the same string the
 		// router matches on, so the spec cannot describe a parameter the route does
 		// not have (or omit one it does).
+		// A parameter's prose lives with the field it binds to, under the same
+		// "<Type>.<field>" key the in-process CLI reads. Looking it up here
+		// rather than restating it is what keeps a generated client and a
+		// linked-in one describing the same argument the same way — the
+		// alternative is a spec that silently has nothing to say about an
+		// argument the registry documents fine.
+		fields := docFields(hasDoc, doc)
+		inName := typeName(op.InType)
+		describe := func(decl map[string]any, field string) map[string]any {
+			if help := fields[inName+"."+field]; help != "" {
+				decl["description"] = help
+			}
+			return decl
+		}
+
 		params := colonParams(op.Path)
 		decls := make([]any, 0, len(params))
 		named := make(map[string]bool, len(params))
 		for _, p := range params {
 			named[strings.ToLower(p)] = true
-			decls = append(decls, map[string]any{
+			decls = append(decls, describe(map[string]any{
 				"name": p, "in": "path", "required": true,
 				"schema": map[string]any{"type": "string"},
-			})
+			}, p))
 		}
 		// Query parameters. A bodyless method binds its input from the URL
 		// (typed.go bindURL), so every In field that is NOT already a path
@@ -149,10 +165,10 @@ func (a *App) buildOpenAPI() map[string]any {
 				if named[strings.ToLower(f.name)] {
 					continue
 				}
-				decls = append(decls, map[string]any{
+				decls = append(decls, describe(map[string]any{
 					"name": f.name, "in": "query", "required": false,
 					"schema": f.schema,
-				})
+				}, f.name))
 			}
 		}
 		if len(decls) > 0 {
@@ -390,18 +406,11 @@ func firstSentence(s string) string {
 	return s
 }
 
+// jsonFieldName is the reflect view of the wire-name rule; cmd/zipdoc reads the
+// AST view of the same rule, from the same function, so a field's doc lands
+// under the name the decoder actually uses.
 func jsonFieldName(f reflect.StructField) string {
-	tag := f.Tag.Get("json")
-	if tag == "" {
-		return f.Name
-	}
-	if i := strings.IndexByte(tag, ','); i >= 0 {
-		tag = tag[:i]
-	}
-	if tag == "" {
-		return f.Name
-	}
-	return tag
+	return jsontag.Name(f.Name, f.Tag.Get("json"))
 }
 
 // swaggerHTML is the minimal Swagger UI shell. Loads the UI from a CDN
