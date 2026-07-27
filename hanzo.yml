@@ -1,6 +1,21 @@
 # Canonical CI config for zap-proto/zip — read by the hanzoai/ci reusable
 # (.github/workflows/cicd.yml). zip is a LIBRARY: no images, no deploy — CI's
 # whole job is proving the framework contract on every push, on OUR arc pool.
+
+# The reference plugin, published per OS/arch on every tag. zip defines the
+# install contract (zip.Plugin{URL, Sum}: fetch, verify the SHA-256 BEFORE the
+# file is made executable, cache by digest), so zip is where a runnable proof of
+# it belongs: any host can point at these bits and exercise its own install path
+# without building anything. It is also what the pattern is for — the plugin is
+# built ONCE here and every host picks up the same artifact.
+#
+#   https://github.com/zap-proto/zip/releases/download/<tag>/example-billing-<os>-<arch>
+#   https://github.com/zap-proto/zip/releases/download/<tag>/binaries.json   ← url + sha256
+binaries:
+  - name: example-billing
+    main: ./examples/plugin/billing
+    platforms: [linux/amd64, linux/arm64, darwin/arm64]
+
 test:
   - name: go-vet
     run: go vet ./...

@@ -40,13 +40,32 @@ nor `Mount`.
 
 `service.go`, `load.go`. `Service` is `func(*App) error`. A constructor taking
 dependencies and returning one is that curried, so a composition root only sees
-`Service`. `zip.Load(prefix, Plugin)` returns one too — which is the whole
+`Service`. `zip.Load(Plugin, prefixes...)` returns one too — which is the whole
 point: a linked-in service and a separately-built binary are the same type, so
 where a service runs is a deployment decision, not a code change.
 
 `Plugin` takes exactly one of `Addr` (already running), `Bin` (the binary,
-normally `go:embed`'d), or `Path`. Non-`Addr` plugins are started as a child
-process on a private unix socket in a 0700 dir.
+normally `go:embed`'d), `Path` (on disk), or `URL`+`Sum` (a release artifact).
+Non-`Addr` plugins are started as a child process on a private unix socket in a
+0700 dir.
+
+**The release lane.** `URL` without `Sum` is refused — fetching code over a
+network and running it is where a host becomes an ACE vector — and the digest is
+verified BEFORE the file is made executable or given its final name, so a
+substituted artifact is a missing plugin, never a wrong one. The digest is also
+the cache key: a restart is offline and a rollback to bits this host already ran
+is free. `Plugins()` reports `Source:"url"`, `Version:<sha256>`.
+
+The artifacts come from the SAME pipeline as everything else — root `hanzo.yml`,
+`binaries:` block, `hanzoai/ci` (see `examples/plugin/README.md`). zip's own
+`hanzo.yml` publishes `examples/plugin/billing` per OS/arch on every tag as the
+reference artifact, so any host can exercise its install path without building
+anything:
+
+```
+https://github.com/zap-proto/zip/releases/download/<tag>/example-billing-<os>-<arch>
+https://github.com/zap-proto/zip/releases/download/<tag>/binaries.json   # url + sha256
+```
 
 **Reload invariants** — break any one and repeated reloads leak:
 

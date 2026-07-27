@@ -33,6 +33,19 @@ func main() {
 	//	var billingBin []byte
 	//	zip.Load(zip.Plugin{Name: "billing", Bin: billingBin}, "/v1/billing")
 	//
+	// Or install the one CI published, which is what decouples the two build
+	// cycles entirely — the plugin is built ONCE, per OS/arch, and every host
+	// picks up the same bits. Sum is required: the digest is verified before the
+	// file is ever made executable, and it doubles as the cache key, so a
+	// restart is offline and a rollback is free. See ../README.md.
+	//
+	//	zip.Load(zip.Plugin{
+	//	    Name: "billing",
+	//	    URL:  "https://github.com/hanzoai/billing/releases/download/v1.2.3/billing-linux-arm64",
+	//	    Sum:  "9f2c…",
+	//	    Dir:  "/var/lib/hanzo", // not /tmp — that is RAM on most hosts
+	//	}, "/v1/billing")
+	//
 	// Or point at one that is already running elsewhere, unchanged otherwise:
 	//
 	//	zip.Load(zip.Plugin{Name: "billing", Addr: os.Getenv("BILLING_ADDR")}, "/v1/billing")
