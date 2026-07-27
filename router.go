@@ -134,7 +134,35 @@ func splitChain(app *App, handlers []Handler) (fiber.Handler, []any) {
 // runs through zip's default errorHandler).
 func toFiberHandler(app *App, h Handler) fiber.Handler {
 	return func(fc fiber.Ctx) error {
-		c := &Ctx{fc: fc, app: app, log: app.logger}
-		return h(c)
+		return h(requestCtx(app, fc))
 	}
+}
+
+// ctxKey names the request-scoped slot holding this request's one *Ctx. A
+// zero-size unexported type: unforgeable by other packages, and boxing it
+// into the `any` key allocates nothing.
+type ctxKey struct{}
+
+// requestCtx returns THE *Ctx for this request, creating it on first touch.
+//
+// One request, one Ctx. Every zip handler the request passes through — Use
+// middleware, group middleware, the leaf — is handed the same value, so
+// c.SetLog() in middleware reaches the handlers after it (that is what
+// middleware.Logger has always meant to do), and the wrapper costs one
+// allocation per REQUEST rather than one per handler in the chain.
+//
+// The slot is the request's own user-value storage, so the lifetime is
+// exactly the request's: fasthttp clears user values when it resets the
+// request, before the connection serves the next one. Ctx therefore has
+// fiber's lifetime rule, not a longer one — do not retain it past the
+// handler.
+func requestCtx(app *App, fc fiber.Ctx) *Ctx {
+	rc := fc.RequestCtx()
+	if c, ok := rc.UserValue(ctxKey{}).(*Ctx); ok && c.app == app {
+		c.fc = fc // same request; bind to the ctx actually driving this call
+		return c
+	}
+	c := &Ctx{fc: fc, app: app, log: app.logger}
+	rc.SetUserValue(ctxKey{}, c)
+	return c
 }
