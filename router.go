@@ -10,7 +10,7 @@ import (
 type Router interface {
 	Use(handlers ...Handler) Router
 
-	// Route registration takes ONE chain in gin/express order: zero or more
+	// Route registration takes ONE chain in wrapping order: zero or more
 	// middleware first, the final handler LAST. fiber wants handler-first;
 	// splitChain flips it in exactly one place.
 	Get(path string, handlers ...Handler) Router
@@ -102,13 +102,13 @@ func (a *routerAdapter) Group(prefix string, handlers ...Handler) Router {
 func (a *routerAdapter) Fiber() fiber.Router { return a.r }
 
 // splitChain adapts one registration chain — middleware first, the final
-// handler LAST (gin/express order) — to fiber's variadic signature. fiber
+// handler LAST — to fiber's variadic signature. fiber
 // executes route handlers in ARGUMENT order (the first argument enters first
 // and Next() descends), so the chain passes through verbatim: first element,
 // then the rest. Registering a route with no handler is a programmer error
 // and panics at boot, never at request time.
 // normPath maps the empty leaf to the group root: Get("") on a Group("/x")
-// means "/x" (the gin/express idiom). fiber never matches an empty path, so
+// means "/x". fiber never matches an empty path, so
 // the normalization lives here — one place, every route method.
 func normPath(path string) string {
 	if path == "" {

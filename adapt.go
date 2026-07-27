@@ -1,4 +1,4 @@
-// Adapters for migrating existing chi / gin / net-http code onto zip
+// Adapters for bringing existing net/http code onto zip
 // without rewriting handlers. These are MIGRATION TOOLS — each adapter
 // costs ~5% perf vs native Fiber dispatch and exists so a service can
 // roll onto zip incrementally. Replace adapted routes with native
@@ -14,7 +14,7 @@ import (
 
 // AdaptNetHTTP wraps an http.Handler so it can be served on a zip router
 // as an ordinary zip.Handler. To front a whole foreign subtree, register
-// it on a wildcard route — this is THE way to mount stdlib / chi / gin
+// it on a wildcard route — this is THE way to mount any net/http
 // code:
 //
 //	app.All("/legacy/net/*", zip.AdaptNetHTTP(httpHandler))
@@ -36,7 +36,7 @@ func AdaptNetHTTPFunc(h http.HandlerFunc) Handler {
 
 // AdaptNetHTTPMiddleware wraps a stdlib middleware (func(http.Handler) http.Handler)
 // as a zip.Handler. Register it on a wildcard route to front a foreign subtree
-// whose entry point is a net/http middleware (e.g. a gin engine bridged via
+// whose entry point is a net/http middleware (bridged via
 // NoRoute) — this is THE net/http-middleware bridge:
 //
 //	app.All("/legacy/*", zip.AdaptNetHTTPMiddleware(mw))

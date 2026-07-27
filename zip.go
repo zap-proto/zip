@@ -1,5 +1,5 @@
 // Package zip is Hanzo's canonical Go web framework. Built on
-// Fiber v3 / fasthttp. Sinatra-style API. ZAP-typed handlers.
+// Fiber v3 / fasthttp. ZAP-typed handlers.
 // Multi-language extension support via HIP-0105.
 //
 // ONE framework, ZERO escape hatches. zip IS fast.
@@ -134,6 +134,11 @@ type App struct {
 	shuttingDown bool
 	hookMu       sync.Mutex
 
+	// Running plugins, by name, so Reload can find one after Load composed it.
+	// Guarded by plugMu.
+	plugins map[string]*plugin
+	plugMu  sync.Mutex
+
 	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
 }
 
@@ -218,7 +223,7 @@ func (a *App) Use(handlers ...Handler) Router {
 }
 
 // With returns a Router whose subsequent leaf registrations (Get/Post/…/All)
-// have mw wrapped around the handler at registration time — chi's idiom, pure
+// have mw wrapped around the handler at registration time — pure
 // composition (RateLimit(CSRF(handler))). It does NOT touch the global Use
 // stack and does NOT route through c.Next(); it is the per-route counterpart to
 // Use. Routes registered on the returned Router still obey specificity
@@ -233,7 +238,7 @@ func (a *App) With(mw ...Middleware) Router {
 }
 
 // Get / Post / Put / Patch / Delete / Head / Options / All register routes.
-// Chains are gin/express order: middleware first, the final handler last.
+// Chains are in wrapping order: middleware first, the final handler last.
 func (a *App) Get(path string, handlers ...Handler) Router  { return a.method("GET", path, handlers) }
 func (a *App) Post(path string, handlers ...Handler) Router { return a.method("POST", path, handlers) }
 func (a *App) Put(path string, handlers ...Handler) Router  { return a.method("PUT", path, handlers) }
