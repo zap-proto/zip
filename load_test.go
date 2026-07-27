@@ -501,3 +501,49 @@ func TestPlugins_SurvivesPanic(t *testing.T) {
 	}
 	t.Logf("survived: pid %d -> %d, restarts=%d", first, app.Plugins()[0].PID, app.Plugins()[0].Restarts)
 }
+
+// TestLoad_Lazy proves a lazy plugin registers its routes at Load but does not
+// start until a request actually reaches one. This is what makes many plugins
+// affordable: a host composing dozens of services eagerly pays a process, a
+// resident set and a startup for every one of them at boot, for a set that is
+// mostly idle.
+func TestLoad_Lazy(t *testing.T) {
+	bin := buildPlugin(t, "v1")
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(
+		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir(), Lazy: true}, "/v1/demo",
+	)); err != nil {
+		t.Fatalf("Add(lazy Load): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	// Registered but not running — that distinction is the whole feature.
+	ps := app.Plugins()
+	if len(ps) != 1 {
+		t.Fatalf("lazy plugin not registered: %+v", ps)
+	}
+	if ps[0].Running || ps[0].PID != 0 {
+		t.Fatalf("lazy plugin started at Load: %+v — nothing had asked for it yet", ps[0])
+	}
+
+	// The first request brings it up and is served, not failed. A lazy plugin
+	// that 503'd its own first request would be useless.
+	status, body := call(t, app, "GET", "/v1/demo/version", "")
+	if status != 200 || !strings.Contains(body, `"version":"v1"`) {
+		t.Fatalf("first request to a lazy plugin: status=%d body=%q", status, body)
+	}
+
+	after := app.Plugins()[0]
+	if !after.Running || after.PID == 0 {
+		t.Fatalf("still not running after a request: %+v", after)
+	}
+	// And it stays up — the second request must not spawn another child.
+	if status, _ := call(t, app, "GET", "/v1/demo/version", ""); status != 200 {
+		t.Fatalf("second request: status %d", status)
+	}
+	if pid := app.Plugins()[0].PID; pid != after.PID {
+		t.Fatalf("pid changed %d -> %d — the plugin was started twice", after.PID, pid)
+	}
+	t.Logf("lazy: not running at Load, started on first request as pid %d", after.PID)
+}

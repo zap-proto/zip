@@ -14,8 +14,14 @@ import (
 
 // PluginStatus is one loaded plugin as the host currently sees it.
 type PluginStatus struct {
-	Name   string `json:"name"`
-	Prefix string `json:"prefix"`
+	Name string `json:"name"`
+
+	// Prefix is the FIRST subtree this plugin answers — the one a log line
+	// names it by. Prefixes is every subtree, and a plugin may own several.
+	// Reporting only the first would understate the blast radius of taking
+	// this plugin down, which is the question a fleet view exists to answer.
+	Prefix   string   `json:"prefix"`
+	Prefixes []string `json:"prefixes,omitempty"`
 
 	// Source is where the binary came from: "embedded", "path", "url", or
 	// "remote" for an instance this host did not start.
@@ -89,10 +95,11 @@ func (a *App) Plugins() []PluginStatus {
 	out := make([]PluginStatus, 0, len(ps))
 	for _, p := range ps {
 		s := PluginStatus{
-			Name:    p.name,
-			Prefix:  p.prefix,
-			Source:  p.source(),
-			Version: p.spec.Sum,
+			Name:     p.name,
+			Prefix:   p.prefix,
+			Prefixes: append([]string(nil), p.prefixes...),
+			Source:   p.source(),
+			Version:  p.spec.Sum,
 			Reloads:  int(p.reloads.Load()),
 			Restarts: int(p.restarts.Load()),
 		}
