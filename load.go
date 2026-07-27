@@ -131,9 +131,10 @@ type Plugin struct {
 // through an atomic, and mu serializes lifecycle transitions so two Reloads
 // cannot interleave.
 type plugin struct {
-	name   string
-	prefix string
-	spec   Plugin
+	name     string
+	prefix   string   // the first, for log lines and status
+	prefixes []string // every subtree this plugin answers
+	spec     Plugin
 
 	cur     atomic.Pointer[instance]
 	mu      sync.Mutex
@@ -189,17 +190,26 @@ func (p *plugin) target() (Client, string) {
 //
 // The child is stopped and its directory removed on Shutdown, in LIFO order
 // with every other hook, so a host that exits cleanly leaves nothing behind.
-func Load(prefix string, p Plugin) Service {
-	return func(a *App) error { return a.load(prefix, p) }
+// prefixes is variadic because a service often owns more than one route
+// subtree — o11y answers both /v1/o11y and /v1/sentry — and a single-prefix
+// Load silently 404s the others. One call declares everything the plugin owns.
+func Load(p Plugin, prefixes ...string) Service {
+	return func(a *App) error { return a.load(prefixes, p) }
 }
 
-func (a *App) load(prefix string, spec Plugin) error {
+func (a *App) load(prefixes []string, spec Plugin) error {
 	if spec.Name == "" {
-		return fmt.Errorf("zip: Load(%s) needs a Plugin.Name", prefix)
+		return fmt.Errorf("zip: Load needs a Plugin.Name")
 	}
+	if len(prefixes) == 0 {
+		return fmt.Errorf("zip: Load(%s) needs at least one prefix", spec.Name)
+	}
+	prefix := prefixes[0]
 	if spec.Addr != "" {
-		if err := a.Mount(prefix, spec.Addr); err != nil {
-			return err
+		for _, pre := range prefixes {
+			if err := a.Mount(pre, spec.Addr); err != nil {
+				return err
+			}
 		}
 		// Recorded even though this host did not start it, so Plugins() reports
 		// the whole surface a request can reach rather than only the children.
@@ -219,7 +229,7 @@ func (a *App) load(prefix string, spec Plugin) error {
 		return fmt.Errorf("zip: Load(%s): plugin %q has URL but no Sum — refusing to run an unverified download", prefix, spec.Name)
 	}
 
-	p := &plugin{name: spec.Name, prefix: prefix, spec: spec}
+	p := &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec}
 	in, err := start(spec)
 	if err != nil {
 		return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
@@ -243,7 +253,9 @@ func (a *App) load(prefix string, spec Plugin) error {
 
 	// Registered once, for the life of the app. Reload swaps what target()
 	// returns; it never touches the router.
-	a.mountVia(prefix, p.target)
+	for _, pre := range prefixes {
+		a.mountVia(pre, p.target)
+	}
 
 	a.OnShutdown(func(context.Context) error {
 		if cur := p.cur.Swap(nil); cur != nil {

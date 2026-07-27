@@ -31,14 +31,14 @@ func main() {
 	//
 	//	//go:embed bin/billing
 	//	var billingBin []byte
-	//	zip.Load("/v1/billing", zip.Plugin{Name: "billing", Bin: billingBin})
+	//	zip.Load(zip.Plugin{Name: "billing", Bin: billingBin}, "/v1/billing")
 	//
 	// Or point at one that is already running elsewhere, unchanged otherwise:
 	//
-	//	zip.Load("/v1/billing", zip.Plugin{Name: "billing", Addr: os.Getenv("BILLING_ADDR")})
+	//	zip.Load(zip.Plugin{Name: "billing", Addr: os.Getenv("BILLING_ADDR")}, "/v1/billing")
 	if err := app.Add(
 		health,
-		zip.Load("/v1/billing", zip.Plugin{Name: "billing", Path: "./bin/billing"}),
+		zip.Load(zip.Plugin{Name: "billing", Path: "./bin/billing"}, "/v1/billing"),
 	); err != nil {
 		log.Fatal(err)
 	}
