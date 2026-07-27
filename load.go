@@ -126,6 +126,17 @@ type Plugin struct {
 	// Drain is how long a replaced process keeps serving after a Reload, so
 	// requests already in flight on it finish. Zero means 5s.
 	Drain time.Duration
+
+	// Lazy defers starting the child until the first request actually reaches
+	// one of its prefixes. Routes register at Load either way, so the surface
+	// is identical — only the process is deferred.
+	//
+	// This is what makes many plugins affordable. A host composing 69 services
+	// eagerly pays 69 processes, 69 resident sets and 69 startup times at boot
+	// for a set that is mostly idle; lazily it pays for the ones traffic
+	// actually reaches. The cost moves to the first request, which is why it is
+	// opt-in: a latency-critical prefix should stay eager.
+	Lazy bool
 }
 
 // plugin is one Load'ed service across restarts. cur is read on every request
@@ -137,6 +148,7 @@ type plugin struct {
 	prefixes []string // every subtree this plugin answers
 	spec     Plugin
 
+	app      *App // for logging and supervision when started on demand
 	cur      atomic.Pointer[instance]
 	mu       sync.Mutex
 	reloads  atomic.Int64
@@ -181,11 +193,40 @@ type instance struct {
 }
 
 // target is the hot path: what the mounted route should talk to right now.
+// For a lazy plugin the first caller through here starts it; the atomic load
+// keeps the steady-state cost to one load once it is running.
 func (p *plugin) target() (Client, string) {
-	in := p.cur.Load()
-	if in == nil {
+	if in := p.cur.Load(); in != nil {
+		return in.client, in.sock
+	}
+	if p.app == nil || !p.spec.Lazy {
+		return nil, "" // eager and down, or unloaded — the route answers 503
+	}
+	return p.startOnDemand()
+}
+
+// startOnDemand brings a lazy plugin up on its first request, single-flighted
+// so a burst of concurrent first requests produces ONE child rather than one
+// per request. A start failure is not cached: the next request tries again,
+// because the usual cause is a dependency that has not come up yet.
+func (p *plugin) startOnDemand() (Client, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if in := p.cur.Load(); in != nil {
+		return in.client, in.sock // won by another caller while we waited
+	}
+	if p.closed {
 		return nil, ""
 	}
+	in, err := start(p.spec)
+	if err != nil {
+		p.app.logger.Error("zip lazy plugin failed to start", "name", p.name, "err", err)
+		return nil, ""
+	}
+	p.cur.Store(in)
+	p.app.logger.Info("zip lazy plugin started on first request",
+		"name", p.name, "pid", in.cmd.Process.Pid, "addr", in.sock)
+	go p.app.supervise(p, in)
 	return in.client, in.sock
 }
 
@@ -227,7 +268,7 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		if a.plugins == nil {
 			a.plugins = map[string]*plugin{}
 		}
-		a.plugins[spec.Name] = &plugin{name: spec.Name, prefix: prefix, spec: spec}
+		a.plugins[spec.Name] = &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec}
 		a.plugMu.Unlock()
 		return nil
 	}
@@ -238,12 +279,15 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		return fmt.Errorf("zip: Load(%s): plugin %q has URL but no Sum — refusing to run an unverified download", prefix, spec.Name)
 	}
 
-	p := &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec}
-	in, err := start(spec)
-	if err != nil {
-		return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
+	p := &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec, app: a}
+	var in *instance
+	if !spec.Lazy {
+		var err error
+		if in, err = start(spec); err != nil {
+			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
+		}
+		p.cur.Store(in)
 	}
-	p.cur.Store(in)
 
 	a.plugMu.Lock()
 	if a.plugins == nil {
@@ -251,21 +295,28 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	}
 	if _, dup := a.plugins[spec.Name]; dup {
 		a.plugMu.Unlock()
-		stop(in, 0)
+		stop(in, 0) // nil for a lazy plugin — stop handles that
 		return fmt.Errorf("zip: Load(%s): plugin %q already loaded", prefix, spec.Name)
 	}
 	a.plugins[spec.Name] = p
 	a.plugMu.Unlock()
 
-	a.logger.Info("zip loaded plugin", "name", spec.Name, "prefix", prefix,
-		"pid", in.cmd.Process.Pid, "addr", in.sock)
+	if in != nil {
+		a.logger.Info("zip loaded plugin", "name", spec.Name, "prefix", prefix,
+			"pid", in.cmd.Process.Pid, "addr", in.sock)
+	} else {
+		a.logger.Info("zip loaded plugin (lazy — starts on first request)",
+			"name", spec.Name, "prefix", prefix)
+	}
 
 	// Registered once, for the life of the app. Reload swaps what target()
 	// returns; it never touches the router.
 	for _, pre := range prefixes {
 		a.mountVia(pre, p.target)
 	}
-	go a.supervise(p, in)
+	if in != nil {
+		go a.supervise(p, in)
+	}
 
 	a.OnShutdown(func(context.Context) error {
 		p.mu.Lock()
