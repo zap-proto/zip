@@ -115,6 +115,38 @@ OpenAPI/MCP-generating typed API costs **nothing** versus writing the
 decode/encode by hand. The ~3.5 µs is dominated by JSON marshal/unmarshal of the
 chat payload (25+ of the 27 allocs), not by zip.
 
+## 3. What a plugin costs per request — the hop
+
+`zip.Load` runs a service as its own binary and reaches it over a unix socket.
+That buys independent build, release, restart and per-process measurement, and
+charges a round trip for it. `Benchmark_PluginHop` prices the round trip by
+serving the SAME route two ways through the same host — once by a handler linked
+in, once by a child process — so the delta *is* the hop.
+
+Measured on the 20-core arm64 Linux host of §1a, and a **far** worse one: load
+average ~100 throughout, and the same benchmark varied 9× between samples.
+Reported as the **minimum of 18 samples**, 8 of them A/B interleaved one round
+per process — the sample least polluted by interference. Direction and rough
+magnitude only; these are not calibrated absolutes.
+
+| route served by | `ns/op` (min) | `B/op` | `allocs/op` |
+|---|--:|--:|--:|
+| linked into the host | **410** | 482 | 7 |
+| a loaded plugin (child + unix socket) | **10,360** | 51 | 1 |
+
+**The hop is ~10 µs, about 25× this route.** The ratio is the wrong number to
+carry around, though, because the denominator here is a handler that does
+nothing but encode a two-field JSON object. Against work a service actually
+does — one SQLite query is ~10–100 µs, one network call or LLM token is
+milliseconds — 10 µs is 0.01–10%. **A plugin is affordable exactly where the
+handler does real work, and expensive where it does not**, which is why the
+boundary belongs at a service, not at a function.
+
+The allocation columns move the other way and are exact on any host: the host
+allocates **7 → 1** per request and **482 → 51 B**, because the response is now
+encoded in the child. A host that stops doing a subsystem's work stops paying
+for its garbage too.
+
 ## Verdict
 
 | claim | verdict |
@@ -122,12 +154,19 @@ chat payload (25+ of the 27 allocs), not by zip.
 | zip's per-request overhead over fiber | **~24 ns + 1 alloc (48 B)**, constant; <1% of real handler cost (§1) |
 | …and that 1 alloc holds however deep the middleware chain is | **True** — one `*Ctx` per request, not per handler (§1a) |
 | Typed `Get/Post[In,Out]` costs extra vs hand-written | **False** — on par / marginally leaner (§2) |
+| A plugin is free | **False** — ~10 µs per request, and the host's own allocs drop 7 → 1 (§3) |
 | Routing performance | Inherited from `zap-proto/fiber` — see its BENCHMARKS.md (0-alloc match) |
 
 ## Reproduce
 
 ```sh
 go test -run='^$' -bench='Benchmark_ZipTax|Benchmark_TypedRoute' -benchmem -count=6 .
+
+# The plugin hop. One round per process, so A and B interleave under drifting
+# load; take the minimum across rounds rather than the mean.
+for i in $(seq 8); do
+  go test -run='^$' -bench=Benchmark_PluginHop -benchmem -count=1 -benchtime=3000x .
+done
 
 # JSON edge path (v1 vs json/v2)
 go test -run='^$' -bench='BenchmarkJSON' -benchmem -count=6 .
