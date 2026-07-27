@@ -299,3 +299,12 @@ const swaggerHTML = `<!doctype html>
 </body>
 </html>
 `
+
+// OpenAPISpec returns the OpenAPI 3.1 document for every typed op registered on
+// this app — the SAME value served at /.well-known/openapi.json.
+//
+// It is exported so a service can render its published contract from the routes it
+// actually registers, in a build step rather than from a running server. A spec
+// generated any other way is a second source of truth, and the whole point of
+// deriving it here is that there is only one.
+func (a *App) OpenAPISpec() map[string]any { return a.buildOpenAPI() }
