@@ -80,10 +80,12 @@ over ZAP frames. `zaprpc/` is a leftover parallel implementation of that
 envelope (string service+method, incompatible with upstream's ordinals) and
 should go.
 
-Known wart: `zap-proto/http` encodes headers as a JSON `map[string][]string`
-inside the ZAP frame (`wire.go:49,96,108`). It is a JSON layer inside a
-zero-copy binary protocol and is slated for removal, but it is a wire break, so
-it must land after every service is aligned and then bump them together.
+`zap-proto/http` v0.3.0 carries headers as length-prefixed name/value pairs —
+`[u32 count]` then `[u32 nameLen][name][u32 valueLen][value]`. It used to be a
+JSON `map[string][]string` inside the ZAP frame, encoded by two implementations
+kept byte-identical to each other. Decode is now 0 allocs/op because every name
+and value is a subslice of the frame. That was a wire break: peers must agree
+on the version, so v0.3.0 and v0.2.x cannot talk.
 
 ## Testing
 
