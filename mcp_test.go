@@ -29,7 +29,7 @@ func TestMCP_FreeToolSurface(t *testing.T) {
 		return &greetOut{Message: "hello " + in.Name}, nil
 	}, zip.WithOperationID("greet"), zip.WithSummary("Greet someone by name"))
 
-	const httpAddr = "127.0.0.1:18099"
+	httpAddr := freeAddr(t)
 	go func() { _ = app.Listen("http://" + httpAddr) }()
 	defer func() { _ = app.Shutdown() }()
 	waitHTTP(t, "http://"+httpAddr+"/.well-known/openapi.json")

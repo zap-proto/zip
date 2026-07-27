@@ -70,7 +70,7 @@ func TestMount_OverZAP(t *testing.T) {
 		return c.JSON(201, map[string]string{"echo": string(c.Body())})
 	})
 
-	const pluginAddr = "127.0.0.1:19661"
+	pluginAddr := freeAddr(t)
 	go func() { _ = plugin.Listen(pluginAddr) }() // bare addr = ZAP
 	defer func() { _ = plugin.Shutdown() }()
 	waitReachable(t, pluginAddr)
@@ -110,7 +110,7 @@ func TestMount_StaticBeatsRemoteMount(t *testing.T) {
 		return c.JSON(200, map[string]string{"servedBy": "plugin"})
 	})
 
-	const pluginAddr = "127.0.0.1:19662"
+	pluginAddr := freeAddr(t)
 	go func() { _ = plugin.Listen(pluginAddr) }()
 	defer func() { _ = plugin.Shutdown() }()
 	waitReachable(t, pluginAddr)
