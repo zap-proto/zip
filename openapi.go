@@ -106,7 +106,7 @@ func (a *App) buildOpenAPI() map[string]any {
 		}
 
 		// Request body.
-		if op.Method != "GET" && op.Method != "HEAD" && op.Method != "DELETE" {
+		if hasBody(op.Method) {
 			inName := typeName(op.InType)
 			if op.InType != nil && inName != "" {
 				schemas[inName] = schemaOfDoc(op.InType, schemas, docFields(hasDoc, doc))
@@ -128,14 +128,34 @@ func (a *App) buildOpenAPI() map[string]any {
 		// so they are derived from the route pattern itself — the same string the
 		// router matches on, so the spec cannot describe a parameter the route does
 		// not have (or omit one it does).
-		if params := colonParams(op.Path); len(params) > 0 {
-			decls := make([]any, len(params))
-			for i, p := range params {
-				decls[i] = map[string]any{
-					"name": p, "in": "path", "required": true,
-					"schema": map[string]any{"type": "string"},
+		params := colonParams(op.Path)
+		decls := make([]any, 0, len(params))
+		named := make(map[string]bool, len(params))
+		for _, p := range params {
+			named[strings.ToLower(p)] = true
+			decls = append(decls, map[string]any{
+				"name": p, "in": "path", "required": true,
+				"schema": map[string]any{"type": "string"},
+			})
+		}
+		// Query parameters. A bodyless method binds its input from the URL
+		// (typed.go bindURL), so every In field that is NOT already a path
+		// segment is reachable as `?field=` — and the document has to say so, or
+		// it describes a route nobody can call correctly. Declared only where
+		// there is no requestBody, because that is exactly where the binder
+		// treats the URL as the whole input.
+		if !hasBody(op.Method) {
+			for _, f := range queryFields(op.InType) {
+				if named[strings.ToLower(f.name)] {
+					continue
 				}
+				decls = append(decls, map[string]any{
+					"name": f.name, "in": "query", "required": false,
+					"schema": f.schema,
+				})
 			}
+		}
+		if len(decls) > 0 {
 			opObj["parameters"] = decls
 		}
 
@@ -182,6 +202,65 @@ func defaultOpID(method, path string) string {
 	clean = strings.ReplaceAll(clean, "}", "")
 	clean = strings.ReplaceAll(clean, ":", "")
 	return strings.ToLower(method) + clean
+}
+
+// hasBody reports whether a method carries a JSON request body. It is the ONE
+// place that rule lives: the same predicate decides that the input is decoded
+// from the body (typed.go) and that the document declares a requestBody rather
+// than query parameters. Two copies of it would eventually disagree, and the
+// document would describe a request the router cannot parse.
+func hasBody(method string) bool {
+	switch method {
+	case "GET", "HEAD", "DELETE":
+		return false
+	}
+	return true
+}
+
+// queryField is one URL-bindable input field: the name a caller writes in the
+// query string and the schema of the value.
+type queryField struct {
+	name   string
+	schema map[string]any
+}
+
+// queryFields lists the top-level scalar fields of a bodyless op's input — the
+// exact set bindURL can fill from the URL. Non-scalars are omitted because the
+// binder cannot fill them either, so naming them would promise a parameter that
+// silently does nothing.
+func queryFields(t reflect.Type) []queryField {
+	if t == nil {
+		return nil
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	var out []queryField
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name := jsonFieldName(f)
+		if name == "-" {
+			continue
+		}
+		ft := f.Type
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		switch ft.Kind() {
+		case reflect.String, reflect.Bool,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			out = append(out, queryField{name: name, schema: schemaOf(ft, nil)})
+		}
+	}
+	return out
 }
 
 // colonParams lists the ":name" params of a fiber route pattern, in order.

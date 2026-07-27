@@ -160,13 +160,36 @@ func TestOpenAPIDeclaresPathParams(t *testing.T) {
 	}
 	get, _ := item["get"].(map[string]any)
 	params, _ := get["parameters"].([]any)
-	if len(params) != 2 {
-		t.Fatalf("parameters = %v, want 2 declared", params)
+	// Path params first, in pattern order, required.
+	if len(params) < 2 {
+		t.Fatalf("parameters = %v, want the 2 path params declared", params)
 	}
 	for i, want := range []string{"owner", "name"} {
 		p, _ := params[i].(map[string]any)
 		if p["name"] != want || p["in"] != "path" || p["required"] != true {
 			t.Fatalf("parameter %d = %v, want required path param %q", i, p, want)
+		}
+	}
+	// Then the rest of the input, which a GET binds from the query string.
+	// `note` is not a path segment, so ?note= is the ONLY way to supply it —
+	// the document must say so or it describes a call nobody can make.
+	if len(params) != 3 {
+		t.Fatalf("parameters = %v, want 2 path + 1 query", params)
+	}
+	q, _ := params[2].(map[string]any)
+	if q["name"] != "note" || q["in"] != "query" || q["required"] != false {
+		t.Fatalf("parameter 2 = %v, want optional query param \"note\"", q)
+	}
+	// A field that IS a path segment is declared once, as a path param — never
+	// duplicated into the query set.
+	seen := map[string]int{}
+	for _, raw := range params {
+		p, _ := raw.(map[string]any)
+		seen[p["name"].(string)]++
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("parameter %q declared %d times, want exactly 1", name, n)
 		}
 	}
 }
