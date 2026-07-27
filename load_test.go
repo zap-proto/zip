@@ -19,8 +19,9 @@ import (
 )
 
 // buildPlugin compiles internal/testplugin with version stamped in, and returns
-// the binary's bytes — exactly what a host would go:embed.
-func buildPlugin(t *testing.T, version string) []byte {
+// the binary's bytes — exactly what a host would go:embed. Takes a testing.TB
+// so the benchmarks build their subject the same way the tests do.
+func buildPlugin(t testing.TB, version string) []byte {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "testplugin-"+version)
 	cmd := exec.Command("go", "build",
