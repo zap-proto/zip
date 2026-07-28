@@ -43,9 +43,13 @@ func TestExpressInZip(t *testing.T) {
 	})
 }
 
-// TestRuntimeRoute drives the unified runner over HTTP: the request body
-// is the source, :lang selects the backend. js evaluates in real goja; an
+// TestRuntimeRoute drives the unified runner over HTTP: :lang selects the
+// backend and the body carries the source. js evaluates in real goja; an
 // unregistered language is a 404 with a structured error.
+//
+// The body is the op's In as JSON, because the route is a typed op — which is
+// what puts "run this source" in the document and in the MCP tool list. A raw
+// body would have meant no schema, and no schema means no projection.
 func TestRuntimeRoute(t *testing.T) {
 	app, err := setup()
 	if err != nil {
@@ -53,7 +57,8 @@ func TestRuntimeRoute(t *testing.T) {
 	}
 
 	t.Run("POST /runtime/js evaluates source", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/runtime/js", strings.NewReader("40+2"))
+		req := httptest.NewRequest("POST", "/runtime/js", strings.NewReader(`{"source":"40+2"}`))
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := app.Fiber().Test(req)
 		if err != nil {
 			t.Fatal(err)
@@ -68,7 +73,8 @@ func TestRuntimeRoute(t *testing.T) {
 	})
 
 	t.Run("POST /runtime/cobol is 404 unknown language", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/runtime/cobol", strings.NewReader("DISPLAY 'HI'."))
+		req := httptest.NewRequest("POST", "/runtime/cobol", strings.NewReader(`{"source":"DISPLAY 'HI'."}`))
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := app.Fiber().Test(req)
 		if err != nil {
 			t.Fatal(err)
@@ -78,6 +84,19 @@ func TestRuntimeRoute(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		assertContainsAll(t, string(body), `"error":"unknown language"`)
+	})
+
+	// The op is in the document because it IS an op — the assertion that says
+	// step 5 of setup() achieved something the fiber-level registration did not.
+	t.Run("the runtime op is projected", func(t *testing.T) {
+		spec := app.OpenAPISpec()
+		paths, _ := spec["paths"].(map[string]map[string]any)
+		if _, ok := paths["/runtime/{lang}"]; !ok {
+			t.Fatalf("the runtime op is missing from the document; paths = %v", paths)
+		}
+		if len(app.MCPTools()) != 1 {
+			t.Fatalf("tools = %v, want the one op", app.MCPTools())
+		}
 	})
 }
 

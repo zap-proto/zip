@@ -3,17 +3,31 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/zap-proto/zip"
 )
 
+// Health is what the probe answers.
+type Health struct {
+	Status string `json:"status"`
+}
+
+// Nothing is an operation that takes no input.
+type Nothing struct{}
+
 // health is a linked-in Service: a plain func(*zip.App) error. A constructor
 // that takes dependencies and returns one of these is the same thing curried,
 // which is why a composition root only ever sees Service.
+//
+// It registers a typed op, exactly as the separately-built plugin does. Both
+// halves of the composition contribute to one document, one tool list and one
+// command tree, which is what makes "linked in" versus "its own binary" a
+// deployment decision and nothing more.
 func health(a *zip.App) error {
-	a.Get("/health", func(c *zip.Ctx) error {
-		return c.JSON(200, map[string]string{"status": "ok"})
+	zip.Get(a, "/health", func(context.Context, *Nothing) (*Health, error) {
+		return &Health{Status: "ok"}, nil
 	})
 	return nil
 }

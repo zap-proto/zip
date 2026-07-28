@@ -7,9 +7,18 @@
 //	curl http://localhost:8080/legacy/foo
 //	curl -XPOST -d '{"x":1}' -H content-type:application/json \
 //	     http://localhost:8080/legacy/bar
+//	curl -XPOST -d '{"source":"40+2"}' -H content-type:application/json \
+//	     http://localhost:8080/runtime/js
+//
+// Every route here is registered on the ZIP router. Nothing goes on
+// app.Fiber() directly: a route registered there gets no *zip.Ctx, no error
+// handler, no middleware and no Authorizer — it is served by the app but not
+// governed by it, which is a security seam, not a shortcut. app.Fiber() is for
+// reading Fiber-only APIs, not for registering routes.
 package main
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"log"
@@ -53,44 +62,69 @@ func setup() (*zip.App, error) {
 		return nil, err
 	}
 
-	// 4. Mount on zip. JSModule returns a fiber.Handler, so it goes on
-	//    the underlying Fiber router via app.Fiber(); native zip routes
-	//    sit alongside it on the same App. stripPrefix rewrites the
-	//    request path so the legacy handler sees /foo, not /legacy/foo —
-	//    the same path-stripping an Express sub-router does on mount.
+	// 4. Mount on zip — on the ZIP router, not the Fiber one underneath it.
+	//    JSModule returns a fiber.Handler, so the one-line closure below is
+	//    what puts it back on the zip path: registering it with
+	//    app.Fiber().All(…) would have bypassed *zip.Ctx, the error handler,
+	//    the middleware installed above and the Authorizer — a route the app
+	//    serves but does not govern. stripPrefix rewrites the request path so
+	//    the legacy handler sees /foo, not /legacy/foo, the same path-stripping
+	//    an Express sub-router does on mount.
+	//
+	//    It is still a WILDCARD carrying an un-rewritten JS handler, so it
+	//    registers no operation: nothing under /legacy is in the OpenAPI
+	//    document, is an MCP tool, or is reachable by zip.Call. That is the
+	//    honest price of running the handler unchanged, and the reason to port
+	//    it — a route that lands on step 5's shape gets all of them.
 	app := zip.New(zip.Config{AppName: "express-in-zip"})
 	app.Use(middleware.Recover(), middleware.RequestID())
-	app.Fiber().All("/legacy/*", stripPrefix("/legacy", h))
+	legacy := stripPrefix("/legacy", h)
+	app.All("/legacy/*", func(c *zip.Ctx) error { return legacy(c.Fiber()) })
 
-	// 5. Unified multi-language runner. The request body is the source,
-	//    :lang selects the backend. zip ships the goja "js" engine in-tree;
-	//    a host that imports base additionally registers pyvm/v8vm/wasmvm/
-	//    starkvm here at startup — zip never imports base (see runtime/README).
+	// 5. Unified multi-language runner, as a TYPED op: :lang selects the
+	//    backend and the body carries the source. Because it is an op, "run
+	//    this source in this language" is in the document, is an MCP tool an
+	//    agent can call, and is reachable by name from another service — none
+	//    of which is true of the same handler registered on app.Fiber().
+	//    zip ships the goja "js" engine in-tree; a host that imports base
+	//    additionally registers pyvm/v8vm/wasmvm/starkvm here at startup — zip
+	//    never imports base (see runtime/README).
 	runner := runtime.NewRunner()
 	if err := runner.Register("js", rt.Engine()); err != nil {
 		return nil, err
 	}
-	app.Fiber().Post("/runtime/:lang", runtimeHandler(runner))
+	zip.Post(app, "/runtime/:lang", runSource(runner))
 
 	return app, nil
 }
 
-// runtimeHandler reads the request body as source, dispatches it to the
-// engine registered for :lang, and returns {result, error} as JSON. An
-// unregistered language is a 404; an evaluation error is a 200 carrying
-// the error string in the body so the caller sees the engine's message.
-func runtimeHandler(runner runtime.Runner) fiber.Handler {
-	return func(c fiber.Ctx) error {
-		lang := c.Params("lang")
-		res, err := runner.Run(c.Context(), lang, c.Body())
+// RunIn is one evaluation: the language to run it in, and the source. `lang` is
+// the path segment; the URL is the addressing authority, so it binds from there
+// whatever the body says.
+type RunIn struct {
+	Lang   string `json:"lang"`
+	Source string `json:"source" validate:"required"`
+}
+
+// RunOut is what the engine returned.
+type RunOut struct {
+	Result any    `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// runSource dispatches the source to the engine registered for :lang. An
+// unregistered language is a 404; an evaluation error is a 200 carrying the
+// error string, so the caller sees the engine's own message.
+func runSource(runner runtime.Runner) func(context.Context, *RunIn) (*RunOut, error) {
+	return func(ctx context.Context, in *RunIn) (*RunOut, error) {
+		res, err := runner.Run(ctx, in.Lang, []byte(in.Source))
 		if err != nil {
 			if errors.Is(err, runtime.ErrUnknownLanguage) {
-				return c.Status(fiber.StatusNotFound).
-					JSON(fiber.Map{"error": "unknown language"})
+				return nil, zip.ErrNotFound("unknown language")
 			}
-			return c.JSON(fiber.Map{"error": err.Error()})
+			return &RunOut{Error: err.Error()}, nil
 		}
-		return c.JSON(fiber.Map{"result": res})
+		return &RunOut{Result: res}, nil
 	}
 }
 
