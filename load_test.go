@@ -82,7 +82,7 @@ func TestLoad_Reload(t *testing.T) {
 		t.Fatalf("before reload: body=%q, want v1", got)
 	}
 
-	if err := app.Reload("demo", v2); err != nil {
+	if err := app.Reload("demo", zip.Plugin{Bin: v2}); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestLoad_Reload(t *testing.T) {
 		if want == "v2" {
 			bin = v2
 		}
-		if err := app.Reload("demo", bin); err != nil {
+		if err := app.Reload("demo", zip.Plugin{Bin: bin}); err != nil {
 			t.Fatalf("Reload to %s: %v", want, err)
 		}
 		if got := version(t, app); !strings.Contains(got, `"version":"`+want+`"`) {
@@ -119,7 +119,7 @@ func TestLoad_ReloadFailureKeepsServing(t *testing.T) {
 	defer func() { _ = app.Shutdown() }()
 
 	// Not a binary at all — exec fails, or it dies immediately.
-	if err := app.Reload("demo", []byte("#!/bin/false\n")); err == nil {
+	if err := app.Reload("demo", zip.Plugin{Bin: []byte("#!/bin/false\n")}); err == nil {
 		t.Fatal("Reload with a broken binary returned nil, want an error")
 	}
 
@@ -147,7 +147,7 @@ func TestLoad_Unload(t *testing.T) {
 		t.Fatalf("after Unload: status %d, want 503 (route present, no instance)", status)
 	}
 
-	if err := app.Reload("demo", nil); err != nil {
+	if err := app.Reload("demo", zip.Plugin{}); err != nil {
 		t.Fatalf("Reload after Unload: %v", err)
 	}
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
@@ -298,7 +298,7 @@ func TestPlugins_Status(t *testing.T) {
 
 	// A reload must be visible: the counter climbs and Since resets.
 	before := got[0].Since
-	if err := app.Reload("embedded", v2); err != nil {
+	if err := app.Reload("embedded", zip.Plugin{Bin: v2}); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 	after := app.Plugins()[0]
@@ -585,12 +585,12 @@ func TestLoad_Lazy(t *testing.T) {
 	t.Logf("lazy: not running at Load, started on first request as pid %d", after.PID)
 }
 
-// TestReloadTo_PinAndRollbackByDigest proves the two operations a control plane
+// TestReload_PinAndRollbackByDigest proves the two operations a control plane
 // needs and Reload alone cannot express: moving a plugin to a DIFFERENT
 // artifact, and rolling it back to one this host already ran — offline. The
 // origin is shut down before the rollback, so a rollback that touched the
 // network could not pass.
-func TestReloadTo_PinAndRollbackByDigest(t *testing.T) {
+func TestReload_PinAndRollbackByDigest(t *testing.T) {
 	v1, v2 := buildPlugin(t, "v1"), buildPlugin(t, "v2")
 	s1, s2 := sha256.Sum256(v1), sha256.Sum256(v2)
 	d1, d2 := hex.EncodeToString(s1[:]), hex.EncodeToString(s2[:])
@@ -615,7 +615,7 @@ func TestReloadTo_PinAndRollbackByDigest(t *testing.T) {
 	was := app.Plugins()[0]
 
 	// Pin forward to a version this host has never seen.
-	if err := app.ReloadTo("demo", zip.Plugin{URL: srv.URL + "/v2", Sum: d2}); err != nil {
+	if err := app.Reload("demo", zip.Plugin{URL: srv.URL + "/v2", Sum: d2}); err != nil {
 		t.Fatalf("ReloadTo(v2): %v", err)
 	}
 	if got := version(t, app); !strings.Contains(got, `"version":"v2"`) {
@@ -633,7 +633,7 @@ func TestReloadTo_PinAndRollbackByDigest(t *testing.T) {
 	// Everything after this point must come off local disk.
 	srv.Close()
 
-	if err := app.ReloadTo("demo", zip.Plugin{URL: srv.URL + "/v1", Sum: d1}); err != nil {
+	if err := app.Reload("demo", zip.Plugin{URL: srv.URL + "/v1", Sum: d1}); err != nil {
 		t.Fatalf("rollback by digest hit the network: %v", err)
 	}
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
@@ -645,16 +645,16 @@ func TestReloadTo_PinAndRollbackByDigest(t *testing.T) {
 	t.Logf("pinned v1->v2->v1 by digest; rollback served from cache with the origin down")
 }
 
-// TestReloadTo_RefusesUnverifiedURL proves the control plane cannot be talked
+// TestReload_RefusesUnverifiedURL proves the control plane cannot be talked
 // into running an unpinned artifact by going through reload instead of Load.
-func TestReloadTo_RefusesUnverifiedURL(t *testing.T) {
+func TestReload_RefusesUnverifiedURL(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1")}, "/v1/demo")); err != nil {
 		t.Fatalf("Add(Load): %v", err)
 	}
 	defer func() { _ = app.Shutdown() }()
 
-	err := app.ReloadTo("demo", zip.Plugin{URL: "https://example.test/x"})
+	err := app.Reload("demo", zip.Plugin{URL: "https://example.test/x"})
 	if err == nil || !strings.Contains(err.Error(), "unverified") {
 		t.Fatalf("err = %v, want a refusal naming the unverified download", err)
 	}
@@ -663,14 +663,14 @@ func TestReloadTo_RefusesUnverifiedURL(t *testing.T) {
 	}
 }
 
-// TestReloadTo_RefusesRemote proves a mount this host did not start reports why
+// TestReload_RefusesRemote proves a mount this host did not start reports why
 // rather than failing obscurely inside exec.
-func TestReloadTo_RefusesRemote(t *testing.T) {
+func TestReload_RefusesRemote(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Addr: "127.0.0.1:9"}, "/v1/demo")); err != nil {
 		t.Fatalf("Add(Load): %v", err)
 	}
-	err := app.ReloadTo("demo", zip.Plugin{Bin: []byte("x")})
+	err := app.Reload("demo", zip.Plugin{Bin: []byte("x")})
 	if err == nil || !strings.Contains(err.Error(), "remote Addr") {
 		t.Fatalf("err = %v, want a refusal naming the remote mount", err)
 	}
@@ -709,7 +709,7 @@ func TestUnload_LazyStaysDown(t *testing.T) {
 	}
 
 	// Reload is what re-enables it, and it must come back on the same route.
-	if err := app.Reload("demo", nil); err != nil {
+	if err := app.Reload("demo", zip.Plugin{}); err != nil {
 		t.Fatalf("Reload after Unload: %v", err)
 	}
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {

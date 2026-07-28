@@ -12,8 +12,8 @@ import (
 // difference that matters during a rolling upgrade, when the two disagree by
 // design.
 
-// PluginStatus is one loaded plugin as the host currently sees it.
-type PluginStatus struct {
+// Status is one loaded plugin as the host currently sees it.
+type Status struct {
 	Name string `json:"name"`
 
 	// Prefix is the FIRST subtree this plugin answers — the one a log line
@@ -89,7 +89,7 @@ type Usage struct {
 
 // Plugins reports every plugin this host has loaded, ordered by name so a diff
 // between two hosts is stable. Safe to call while requests are in flight.
-func (a *App) Plugins() []PluginStatus {
+func (a *App) Plugins() []Status {
 	a.plugMu.Lock()
 	ps := make([]*plugin, 0, len(a.plugins))
 	for _, p := range a.plugins {
@@ -97,9 +97,9 @@ func (a *App) Plugins() []PluginStatus {
 	}
 	a.plugMu.Unlock()
 
-	out := make([]PluginStatus, 0, len(ps))
+	out := make([]Status, 0, len(ps))
 	for _, p := range ps {
-		s := PluginStatus{
+		s := Status{
 			Name:     p.name,
 			Prefix:   p.prefix,
 			Prefixes: append([]string(nil), p.prefixes...),
