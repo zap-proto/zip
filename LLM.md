@@ -10,47 +10,71 @@ been deleted; every ref it held is on `origin`, so `git clone` restores it if
 anyone ever needs it. `~/work/hanzo/zip` is `github.com/hanzoai/zip`, a dead
 fork, now carrying a `DEPRECATED.md` pointing here — nothing should import it.
 
-## The four verbs
+## The verbs
 
 Everything composes through these. There is deliberately no second way to do
 any of them.
 
 | verb | what it does |
 |---|---|
-| `zip.Get/Post[In,Out](app, …)` | declare a typed **op** — the schema, and what every projection is derived from |
-| `app.Get/Post/...` | register an untyped route (no schema; invisible to every projection) |
+| **`zip.Get/Post[In,Out](app, …)`** | **declare a typed op — THE way to declare a route.** The schema, and what every projection is derived from |
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
 | `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
 | `zip.Call[In,Out](ctx, conn, op, in)` | invoke an op on another app; `zip.Dial`/`DialApp` gets the conn |
+| `app.Get/Post/...` | the ESCAPE HATCH: an untyped route. No op, no schema, invisible to every projection |
 
 `zip.Get[In,Out]` and `zip.Call[In,Out]` are functions rather than methods only
 because Go methods cannot take type parameters. Declaration and invocation
 therefore read alike, and both take their subject first.
 
-## One registry, four projections
+**The untyped verb is last in that table on purpose.** `app.Get(path, fn)` is a
+route and nothing else. Reach for it only when the response is something a schema
+cannot describe — an SSE stream, a protocol upgrade, a proxied byte range, a
+non-JSON body — because a typed op is one decode, one call, one serialize and
+genuinely cannot express those. `examples/sse-streaming` and `examples/websocket`
+are the two exemptions in the tree and each states its reason in the file header.
+Everything else is a typed op. If you can name what goes in and what comes out,
+declare it: that declaration IS the API.
+
+Note that a typed op takes the WHOLE path — `zip.Get(app, …)` registers on the
+`*App`, so there is no `Group` prefix for it to inherit. An app built on
+`app.Group("/v1")` spells the prefix out per route on the way across.
+
+## One registry, five projections
 
 `typed.go`. Every `zip.Get/Post[In,Out]` appends one `*registeredOp` to
 `app.ops` — appended in exactly ONE place (`registerTyped`), and that slice is
 the app's schema. Nothing else is authored; every interface below is derived
 from it, and `op.invoke` (decode → validate → authorize → run) is the ONE
-handler core all four share, so they cannot diverge in behavior.
+handler core all five share, so they cannot diverge in behavior.
 
 | projection | file | consumer | addressed by |
 |---|---|---|---|
 | REST routes | `typed.go` | browsers, the external edge | method + path |
 | OpenAPI 3.1 | `openapi.go` | humans, `/docs`, the published SDKs | `operationId` |
 | MCP tools | `mcp.go` | agents | tool name = `operationId` |
+| CLI commands | `cli.go`, `clispec.go` | operators, scripts | `operationId` → `<service> <operation>` |
 | op-call plane | `call.go` | **other services** | `operationId` |
 
-`opName(op)` is the one place the id rule lives; all four agree on the token.
-`App.OpenAPISpec()` and `App.MCPTools()` read their projection directly, with no
-transport in the way.
+`opName(op)` is the one place the id rule lives; all five agree on the token.
+Since v1.17.8 `Command.OperationID` carries it too, and `WithOperationID`
+renames the command as well as the document, the tool and the call target —
+before that the CLI spelled its own name from the route and one op had two
+names. `App.OpenAPISpec()`, `App.MCPTools()` and `App.Commands()` read their
+projection directly, with no transport in the way.
 
 An **untyped** `app.Get(path, func(c *zip.Ctx) error)` registers no op, so it
-appears in none of the four. That is the single biggest source of surface that
-"exists" but cannot be documented, called by an agent, or reached by another
-service.
+appears in none of the five. That is the single biggest source of surface that
+"exists" but cannot be documented, called by an agent, driven from a script, or
+reached by another service. Fleet-wide it is also the majority of the surface,
+which is what the typing migration is for: converting a route to
+`zip.Get[In,Out]` is what turns four dark interfaces on, and nothing else does.
+
+`app.Module()` (HIP-0105 extension routes) is the one remaining registrar that
+cannot register an op; `module.go`'s doc comment states both structural reasons
+and the one thing that would close it (an extension declaring its contract on
+`runtime.Module`).
 
 ## Calling another service — `call.go`
 
@@ -217,6 +241,60 @@ rather than silently shadowing. A `Mount` is an **ordinary wildcard route**, so
 a more specific route registered afterwards still wins — pinned by
 `TestMount_StaticBeatsRemoteMount`.
 
+## The schema derivation — one type, one definition (v1.17.8)
+
+`openapi.go`. `schemaOf(t, reg, fields)` is the ONE derivation from a Go type to
+JSON Schema. Everything that needs to know what a value is reads it: the
+document's request/response schemas, its query and **path** parameter types, the
+MCP tool's `inputSchema`, and the CLI's flag kind.
+
+**`schemaRegistry` is where a named struct is described once.** Every use of it
+is a `$ref`; the projection supplies the map and the JSON Pointer prefix that
+reaches it (`#/components/schemas/` in a document, `#/$defs/` in a standalone
+schema). The entry is **claimed before the type's fields are walked**, and that
+claim is the cycle guard.
+
+Before it, the `registry` parameter existed and was never written to. Two
+consequences, one cosmetic and one fatal:
+
+- no `$ref` sharing — a type reached by ten ops was inlined ten times;
+- **no cycle guard** — `type Node struct { Children []Node }` recursed forever.
+  A self-referential In type overflowed the stack while building the spec AND
+  while listing the MCP tools. A Go stack overflow is not recoverable, so the
+  service could not start. `schema_test.go` pins both the self-referential and
+  the mutually-recursive case; before the fix those tests did not fail, they
+  killed the test binary.
+
+`rootSchemaOf` is the standalone form MCP needs: an `inputSchema` has to BE the
+object rather than a pointer at one, so the root is inlined and anything else it
+reaches travels alongside in `$defs`.
+
+**What this changed on the wire.** A tool whose In reaches no other named struct
+is byte-identical to before — `$defs` is dropped when nothing refers to it, which
+is every tool that existed before this change (a recursive one could not be
+served at all). A tool whose In has a nested named struct now carries
+`{"$ref": "#/$defs/User"}` plus a `$defs` block instead of the type inlined at
+each use. That is standard JSON Schema 2020-12 and it is deliberate: it keeps the
+tool list describing the same definition the document does, and it stops a type
+used five times from being sent five times in a payload agents receive on every
+conversation. Deliberate, and worth knowing if you consume `MCPTools()` by
+walking `properties` without resolving `$ref`.
+
+Two packages may both call a type `Config`. The registry qualifies the second
+with its package (`pkg.Config`) instead of letting it overwrite the first; before
+that both ops' `$ref`s pointed at whichever arrived last.
+
+`flagType` (`cli.go`) reads `schemaOf` and maps the answer with `specType` — the
+SAME schema-type → flag-kind rule the spec-derived CLI uses — rather than
+re-deriving the vocabulary from `reflect`. A flag spelled from a Go type and the
+same flag spelled from that type's published schema are equal by construction.
+
+`urlFields` is the one list of URL-bindable fields, read by both the path and the
+query parameter declarations, because `bindURL` is one binder over both halves of
+the URL. Path params used to be hardcoded `"type":"string"` while query params
+consulted the input type — the document described the same value two ways
+depending on which half of the URL carried it.
+
 ## The doc comment reaches every prose surface (v1.17.6)
 
 `cmd/zipdoc` lifts the handler's doc comment and its In/Out field comments into
@@ -242,9 +320,31 @@ not the sentence, so it consumes `opName` and `op.invoke` only.)
 
 zip does not define a ZAP envelope, registry, dispatcher or listener.
 `zap-proto/go` owns the wire format and `zap-proto/http` owns HTTP semantics
-over ZAP frames. `zaprpc/` is a leftover parallel implementation of that
-envelope (string service+method, incompatible with upstream's ordinals) and
-should go.
+over ZAP frames.
+
+### `zaprpc/` — deprecated, and NOT what hanzoai/cloud imports
+
+Establish this before touching it: **`github.com/zap-proto/zip/zaprpc` and
+`github.com/zap-proto/go/rpc` are different packages in different modules.**
+cloud's internal service-to-service plane imports the LATTER, under the local
+alias `zaprpc` — `zaprpc "github.com/zap-proto/go/rpc"`, in `rpc.go`, `dial.go`
+and `zapface/*`. The alias is the whole reason the two get confused. Nothing in
+the estate imports `zip/zaprpc`, including zip itself.
+
+| | `zip/zaprpc` | `zap-proto/go/rpc` (what cloud uses) |
+|---|---|---|
+| request | `Envelope{Service, Method string, Payload []byte}` | `Call{Method, PromiseID, Target uint32, Cap, Payload []byte}` |
+| header | 24 bytes | 28 request / 20 response |
+| addressing | service+method **strings** | u32 **ordinals**, promise pipelining |
+
+A peer speaking one cannot decode the other, so `zip/zaprpc` is unreachable by
+the rest of the ZAP fleet. It is marked **Deprecated** as of v1.17.8, and its
+doc no longer cites `app.ZAPRegistry()` — a method that has never existed in
+this module (the only implementation was in the dead `hanzoai/zip` fork). It was
+NOT deleted: removing an exported package from a public module is a breaking
+change and belongs in a release that says so, not in a patch. Deleting it is
+owed. To reach another service use the op-call plane (`zip.DialApp` +
+`zip.Call`); for the ZAP wire format use `zap-proto/go/rpc`.
 
 `zap-proto/http` v0.3.0 carries headers as length-prefixed name/value pairs —
 `[u32 count]` then `[u32 nameLen][name][u32 valueLen][value]`. It used to be a
@@ -259,17 +359,16 @@ on the version, so v0.3.0 and v0.2.x cannot talk.
 (`-ldflags -X main.version=`) from `internal/testplugin` and assert which one
 answered, which is the only honest way to prove a reload swapped processes.
 
-## Known bug — `hasBody` is the ONE rule spelled in four places, and DELETE has already drifted
+## Known bug — `hasBody` is the ONE rule spelled in three places, and DELETE has already drifted
 
 `openapi.go`'s `hasBody` says it is "the ONE place that rule lives … two copies
 would eventually disagree". They already do — nothing calls it but the document:
 
 | site | spelling | DELETE carries |
 |---|---|---|
-| `openapi.go:223` `hasBody` | `GET, HEAD, DELETE` → no body | query params |
-| `typed.go:222` | `method != "GET" && method != "HEAD"` | **a body** |
-| `cli.go:403` | `c.Method == "GET" \|\| c.Method == "HEAD"` | **a body** |
-| `cli_test.go:353` | skips `GET/HEAD/DELETE` | — (hides the divergence) |
+| `openapi.go` `hasBody` | `GET, HEAD, DELETE` → no body | query params |
+| `typed.go` (`registerTyped`'s fiber handler) | `method != "GET" && method != "HEAD"` | **a body** |
+| `cli.go` (`Remote.Invoke`) | `c.Method == "GET" \|\| c.Method == "HEAD"` | **a body** |
 
 So a typed `Delete` route reads a JSON body the OpenAPI document says does not
 exist, and any SDK generated from that document sends query params instead.
@@ -277,10 +376,28 @@ Both happen to work today (`bindURL(query)` runs either way), which is why it
 has gone unnoticed; the CLI's spec path and its in-process path disagree about
 the same op.
 
-The fix is to call `hasBody` from `typed.go` and `cli.go` and delete the
-`DELETE` skip in `cli_test.go` — but it moves DELETE's input from the body to
-the URL on the wire, so it belongs in a release where consumers can be checked,
-not in a patch. Not fixed here deliberately.
+The fix is to call `hasBody` from `typed.go` and `cli.go` — but it moves
+DELETE's input from the body to the URL on the wire, so it belongs in a release
+where consumers can be checked, not in a patch. Not fixed here deliberately.
+
+**It is no longer hidden.** `cli_test.go`'s `TestCLI_SpecAndRegistryAgree` used
+to `continue` past `GET/HEAD/DELETE` — while the fixture registered no DELETE at
+all, so the case was skipped twice over. It now registers one and asserts the
+divergence precisely, in `assertURLBoundDivergence`, which pins three things
+about a bodyless op's trip through the document:
+
+1. the document names the registry's **scalar** flags and only those, because
+   those are what a URL can carry (`urlFields`);
+2. it declares every query parameter **optional**, never reading the field's
+   `validate:"required"` tag — so a field the handler refuses to run without
+   reads as optional to every generator;
+3. the doc comment's **Example does not survive**, an example being a request
+   body and a bodyless op declaring none.
+
+None of the three is endorsed. Close any one and that test fails and sends you
+here — which is the point of pinning them rather than skipping them. (2) and (3)
+are doc-shape changes that move published SDK signatures, so they ride the same
+coordinated release as `hasBody`.
 
 ## Known bug — zipdoc: module-load extraction diverges from package-load
 
