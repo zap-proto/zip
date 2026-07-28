@@ -43,6 +43,11 @@ type PluginStatus struct {
 	// is the difference between "not deployed" and "deployed but down".
 	Running bool `json:"running"`
 
+	// Disabled is true when Unload stopped it deliberately, as opposed to it
+	// having crashed. Both answer 503, so without this an operator cannot tell
+	// a maintenance window from an outage — and would page for the former.
+	Disabled bool `json:"disabled,omitempty"`
+
 	// Since is when the CURRENT instance started — it resets on Reload, so it
 	// reports the age of what is running, not of the mount.
 	Since time.Time `json:"since,omitzero"`
@@ -100,6 +105,7 @@ func (a *App) Plugins() []PluginStatus {
 			Prefixes: append([]string(nil), p.prefixes...),
 			Source:   p.source(),
 			Version:  p.spec.Sum,
+			Disabled: p.disabled.Load(),
 			Reloads:  int(p.reloads.Load()),
 			Restarts: int(p.restarts.Load()),
 		}

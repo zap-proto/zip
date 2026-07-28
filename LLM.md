@@ -77,6 +77,17 @@ https://github.com/zap-proto/zip/releases/download/<tag>/binaries.json   # url +
    process, its result on a channel), its pooled conns closed, its dir removed.
 
 `Unload` leaves routes answering 503 rather than removing them — same reason.
+503 also beats 404 on the wire: 404 says "no such API" and is cacheable, 503
+says "exists, currently down" and is retryable. `PluginStatus.Disabled`
+separates a deliberate stop from a crash, since both answer 503. Unload also
+pins a LAZY plugin down — otherwise the next request through its prefix would
+start it straight back up, and disable would not stick for the plugins a
+many-service host actually runs.
+
+`ReloadTo(name, Plugin{URL, Sum})` is `Reload` to a DIFFERENT artifact — the
+version-pin and the rollback. Same three invariants (it is the same code path);
+the digest is the cache key, so rolling back to bits this host already ran
+touches no network. `Reload(name, bin)` is that call with a `Bin` set.
 
 Go plugins (`-buildmode=plugin`) are not used and cannot be: they require cgo
 (so they break the `CGO_ENABLED=0` scratch images), demand byte-identical
