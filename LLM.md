@@ -122,3 +122,15 @@ on the version, so v0.3.0 and v0.2.x cannot talk.
 `go test -race ./...`. The plugin tests build two genuinely different binaries
 (`-ldflags -X main.version=`) from `internal/testplugin` and assert which one
 answered, which is the only honest way to prove a reload swapped processes.
+
+## Known bug — zipdoc: module-load extraction diverges from package-load
+
+`zipdoc -check ./...` from a consumer's module root can flag files as stale
+that `zipdoc -check` run in the package's own directory (and `go generate`,
+which writes the same bytes) call clean — and WHICH files it flags varies
+between runs (observed 2→4 in hanzoai/cloud across consecutive runs; per-pkg
+mode stable across 15 packages). Render() is fully sorted, so the divergence
+is in extraction under whole-module packages.Load, not in emission.
+Until fixed, gates must invoke -check per package directory — exactly the
+load mode the //go:generate directive uses. hanzoai/cloud's `make test` does
+this; copy that shape, not `-check ./...`.
