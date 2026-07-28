@@ -30,13 +30,13 @@ func CommandsFromSpec(spec []byte) ([]Command, error) {
 			}
 			route := colonPath(path)
 			c := Command{
-				Service:     "",
 				Method:      method,
 				Path:        route,
+				OperationID: op.OperationID,
 				Summary:     op.Summary,
 				Description: op.Description,
 			}
-			c.Service, c.Name = commandName(method, route)
+			c.Service, c.Name = commandName(method, route, op.OperationID)
 			if c.Summary == "" {
 				c.Summary = firstSentence(op.Description)
 			}
@@ -120,6 +120,10 @@ type specDoc struct {
 }
 
 type specOp struct {
+	// OperationID is the op's identity in wire form. A command read off the
+	// document is the same command read off the registry BECAUSE both spell
+	// themselves from this token.
+	OperationID string      `json:"operationId"`
 	Summary     string      `json:"summary"`
 	Description string      `json:"description"`
 	Parameters  []specParam `json:"parameters"`
