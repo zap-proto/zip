@@ -520,7 +520,11 @@ func fetch(spec Plugin) (string, error) {
 	if err := os.MkdirAll(cache, 0o700); err != nil {
 		return "", fmt.Errorf("plugin cache: %w", err)
 	}
-	final := filepath.Join(cache, spec.Name+"-"+spec.Sum)
+	// Keyed on the digest ALONE, never on the name: one artifact commonly serves
+	// many plugins — a multi-call binary mounted 108 times under 108 names is
+	// one 195MB download, not 108 of the same bytes. The first plugin to start
+	// warms every other.
+	final := filepath.Join(cache, spec.Sum)
 	if _, err := os.Stat(final); err == nil {
 		return final, nil // already verified once; the name IS the digest
 	}
