@@ -40,19 +40,19 @@ func (c *Ctx) SetLog(l luxlog.Logger) { c.log = l }
 
 // Org returns the X-Org-Id from the JWT-validated gateway. Empty when
 // no gateway is in front (local dev / direct ingress).
-func (c *Ctx) Org() string { return c.fc.Get("X-Org-Id") }
+func (c *Ctx) Org() string { return c.fc.Get(HeaderOrg) }
 
 // User returns the X-User-Id from the JWT-validated gateway.
-func (c *Ctx) User() string { return c.fc.Get("X-User-Id") }
+func (c *Ctx) User() string { return c.fc.Get(HeaderUser) }
 
 // UserEmail returns the X-User-Email from the JWT-validated gateway.
-func (c *Ctx) UserEmail() string { return c.fc.Get("X-User-Email") }
+func (c *Ctx) UserEmail() string { return c.fc.Get(HeaderUserEmail) }
 
 // IsAdmin returns the X-User-IsAdmin gateway claim as a bool.
-func (c *Ctx) IsAdmin() bool { return c.fc.Get("X-User-IsAdmin") == "true" }
+func (c *Ctx) IsAdmin() bool { return c.fc.Get(HeaderUserAdmin) == "true" }
 
 // RequestID returns the value of X-Request-Id (set by the RequestID middleware).
-func (c *Ctx) RequestID() string { return c.fc.Get("X-Request-Id") }
+func (c *Ctx) RequestID() string { return c.fc.Get(HeaderRequestID) }
 
 // ----- request basics ------------------------------------------------------
 

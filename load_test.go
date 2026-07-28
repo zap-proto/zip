@@ -719,4 +719,3 @@ func TestUnload_LazyStaysDown(t *testing.T) {
 		t.Fatal("still marked disabled after a successful Reload")
 	}
 }
-

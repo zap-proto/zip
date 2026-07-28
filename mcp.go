@@ -94,6 +94,18 @@ func (a *App) handleMCP(fc fiber.Ctx) error {
 	}
 }
 
+// MCPTools is the app's full MCP tool surface, projected from the typed-op
+// registry — the tool-list counterpart of [App.OpenAPISpec], and the whole of
+// what a plugin has to do to be an MCP server: nothing. Every typed op is one
+// tool, named by its operation id, described by its doc comment, with the same
+// JSON Schema the OpenAPI document carries.
+//
+// Serving it is already handled: the /mcp route rides every transport the app
+// Listens on. Read it directly when a host wants a plugin's tools in-process —
+// composing several plugins' surfaces, filtering them, or asserting them in a
+// test — without a round trip.
+func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
+
 // mcpTools projects every typed op into an MCP tool descriptor. The inputSchema
 // is the SAME schemaOfDoc(InType) the OpenAPI doc uses, carrying the SAME prose
 // cmd/zipdoc lifted from the handler — one comment, three surfaces (spec, CLI

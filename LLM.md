@@ -17,10 +17,125 @@ any of them.
 
 | verb | what it does |
 |---|---|
-| `app.Get/Post/...` | register a route |
+| `zip.Get/Post[In,Out](app, …)` | declare a typed **op** — the schema, and what every projection is derived from |
+| `app.Get/Post/...` | register an untyped route (no schema; invisible to every projection) |
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
 | `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
+| `zip.Call[In,Out](ctx, conn, op, in)` | invoke an op on another app; `zip.Dial`/`DialApp` gets the conn |
+
+`zip.Get[In,Out]` and `zip.Call[In,Out]` are functions rather than methods only
+because Go methods cannot take type parameters. Declaration and invocation
+therefore read alike, and both take their subject first.
+
+## One registry, four projections
+
+`typed.go`. Every `zip.Get/Post[In,Out]` appends one `*registeredOp` to
+`app.ops` — appended in exactly ONE place (`registerTyped`), and that slice is
+the app's schema. Nothing else is authored; every interface below is derived
+from it, and `op.invoke` (decode → validate → authorize → run) is the ONE
+handler core all four share, so they cannot diverge in behavior.
+
+| projection | file | consumer | addressed by |
+|---|---|---|---|
+| REST routes | `typed.go` | browsers, the external edge | method + path |
+| OpenAPI 3.1 | `openapi.go` | humans, `/docs`, the published SDKs | `operationId` |
+| MCP tools | `mcp.go` | agents | tool name = `operationId` |
+| op-call plane | `call.go` | **other services** | `operationId` |
+
+`opName(op)` is the one place the id rule lives; all four agree on the token.
+`App.OpenAPISpec()` and `App.MCPTools()` read their projection directly, with no
+transport in the way.
+
+An **untyped** `app.Get(path, func(c *zip.Ctx) error)` registers no op, so it
+appears in none of the four. That is the single biggest source of surface that
+"exists" but cannot be documented, called by an agent, or reached by another
+service.
+
+## Calling another service — `call.go`
+
+The cure for the mega-binary. An aggregator that reaches another app by
+importing its package drags in that app's whole dependency graph; one that
+hand-writes a client copies the schema into a second place to drift. Neither is
+needed — the op already has a stable name, so a caller addresses it by name over
+the app's own transport:
+
+```go
+c, err := zip.DialApp("flags")                  // $ZIP_RUNTIME_DIR/flags.sock
+out, err := zip.Call[BoolIn, BoolOut](ctx, c, "flags_bool", &in)
+```
+
+The plane is an ordinary route (`CallPath = "/.well-known/zip/op/"`), so it
+rides every transport `Listen` was given and inherits the app's middleware,
+error handler, validator and `Authorizer` — it is exposed exactly as much as the
+REST routes and no more. The whole input arrives as the body: addressing by name
+means there is no URL to carry half of it, the same way `tools/call` does it.
+
+Errors cross whole. The wire form is what `errorHandler` writes for every route
+(`{status, code, error}`), so `errors.As(err, &he)` on the caller's side sees the
+`*HTTPError` the callee returned, status intact. A void op yields `(nil, nil)`.
+
+**Generic, not generated — deliberately.** A generated per-op Go client would
+put a second copy of the schema in the caller's repo on its own regeneration
+schedule: the drift this plane exists to remove, one directory over, plus a
+fourth client generator racing openapi-generator (which already produces the
+published SDKs from the OpenAPI projection). `Call[In,Out]` is type-safe at the
+call site against the types the callee declared, with nothing to regenerate. A
+caller wanting them checked at compile time imports the op's In/Out — a
+types-only package, none of the handler's dependencies.
+
+### The ONE socket-path scheme
+
+```
+SocketPath(name) = RuntimeDir() + "/" + name + ".sock"
+
+RuntimeDir():  $ZIP_RUNTIME_DIR          set explicitly — always wins
+               $XDG_RUNTIME_DIR/zip      a dev box, no configuration needed
+               /run/zip                  the system default
+```
+
+Both halves use it — a service serves at `zip.Addr(zip.SocketPath("flags"))`,
+a caller reaches it with `zip.DialApp("flags")` — which is what keeps them from
+drifting. No registry, no discovery service, no second spelling: the name IS the
+address, and one environment variable moves the whole fleet. `socketIn(dir,
+name)` states the shape once; the plugin loader names a child's private socket
+with the same function.
+
+`Listen` creates the directory `0700` if it is missing, so serving at the
+canonical path works on a fresh host. An existing directory keeps its own mode:
+a deployment needing a socket shared across users creates the directory itself
+and points `ZIP_RUNTIME_DIR` at it.
+
+## Who is calling — `caller.go`
+
+Two questions, two authorities, neither answered by the caller:
+
+- **WHO the request is for** — the gateway's assertion, in the `X-Org-Id` /
+  `X-User-*` / `X-Request-Id` headers (named once, as `zip.Header*`).
+  `c.Forward()` propagates them onto the next hop; `zip.CallerOf(ctx)` reads
+  them inside a typed handler (an untyped one has `c.Org()` and friends). `Call`
+  forwards only what the ctx already carries — a bare `context.Background()`
+  forwards nothing, so an unattributed call looks unattributed.
+- **WHAT is calling** — `zip.PeerOf(ctx)` / `c.Peer()` return the kernel's
+  `SO_PEERCRED` reading of the peer process (pid/uid/gid) on a unix socket. The
+  peer never sends it, so there is nothing to forge. `nil` means "this host
+  cannot attest the caller" (tcp, or a non-Linux host) — fail closed on it;
+  never read a zero `Peer` as "attested as root".
+
+An argv flag, an env var or a shared secret would all be things a caller states
+about itself. `SO_PEERCRED` is the one thing about a caller it does not get to
+say — which is why a service-to-service call over a unix socket needs no
+credential of its own.
+
+**Cost, measured.** `callerContext` attaches the live request to the typed-op
+context, so `Benchmark_TypedRoute/typed` went 28 → **29 allocs/op** (1298 →
+1346 B/op; ns/op inside noise). That one `context.WithValue` is what makes both
+reads possible; the alternative — copying five headers onto every typed request
+to serve the few that forward them — costs more and helps fewer. The **untyped**
+path is untouched at 27 allocs/op, and
+`TestServePathAllocsAreChainDepthInvariant` still pins it at one heap value per
+request. Do not "fix" the 29 by removing the attachment; you would be removing
+`CallerOf` and `PeerOf`.
 
 ## Transport is a value
 
@@ -102,7 +217,7 @@ rather than silently shadowing. A `Mount` is an **ordinary wildcard route**, so
 a more specific route registered afterwards still wins — pinned by
 `TestMount_StaticBeatsRemoteMount`.
 
-## The doc comment reaches all three projections (v1.17.6)
+## The doc comment reaches every prose surface (v1.17.6)
 
 `cmd/zipdoc` lifts the handler's doc comment and its In/Out field comments into
 `zip.Describe`, and `docFor` is the one accessor. Three surfaces read it:
@@ -119,7 +234,9 @@ hanzoai/cloud, all 164 tools had an empty description before the fix and all 164
 have one after (324 documented fields). `WithSummary` remains the fallback, so an
 op in a package `zipdoc` never ran over still names itself.
 
-If you add a fourth projection, read `docFor` — do not add a second prose field.
+If you add another projection that shows prose, read `docFor` — do not add a
+second prose field. (The op-call plane shows none: a service reads the schema,
+not the sentence, so it consumes `opName` and `op.invoke` only.)
 
 ## What lives elsewhere
 
@@ -141,6 +258,29 @@ on the version, so v0.3.0 and v0.2.x cannot talk.
 `go test -race ./...`. The plugin tests build two genuinely different binaries
 (`-ldflags -X main.version=`) from `internal/testplugin` and assert which one
 answered, which is the only honest way to prove a reload swapped processes.
+
+## Known bug — `hasBody` is the ONE rule spelled in four places, and DELETE has already drifted
+
+`openapi.go`'s `hasBody` says it is "the ONE place that rule lives … two copies
+would eventually disagree". They already do — nothing calls it but the document:
+
+| site | spelling | DELETE carries |
+|---|---|---|
+| `openapi.go:223` `hasBody` | `GET, HEAD, DELETE` → no body | query params |
+| `typed.go:222` | `method != "GET" && method != "HEAD"` | **a body** |
+| `cli.go:403` | `c.Method == "GET" \|\| c.Method == "HEAD"` | **a body** |
+| `cli_test.go:353` | skips `GET/HEAD/DELETE` | — (hides the divergence) |
+
+So a typed `Delete` route reads a JSON body the OpenAPI document says does not
+exist, and any SDK generated from that document sends query params instead.
+Both happen to work today (`bindURL(query)` runs either way), which is why it
+has gone unnoticed; the CLI's spec path and its in-process path disagree about
+the same op.
+
+The fix is to call `hasBody` from `typed.go` and `cli.go` and delete the
+`DELETE` skip in `cli_test.go` — but it moves DELETE's input from the body to
+the URL on the wire, so it belongs in a release where consumers can be checked,
+not in a patch. Not fixed here deliberately.
 
 ## Known bug — zipdoc: module-load extraction diverges from package-load
 

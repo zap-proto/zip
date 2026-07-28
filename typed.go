@@ -234,7 +234,7 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 		// API — so every route that carries `?q=` had to stay an untyped handler,
 		// invisible to OpenAPI and MCP. Reading it here is what makes those routes
 		// expressible as ops.
-		out, err := op.invoke(c.Context(), body, c.Queries(), path)
+		out, err := op.invoke(callerContext(c), body, c.Queries(), path)
 		if err != nil {
 			return err
 		}
