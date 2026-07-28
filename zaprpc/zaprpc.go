@@ -1,13 +1,24 @@
-// Package zaprpc is an OPTIONAL named-service RPC dispatch helper for zip
-// apps that want a Cap'n-Proto/gRPC-style service registry (name → method →
-// handler) rather than plain REST routes.
+// Package zaprpc is an OPTIONAL named-service RPC dispatch helper: a
+// Cap'n-Proto/gRPC-style service registry (name → method → handler) with its own
+// envelope, mounted as an ordinary route via [HTTPHandler].
 //
-// It is DECOUPLED from the transport: zip's primary transport is ZAP, wired
-// once in the framework (App.Listen serves the whole fiber handler over
-// zap-proto/http — the routes ARE the ZAP surface, no registry needed). This
-// package is for the separate case where you want to expose generated
-// zapc <svc>_server.go services by name; mount it as an ordinary route with
-// zaprpc.HTTPHandler(registry) (see http.go), reachable over either transport.
+// # Deprecated: it is neither zip's call plane nor ZAP's wire format
+//
+// Nothing in zip uses it, and nothing needs to:
+//
+//   - To reach another service, use zip's op-call plane — zip.DialApp + zip.Call
+//     address an op by its operation id, typed both ways, over whatever
+//     transport the callee is listening on. That plane is a projection of the
+//     typed-op registry, so it cannot drift from the routes, the document or the
+//     MCP tools.
+//   - For the ZAP wire format itself, use github.com/zap-proto/go/rpc, which
+//     owns it. This package's envelope is a PARALLEL one that predates that and
+//     does not interoperate with it: 24-byte header, service and method as
+//     strings, no promise pipelining, against upstream's u32 ordinals. A peer
+//     speaking one cannot decode the other.
+//
+// It stays here only so removing an exported package is a decision a release
+// makes deliberately rather than a patch makes silently. Do not build on it.
 package zaprpc
 
 import (

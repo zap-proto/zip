@@ -51,6 +51,38 @@ type moduleResponse struct {
 //
 // The extension's exported function name is inferred from the path's last
 // non-{param} segment, lowercased (e.g. "POST /v1/policy/eval" → "eval").
+//
+// # A module route registers a ROUTE and no op, and cannot register one
+//
+// So it is invisible to every projection: it is in no OpenAPI document, is no
+// MCP tool, and no service can reach it with zip.Call. That is a real hole —
+// the envelope in and out of a module IS a JSON contract — and it is stated
+// here rather than left to be discovered, because the two reasons it cannot
+// close today are both structural:
+//
+//  1. THERE IS NO TYPE TO DERIVE A SCHEMA FROM. A typed op's schema comes from
+//     its In/Out Go types. A module is LOADED at run time out of a directory —
+//     that is the whole point of an extension — so at the moment this route is
+//     registered zip holds a [github.com/zap-proto/zip/runtime.Module]
+//     (Name/Runtime/Exports/Invoke) and no declaration of what the module
+//     accepts or returns. Registering it as an open object would put the path
+//     in the document while saying nothing about the contract, which is not
+//     the same thing as documenting it.
+//  2. A TYPED OP CANNOT EXPRESS THE MODULE'S RESPONSE. A module answers with a
+//     moduleResponse — status, headers, body — and modules use it (a redirect,
+//     a 404, a non-JSON body). A typed op returns Out and zip decides the
+//     status, so routing this through registerTyped would silently drop a
+//     capability the envelope exists to provide.
+//
+// What closes it is (1): an extension that DECLARES its contract, via a
+// manifest schema surfaced on [github.com/zap-proto/zip/runtime.Module]. The op
+// would then carry the module's own schema and every projection follows, with
+// the route keeping the envelope it has now. Until an extension declares one
+// there is nothing to project, and inventing a shape for it here would be a
+// second source of truth for a contract zip does not own.
+//
+// A route whose contract IS known belongs in a typed op — declare it with
+// [Get]/[Post] and let the module be an implementation detail behind it.
 func (a *App) Module(methodPath, runtimeName, modulePath string) error {
 	method, path, fn, err := parseModuleSpec(methodPath)
 	if err != nil {
