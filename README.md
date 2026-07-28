@@ -2,38 +2,47 @@
 
 > **Docs:** [zip](https://zap-proto.dev/docs/zip) · part of the [ZAP Protocol](https://zap-proto.io)
 
-The ZAP-native Go web framework. Built on [**Fiber v3**](https://github.com/zap-proto/fiber) / fasthttp, with a terse route API, typed handlers that project to OpenAPI **and** MCP, and **ZAP as the primary transport** — HTTP is a secondary view of the same routes.
+The ZAP-native Go web framework. Built on [**Fiber v3**](https://github.com/zap-proto/fiber) / fasthttp. A route is declared **once, as a typed operation**, and zip projects it into REST, OpenAPI, MCP, a CLI and a by-name call plane — with **ZAP as the primary transport**, HTTP a secondary view of the same routes.
 
 [**zap-proto.io**](https://zap-proto.io) · [Docs](https://zap-proto.dev/docs/zip) · [fiber](https://github.com/zap-proto/fiber) · [Spec](https://github.com/zap-proto/spec)
 
-**ONE framework. ONE `Listen` verb. Routes defined once, served over every transport.**
+**ONE framework. ONE `Listen` verb. Operations declared once, served over every transport, projected into every interface.**
 
 ```go
 package main
 
 import (
+    "context"
+    "log"
+
     "github.com/zap-proto/zip"
     "github.com/zap-proto/zip/middleware"
 )
+
+// The In and Out types ARE the contract. Nothing below is written twice.
+type GetUserIn struct {
+    ID string `json:"id"` // binds from the :id path segment
+}
+
+type User struct {
+    ID  string `json:"id"`
+    Org string `json:"org"`
+}
+
+// GetUser returns one user, scoped to the caller's org.
+func getUser(ctx context.Context, in *GetUserIn) (*User, error) {
+    return &User{ID: in.ID, Org: zip.CallerOf(ctx).Org}, nil // gateway-minted identity
+}
 
 func main() {
     app := zip.New(zip.Config{})
     app.Use(middleware.Recover(), middleware.RequestID())
 
-    app.Get("/health", func(c *zip.Ctx) error {
-        return c.JSON(200, map[string]string{"status": "ok"})
-    })
+    // ONE typed op → a REST route, an OpenAPI operation, an MCP tool,
+    // a `<service> <operation>` command, and a target for zip.Call.
+    zip.Get(app, "/v1/users/:id", getUser)
 
-    v1 := app.Group("/v1")
-    v1.Get("/users/:id", func(c *zip.Ctx) error {
-        return c.JSON(200, map[string]string{
-            "id":   c.Param("id"),
-            "org":  c.Org(),  // gateway-minted X-Org-Id
-            "user": c.User(), // gateway-minted X-User-Id
-        })
-    })
-
-    _ = app.Listen(":9653", "http://:8080") // ZAP primary + HTTP extra, one verb
+    log.Fatal(app.Listen(":9653", "http://:8080")) // ZAP primary + HTTP extra, one verb
 }
 ```
 
@@ -47,7 +56,8 @@ Module path `github.com/zap-proto/zip`. Requires Go 1.26+.
 
 ## Features
 
-- **Terse routes** — `app.Get(path, fn)` is the primary API; handlers are `func(c *zip.Ctx) error`.
+- **Typed ops are the API** — `zip.Get/Post/Put/Patch/Delete[In, Out](app, path, fn)` is how a route is declared. It registers ONE operation; every interface below is derived from it, and `op.invoke` (decode → validate → authorize → run) is the one handler core all of them share. The In/Out types are the contract, so the document, the tool, the command and the client cannot drift from the code — there is nowhere for them to drift *to*.
+- **Untyped routes are the escape hatch, and they cost every projection** — `app.Get(path, func(c *zip.Ctx) error)` registers a route and **no operation**. The endpoint is then in no OpenAPI document, is no MCP tool, has no command, and no service can reach it with `zip.Call`; it is reachable only by someone who already knows the URL. That is the right trade when the response is something a schema cannot describe — an SSE stream, a protocol upgrade, a proxied byte range, a non-JSON body — and the wrong one for everything else. If you can name what goes in and what comes out, declare it.
 - **Transport is a value, not a method** — one verb, `app.Listen(addrs...)`, and the address scheme selects the transport (mirrors `net.Listen`):
 
   ```go
@@ -78,7 +88,15 @@ Module path `github.com/zap-proto/zip`. Requires Go 1.26+.
   ```
 
   A plugin is an ordinary zip app — no SDK, no schema — started on its own unix socket and reached over ZAP. The host links zip and a transport, never a plugin's dependency graph, so its link time doesn't grow when a plugin does, plugins build in parallel, and `go:embed` keeps the deployment a single artifact. `app.Reload(name, bin)` swaps a running plugin for a new build without dropping a request: the replacement must be listening before any traffic moves to it, so a bad build can't take the route down, and routes register once and resolve their target per request, so repeated reloads stay flat in memory. `app.Mount(prefix, addr)` is the same delegation without the process management.
-- **One registry, four projections** — `zip.Get[In, Out](app, path, fn)` registers one operation that becomes a REST route, an OpenAPI 3.1 doc (`/.well-known/openapi.json`, Swagger UI at `/docs`), a Model Context Protocol tool at `/mcp` (JSON-RPC 2.0), **and** a by-name call plane other services reach with `zip.Call`. Same schema, same handler. Because each is an ordinary route, they ride every transport `Listen` was given — ZAP-native MCP is automatic. On by default; `Config.MCP.Disabled` to suppress.
+- **One registry, five projections** — one `zip.Get[In, Out](app, path, fn)` becomes a REST route, an OpenAPI 3.1 doc (`/.well-known/openapi.json`, Swagger UI at `/docs`), a Model Context Protocol tool at `/mcp` (JSON-RPC 2.0), a command line (`app.CLI()`, or `zip.CommandsFromSpec` for a client that links none of the service), **and** a by-name call plane other services reach with `zip.Call`. Same schema, same handler, one operation id addressing all five. Because each is an ordinary route, they ride every transport `Listen` was given — ZAP-native MCP is automatic. On by default; `Config.MCP.Disabled` to suppress.
+
+  ```
+                        ┌── REST route          method + path
+                        ├── OpenAPI 3.1         operationId
+  zip.Get[In,Out] ──op──┼── MCP tool            operationId
+                        ├── CLI command         operationId
+                        └── zip.Call plane      operationId
+  ```
 - **Services call services without linking** — `zip.DialApp("flags")` opens a ZAP connection over that app's canonical unix socket (`$ZIP_RUNTIME_DIR/flags.sock`) and `zip.Call[In, Out](ctx, c, "flags_bool", &in)` invokes one op, typed both ways, with the callee's `*HTTPError` intact on failure. No import of the callee's package, no hand-written client, no generated one to drift. Identity is the gateway's headers forwarded (`c.Forward()`) plus the kernel's `SO_PEERCRED` view of the calling process (`zip.PeerOf(ctx)`) — nothing the caller can forge.
 - **Precedence is a property of the pattern** — routing comes from the [`zap-proto/fiber`](https://github.com/zap-proto/fiber) fork: the most specific pattern wins regardless of registration order (`static ≻ :param ≻ *`), and ambiguous equal-specificity overlaps panic at startup instead of silently shadowing.
 - **Identity built-in** — `c.Org() / c.User() / c.UserEmail() / c.IsAdmin()` read JWT-validated `X-*` headers set by the gateway; handlers never parse tokens.
@@ -92,6 +110,8 @@ Module path `github.com/zap-proto/zip`. Requires Go 1.26+.
 ## Documentation
 
 The full guide — Ctx reference, the route-precedence contract, middleware, extension-runtime mounts, and versioning — is at **[zap-proto.dev/docs/zip](https://zap-proto.dev/docs/zip)**. Runnable examples live in [`examples/`](./examples).
+
+Start with [`examples/hello`](./examples/hello) (two typed ops, four projections) and [`examples/zap-typed`](./examples/zap-typed). [`examples/sse-streaming`](./examples/sse-streaming) and [`examples/websocket`](./examples/websocket) are the two that stay untyped, and each says why at the top of the file — a stream and an upgrade have no single value for an `Out` to be. The `migrate-from-*` examples show the port as two steps: mechanical first, typed second, because stopping after the first leaves you with exactly the surface you were migrating away from.
 
 ## License
 
