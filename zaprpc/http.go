@@ -14,15 +14,24 @@ const (
 	HeaderMethod  = "X-ZAP-Method"
 )
 
-// HTTPHandler returns a fiber.Handler that serves the ZAP RPC plane over
-// HTTP POST. The request body is a canonical ZAP envelope (service,
-// method, payload); the handler decodes it, dispatches through reg, and
-// writes a ZAP response envelope. Returns fiber.Handler (not zip.Handler)
-// because zaprpc is imported by zip — depending back would cycle.
+// HTTPHandler returns a fiber.Handler that serves this package's RPC plane over
+// HTTP POST. The request body is a zaprpc envelope (service, method, payload);
+// the handler decodes it, dispatches through reg, and writes a zaprpc response
+// envelope.
 //
-// Mount it on any zip/Fiber router:
+// The registry is the caller's — zip has no such thing. An App's registry is its
+// typed ops, which are reached as routes, as an OpenAPI document, as MCP tools
+// and by name over zip.Call; none of them is a zaprpc.Registry and there is no
+// adapter between them. (This doc used to show `app.ZAPRegistry()`, a method
+// that has never existed in this module.)
 //
-//	app.Fiber().Post("/zap", zaprpc.HTTPHandler(app.ZAPRegistry()))
+//	reg := zaprpc.NewRegistry()
+//	reg.Register(validateService{}) // your zapc-generated <svc>_server.go
+//	app.Fiber().Post("/zap", zaprpc.HTTPHandler(reg))
+//
+// It returns a fiber.Handler rather than a zip.Handler because this package
+// does not import zip — the dependency runs one way, and mounting is the
+// caller's business.
 func HTTPHandler(reg *Registry) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		body := c.Body()
