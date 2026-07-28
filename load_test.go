@@ -584,3 +584,138 @@ func TestLoad_Lazy(t *testing.T) {
 	}
 	t.Logf("lazy: not running at Load, started on first request as pid %d", after.PID)
 }
+
+// TestReloadTo_PinAndRollbackByDigest proves the two operations a control plane
+// needs and Reload alone cannot express: moving a plugin to a DIFFERENT
+// artifact, and rolling it back to one this host already ran — offline. The
+// origin is shut down before the rollback, so a rollback that touched the
+// network could not pass.
+func TestReloadTo_PinAndRollbackByDigest(t *testing.T) {
+	v1, v2 := buildPlugin(t, "v1"), buildPlugin(t, "v2")
+	s1, s2 := sha256.Sum256(v1), sha256.Sum256(v2)
+	d1, d2 := hex.EncodeToString(s1[:]), hex.EncodeToString(s2[:])
+
+	bits := map[string][]byte{"/v1": v1, "/v2": v2}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bits[r.URL.Path])
+	}))
+
+	cache := t.TempDir()
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(zip.Plugin{
+		Name: "demo", URL: srv.URL + "/v1", Sum: d1, Dir: cache,
+	}, "/v1/demo")); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
+		t.Fatalf("body=%q, want v1", got)
+	}
+	was := app.Plugins()[0]
+
+	// Pin forward to a version this host has never seen.
+	if err := app.ReloadTo("demo", zip.Plugin{URL: srv.URL + "/v2", Sum: d2}); err != nil {
+		t.Fatalf("ReloadTo(v2): %v", err)
+	}
+	if got := version(t, app); !strings.Contains(got, `"version":"v2"`) {
+		t.Fatalf("after pin: body=%q, want v2 answering", got)
+	}
+	now := app.Plugins()[0]
+	if now.PID == was.PID {
+		t.Fatal("pid did not change — no swap happened")
+	}
+	// The reported version must be the bits running, not the bits loaded.
+	if now.Version != d2 {
+		t.Fatalf("Version = %q, want the v2 digest %q", now.Version, d2)
+	}
+
+	// Everything after this point must come off local disk.
+	srv.Close()
+
+	if err := app.ReloadTo("demo", zip.Plugin{URL: srv.URL + "/v1", Sum: d1}); err != nil {
+		t.Fatalf("rollback by digest hit the network: %v", err)
+	}
+	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
+		t.Fatalf("after rollback: body=%q, want v1", got)
+	}
+	if v := app.Plugins()[0].Version; v != d1 {
+		t.Fatalf("Version = %q, want the v1 digest %q", v, d1)
+	}
+	t.Logf("pinned v1->v2->v1 by digest; rollback served from cache with the origin down")
+}
+
+// TestReloadTo_RefusesUnverifiedURL proves the control plane cannot be talked
+// into running an unpinned artifact by going through reload instead of Load.
+func TestReloadTo_RefusesUnverifiedURL(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1")}, "/v1/demo")); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	err := app.ReloadTo("demo", zip.Plugin{URL: "https://example.test/x"})
+	if err == nil || !strings.Contains(err.Error(), "unverified") {
+		t.Fatalf("err = %v, want a refusal naming the unverified download", err)
+	}
+	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
+		t.Fatalf("body=%q, want v1 still serving after the refusal", got)
+	}
+}
+
+// TestReloadTo_RefusesRemote proves a mount this host did not start reports why
+// rather than failing obscurely inside exec.
+func TestReloadTo_RefusesRemote(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Addr: "127.0.0.1:9"}, "/v1/demo")); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+	err := app.ReloadTo("demo", zip.Plugin{Bin: []byte("x")})
+	if err == nil || !strings.Contains(err.Error(), "remote Addr") {
+		t.Fatalf("err = %v, want a refusal naming the remote mount", err)
+	}
+}
+
+// TestUnload_LazyStaysDown is the one that matters in production: a host
+// composing many services runs nearly all of them Lazy, and a lazy plugin is
+// started BY a request. Without a disabled flag the very next request undoes
+// the Unload, so "disable" would silently not stick for exactly the plugins
+// most hosts run.
+func TestUnload_LazyStaysDown(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	if err := app.Add(zip.Load(zip.Plugin{
+		Name: "demo", Bin: buildPlugin(t, "v1"), Lazy: true,
+	}, "/v1/demo")); err != nil {
+		t.Fatalf("Add(Load): %v", err)
+	}
+	defer func() { _ = app.Shutdown() }()
+
+	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
+		t.Fatalf("body=%q, want the lazy plugin started by the first request", got)
+	}
+	if err := app.Unload("demo"); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+
+	// The route must stay registered and answer 503 — not 404, and not restart.
+	for i := 0; i < 3; i++ {
+		if status, _ := call(t, app, "GET", "/v1/demo/version", ""); status != 503 {
+			t.Fatalf("request %d after Unload: status %d, want 503", i, status)
+		}
+	}
+	st := app.Plugins()[0]
+	if st.Running || !st.Disabled {
+		t.Fatalf("status running=%v disabled=%v, want running=false disabled=true", st.Running, st.Disabled)
+	}
+
+	// Reload is what re-enables it, and it must come back on the same route.
+	if err := app.Reload("demo", nil); err != nil {
+		t.Fatalf("Reload after Unload: %v", err)
+	}
+	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
+		t.Fatalf("after re-enable: body=%q, want v1 serving again", got)
+	}
+	if app.Plugins()[0].Disabled {
+		t.Fatal("still marked disabled after a successful Reload")
+	}
+}

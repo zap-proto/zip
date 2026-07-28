@@ -155,6 +155,13 @@ type plugin struct {
 	restarts atomic.Int64
 	closed   bool // Shutdown ran; the supervisor must stop resurrecting it
 
+	// disabled means Unload took it down deliberately. Without this a LAZY
+	// plugin — the affordable default for a host composing many services — is
+	// brought straight back by the next request that reaches its prefix, so
+	// Unload would not stick for exactly the plugins most hosts run.
+	// Reload clears it: bringing a version back is what re-enables it.
+	disabled atomic.Bool
+
 	// stopping tracks the goroutines draining replaced instances. Reload and
 	// Unload retire an instance asynchronously so the caller is not blocked for
 	// the drain window, which means a child can outlive the call that replaced
@@ -199,8 +206,8 @@ func (p *plugin) target() (Client, string) {
 	if in := p.cur.Load(); in != nil {
 		return in.client, in.sock
 	}
-	if p.app == nil || !p.spec.Lazy {
-		return nil, "" // eager and down, or unloaded — the route answers 503
+	if p.app == nil || !p.spec.Lazy || p.disabled.Load() {
+		return nil, "" // eager and down, disabled, or unloaded — the route answers 503
 	}
 	return p.startOnDemand()
 }
@@ -215,7 +222,9 @@ func (p *plugin) startOnDemand() (Client, string) {
 	if in := p.cur.Load(); in != nil {
 		return in.client, in.sock // won by another caller while we waited
 	}
-	if p.closed {
+	// Re-checked under the lock, where Unload set it, so a request racing an
+	// Unload cannot slip a child in behind it.
+	if p.closed || p.disabled.Load() {
 		return nil, ""
 	}
 	in, err := start(p.spec)
@@ -344,6 +353,27 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 // finish, then is killed, reaped, its connections closed and its directory
 // removed.
 func (a *App) Reload(name string, bin []byte) error {
+	var to Plugin
+	if len(bin) > 0 {
+		to.Bin = bin
+	}
+	return a.reload(name, to)
+}
+
+// ReloadTo replaces the running plugin named name with a DIFFERENT artifact —
+// another URL+Sum, Path, or Bin — under the same guarantees as [App.Reload].
+//
+// Reload restarts a plugin with the artifact it was loaded with; this is what
+// moves it to a chosen version, and what rolls one back. Naming a URL+Sum it
+// has run before costs no network: the digest is the cache key, so the artifact
+// is already on disk and verified.
+//
+// Only the source fields move. Name and prefixes are fixed at Load, because
+// changing either means touching the route table — the one thing a reload must
+// never do.
+func (a *App) ReloadTo(name string, to Plugin) error { return a.reload(name, to) }
+
+func (a *App) reload(name string, to Plugin) error {
 	a.plugMu.Lock()
 	p := a.plugins[name]
 	a.plugMu.Unlock()
@@ -354,10 +384,9 @@ func (a *App) Reload(name string, bin []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	spec := p.spec
-	if len(bin) > 0 {
-		spec.Bin = bin
-		spec.Path = "" // an explicit new binary wins over the old path
+	spec, err := p.spec.replacedBy(to)
+	if err != nil {
+		return fmt.Errorf("zip: Reload(%s): %w", name, err)
 	}
 	next, err := start(spec)
 	if err != nil {
@@ -366,9 +395,10 @@ func (a *App) Reload(name string, bin []byte) error {
 
 	prev := p.cur.Swap(next) // every request from here uses next
 	p.spec = spec
+	p.disabled.Store(false) // a version is running again, so the route is live again
 	p.reloads.Add(1)
 	a.logger.Info("zip reloaded plugin", "name", name,
-		"pid", next.cmd.Process.Pid, "addr", next.sock)
+		"pid", next.cmd.Process.Pid, "addr", next.sock, "version", spec.Sum)
 
 	if prev != nil {
 		drain := spec.Drain
@@ -380,9 +410,42 @@ func (a *App) Reload(name string, bin []byte) error {
 	return nil
 }
 
+// replacedBy returns the spec to start next. A to that names no artifact reuses
+// the current one, which is how a crashed or wedged plugin is restarted.
+func (spec Plugin) replacedBy(to Plugin) (Plugin, error) {
+	if spec.Addr != "" {
+		// Nothing was started, so there is nothing to swap; pointing the mount
+		// somewhere else would have to rewrite the route table.
+		return spec, fmt.Errorf("plugin is a remote Addr — reload does not apply")
+	}
+	if to.Bin == nil && to.Path == "" && to.URL == "" {
+		return spec, nil
+	}
+	// A new artifact replaces the old one whole. Clearing the other three
+	// matters because start() prefers Bin, then URL, then Path: a leftover Bin
+	// would silently shadow the URL just asked for, and the swap would report
+	// success having started the version it was already running.
+	spec.Bin, spec.Path, spec.URL, spec.Sum = to.Bin, to.Path, to.URL, to.Sum
+	if spec.URL != "" && spec.Sum == "" {
+		return spec, fmt.Errorf("URL but no Sum — refusing to run an unverified download")
+	}
+	if to.Args != nil {
+		spec.Args = to.Args
+	}
+	if to.Env != nil {
+		spec.Env = to.Env
+	}
+	return spec, nil
+}
+
 // Unload stops the plugin named name. Its routes stay registered and answer
 // 503 until a Reload brings it back — the route table is never mutated, which
 // is what keeps repeated load/unload cycles flat.
+//
+// 503 rather than 404 is deliberate. 404 says "no such API", which a client is
+// entitled to cache and stop retrying; 503 says "this API exists and is down",
+// which is both true and retryable. [PluginStatus.Disabled] is how an operator
+// tells a deliberate stop from a crash, since the wire looks the same either way.
 func (a *App) Unload(name string) error {
 	a.plugMu.Lock()
 	p := a.plugins[name]
@@ -392,6 +455,7 @@ func (a *App) Unload(name string) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.disabled.Store(true) // before the swap, so no request in the gap restarts it
 	p.retire(p.cur.Swap(nil), 0)
 	return nil
 }
