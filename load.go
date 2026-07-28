@@ -342,38 +342,15 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	return nil
 }
 
-// Reload replaces the running plugin named name with a new build, without
-// dropping a request. bin is the new binary; nil reuses what the plugin was
-// loaded with, which is how you restart a crashed or wedged one.
+// Reload swaps the plugin named name to to, without dropping a request.
+// The zero Plugin restarts what it is already running; Bin runs new bytes;
+// URL+Sum pins a version or rolls one back, off disk if that digest has run
+// before. Only the source moves: name and prefixes are fixed at Load.
 //
-// The new process is started and proven to be listening before any request
-// moves to it. If it fails to come up, the old one is still serving and the
-// error is returned — a bad build cannot take the route down. Once the swap
-// happens the old process keeps serving for Plugin.Drain so in-flight requests
-// finish, then is killed, reaped, its connections closed and its directory
-// removed.
-func (a *App) Reload(name string, bin []byte) error {
-	var to Plugin
-	if len(bin) > 0 {
-		to.Bin = bin
-	}
-	return a.reload(name, to)
-}
-
-// ReloadTo replaces the running plugin named name with a DIFFERENT artifact —
-// another URL+Sum, Path, or Bin — under the same guarantees as [App.Reload].
-//
-// Reload restarts a plugin with the artifact it was loaded with; this is what
-// moves it to a chosen version, and what rolls one back. Naming a URL+Sum it
-// has run before costs no network: the digest is the cache key, so the artifact
-// is already on disk and verified.
-//
-// Only the source fields move. Name and prefixes are fixed at Load, because
-// changing either means touching the route table — the one thing a reload must
-// never do.
-func (a *App) ReloadTo(name string, to Plugin) error { return a.reload(name, to) }
-
-func (a *App) reload(name string, to Plugin) error {
+// The new process must be listening before any request moves to it, so a bad
+// build returns an error and leaves the old one serving. The old one drains
+// for Plugin.Drain, then dies.
+func (a *App) Reload(name string, to Plugin) error {
 	a.plugMu.Lock()
 	p := a.plugins[name]
 	a.plugMu.Unlock()
@@ -444,7 +421,7 @@ func (spec Plugin) replacedBy(to Plugin) (Plugin, error) {
 //
 // 503 rather than 404 is deliberate. 404 says "no such API", which a client is
 // entitled to cache and stop retrying; 503 says "this API exists and is down",
-// which is both true and retryable. [PluginStatus.Disabled] is how an operator
+// which is both true and retryable. [Status.Disabled] is how an operator
 // tells a deliberate stop from a crash, since the wire looks the same either way.
 func (a *App) Unload(name string) error {
 	a.plugMu.Lock()
