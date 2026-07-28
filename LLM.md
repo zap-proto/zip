@@ -102,6 +102,25 @@ rather than silently shadowing. A `Mount` is an **ordinary wildcard route**, so
 a more specific route registered afterwards still wins — pinned by
 `TestMount_StaticBeatsRemoteMount`.
 
+## The doc comment reaches all three projections (v1.17.6)
+
+`cmd/zipdoc` lifts the handler's doc comment and its In/Out field comments into
+`zip.Describe`, and `docFor` is the one accessor. Three surfaces read it:
+`openapi.go` (spec `description` + parameter/schema prose), `cli.go` (command and
+flag help), and — since v1.17.6 — `mcp.go` (tool `description`, and
+`schemaOfDoc` so the `inputSchema` properties carry their field comments).
+
+`mcpTools` used to read `op.Summary` alone. That is only set by an explicit
+`WithSummary`, so any op documented the canonical way — a doc comment and no
+`WithSummary` — projected into a tool with an **empty description over a schema
+whose fields said nothing**. It was invisible because the spec looked right: the
+same op carried hundreds of characters of prose in `openapi.json`. Measured on
+hanzoai/cloud, all 164 tools had an empty description before the fix and all 164
+have one after (324 documented fields). `WithSummary` remains the fallback, so an
+op in a package `zipdoc` never ran over still names itself.
+
+If you add a fourth projection, read `docFor` — do not add a second prose field.
+
 ## What lives elsewhere
 
 zip does not define a ZAP envelope, registry, dispatcher or listener.
