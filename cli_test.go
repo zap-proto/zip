@@ -315,17 +315,181 @@ func names(cmds []zip.Command) []string {
 	return out
 }
 
+// TestCLI_OperationIDIsTheOneIdentity relates the command to the op it is a
+// projection of. Every other projection addresses an op by its operation id —
+// the document's operationId, the MCP tool's name, the token zip.Call takes —
+// and the command line carries that same token, so a command is a view of an op
+// rather than a second thing with a second name.
+//
+// WithOperationID is the case that used to break it: renaming an op renamed it
+// in the document, the tool list and the call plane, and the CLI carried on
+// spelling it from the route. One op, two names, and a script written against
+// the CLI addressed something the document had never heard of.
+func TestCLI_OperationIDIsTheOneIdentity(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
+	fn := func(_ context.Context, in *deployIn) (*deployOut, error) {
+		return &deployOut{App: in.App, Env: in.Env}, nil
+	}
+	zip.Post(app, "/v1/billing/charge", fn, zip.WithOperationID("billing_refund"))
+	zip.Get(app, "/v1/billing/invoices", fn) // no explicit id: the default token
+
+	// Every projection, one token per op.
+	byOp := map[string]zip.Command{}
+	for _, c := range app.Commands() {
+		byOp[c.OperationID] = c
+	}
+	tools := map[string]bool{}
+	for _, tool := range app.MCPTools() {
+		tools[tool["name"].(string)] = true
+	}
+	spec := app.OpenAPISpec()
+	paths, _ := spec["paths"].(map[string]map[string]any)
+	for path, item := range paths {
+		for method, raw := range item {
+			op, _ := raw.(map[string]any)
+			id, _ := op["operationId"].(string)
+			if !tools[id] {
+				t.Errorf("%s %s: operationId %q names no tool; tools = %v", method, path, id, tools)
+			}
+			if _, ok := byOp[id]; !ok {
+				t.Errorf("%s %s: operationId %q names no command; commands = %v", method, path, id, byOp)
+			}
+		}
+	}
+
+	// The renamed op is renamed on the command line too — `billing refund`,
+	// not the `billing charge-create` the route alone would have spelled.
+	renamed, ok := byOp["billing_refund"]
+	if !ok {
+		t.Fatalf("no command carries the explicit id; got %v", byOp)
+	}
+	if renamed.Service != "billing" || renamed.Name != "refund" {
+		t.Errorf("command = %q %q, want %q %q", renamed.Service, renamed.Name, "billing", "refund")
+	}
+
+	// And it is the name that RUNS: the old one is gone, not merely aliased.
+	var out bytes.Buffer
+	cli := app.CLI()
+	cli.Out = &out
+	if err := cli.Run(context.Background(), []string{"billing", "refund", "--env", "prod"}); err != nil {
+		t.Fatalf("run the renamed command: %v", err)
+	}
+	if !strings.Contains(out.String(), `"env": "prod"`) {
+		t.Fatalf("output = %q, want the handler's result", out.String())
+	}
+	if err := cli.Run(context.Background(), []string{"billing", "charge-create"}); err == nil {
+		t.Error("`billing charge-create` still resolves — the op has one name, not two")
+	}
+
+	// The client tree reads the id off the document and lands on the same command.
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSpec, err := zip.CommandsFromSpec(raw)
+	if err != nil {
+		t.Fatalf("CommandsFromSpec: %v", err)
+	}
+	for _, s := range fromSpec {
+		r, ok := byOp[s.OperationID]
+		if !ok {
+			t.Fatalf("spec command %q %q carries id %q, which the registry does not", s.Service, s.Name, s.OperationID)
+		}
+		if r.Service != s.Service || r.Name != s.Name {
+			t.Errorf("id %q: spec says %q %q, registry says %q %q",
+				s.OperationID, s.Service, s.Name, r.Service, r.Name)
+		}
+	}
+}
+
+// everyKind has one field of every kind a flag can be spelled from, including
+// the compound ones a flag cannot spell flatly.
+type everyKind struct {
+	Str    string         `json:"str"`
+	Flag   bool           `json:"flag"`
+	Count  int            `json:"count"`
+	Big    uint64         `json:"big"`
+	Ratio  float64        `json:"ratio"`
+	Tags   []string       `json:"tags"`
+	Meta   map[string]int `json:"meta"`
+	Nested deployIn       `json:"nested"`
+	Ptr    *int           `json:"ptr"`
+}
+
+// TestCLI_FlagKindIsTheSchemaKind relates a flag spelled from a Go type to the
+// same flag spelled from that type's published schema. They are one derivation:
+// the flag kind is read off schemaOf and mapped by the SAME schema-type →
+// flag-kind rule the spec-derived tree uses, rather than from a second list of
+// reflect kinds that has to be kept equal to the first by hand.
+func TestCLI_FlagKindIsTheSchemaKind(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "kinds", DisableStartupMessage: true})
+	zip.Post(app, "/v1/kinds/things", func(_ context.Context, in *everyKind) (*everyKind, error) {
+		return in, nil
+	})
+	spec, err := json.Marshal(app.OpenAPISpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSpec, err := zip.CommandsFromSpec(spec)
+	if err != nil {
+		t.Fatalf("CommandsFromSpec: %v", err)
+	}
+	if len(fromSpec) != 1 {
+		t.Fatalf("spec commands = %v, want 1", names(fromSpec))
+	}
+	want := map[string]string{
+		"str": "string", "flag": "boolean", "count": "integer", "big": "integer",
+		"ratio": "number", "tags": "json", "meta": "json", "nested": "json", "ptr": "integer",
+	}
+	for _, side := range []struct {
+		from  string
+		flags []zip.Flag
+	}{
+		{"the registry", app.Commands()[0].Flags},
+		{"the document", fromSpec[0].Flags},
+	} {
+		if len(side.flags) != len(want) {
+			t.Fatalf("%s: flags = %+v, want %d", side.from, side.flags, len(want))
+		}
+		for _, f := range side.flags {
+			if f.Type != want[f.Field] {
+				t.Errorf("%s: --%s is %q, want %q", side.from, f.Name, f.Type, want[f.Field])
+			}
+		}
+	}
+}
+
+// purgeIn is a bodyless op's input: a path segment addresses the app, a scalar
+// filter can ride the URL beside it, and a compound field can ride neither.
+type purgeIn struct {
+	App    string   `json:"app"`
+	Before string   `json:"before" validate:"required"`
+	Tags   []string `json:"tags"`
+}
+
 // TestCLI_SpecAndRegistryAgree proves the two derivations are one derivation:
 // the command tree read from the live registry and the command tree read from
 // the document that registry generates are the same commands.
 //
-// The flags of a GET are compared only where the document carries them. A zip
-// document describes what the WIRE accepts, and a typed GET's non-path inputs
-// are not on the wire yet (they belong in the query string) — so the client
-// tree offers what the service will actually honour, which is the honest thing
-// for it to offer.
+// Where they do NOT agree, they disagree in exactly one place and this test says
+// so out loud. A bodyless method (GET/HEAD/DELETE per openapi.go's hasBody)
+// carries its input in the URL, so the document can only name what a URL can
+// carry — the scalar fields — and carries no example, an example being a request
+// body. This used to be a `continue` that listed DELETE while the fixture had no
+// DELETE route: the divergence was hidden twice, once by the skip and once by
+// never exercising it. See LLM.md's known-bug section; fixing either half makes
+// this test fail and point at the note.
 func TestCLI_SpecAndRegistryAgree(t *testing.T) {
 	app := deployApp(t)
+	// The DELETE the skip used to name. Its input has one field of each kind
+	// that matters here, so the bodyless case is actually exercised.
+	zip.Describe("DELETE /v1/paas/apps/:app", zip.Doc{
+		Description: "Purge deletes an app and everything it owns.",
+		Example:     json.RawMessage(`{"app":"acme","before":"2026-01-01"}`),
+	})
+	zip.Delete(app, "/v1/paas/apps/:app", func(_ context.Context, in *purgeIn) (*deployOut, error) {
+		return &deployOut{App: in.App}, nil
+	})
 	spec, err := json.Marshal(app.OpenAPISpec())
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
@@ -350,15 +514,58 @@ func TestCLI_SpecAndRegistryAgree(t *testing.T) {
 		if r.Summary != s.Summary {
 			t.Errorf("%s %s summary: spec %q, registry %q", r.Service, r.Name, s.Summary, r.Summary)
 		}
-		if r.Method == "GET" || r.Method == "HEAD" || r.Method == "DELETE" {
+		if r.OperationID != s.OperationID {
+			t.Errorf("%s %s id: spec %q, registry %q", r.Service, r.Name, s.OperationID, r.OperationID)
+		}
+		if r.Method != "GET" && r.Method != "HEAD" && r.Method != "DELETE" {
+			if fmt.Sprint(r.Flags) != fmt.Sprint(s.Flags) {
+				t.Errorf("%s %s flags: spec %v, registry %v", r.Service, r.Name, s.Flags, r.Flags)
+			}
+			if string(r.Example) != string(s.Example) {
+				t.Errorf("%s %s example: spec %s, registry %s", r.Service, r.Name, s.Example, r.Example)
+			}
 			continue
 		}
-		if fmt.Sprint(r.Flags) != fmt.Sprint(s.Flags) {
-			t.Errorf("%s %s flags: spec %v, registry %v", r.Service, r.Name, s.Flags, r.Flags)
+		assertURLBoundDivergence(t, r, s)
+	}
+}
+
+// assertURLBoundDivergence pins what a bodyless op loses on its way through the
+// document — precisely, so the loss is a statement rather than a skipped branch.
+// Every line here is a divergence zip KNOWS about and has chosen not to close in
+// a patch; none of it is endorsed. Close one and this test fails, which is the
+// point: the next change to it has to say which.
+func assertURLBoundDivergence(t *testing.T, registry, spec zip.Command) {
+	t.Helper()
+	// 1. The document names the scalars, because those are what a URL carries.
+	var scalars []zip.Flag
+	for _, f := range registry.Flags {
+		if f.Type != "json" {
+			scalars = append(scalars, f)
 		}
-		if string(r.Example) != string(s.Example) {
-			t.Errorf("%s %s example: spec %s, registry %s", r.Service, r.Name, s.Example, r.Example)
+	}
+	if len(spec.Flags) != len(scalars) {
+		t.Fatalf("%s %s: spec flags %v, want the registry's scalar flags %v",
+			registry.Service, registry.Name, spec.Flags, scalars)
+	}
+	for i, want := range scalars {
+		got := spec.Flags[i]
+		if got.Name != want.Name || got.Field != want.Field || got.Type != want.Type {
+			t.Errorf("%s %s flag %d: spec %+v, registry %+v", registry.Service, registry.Name, i, got, want)
 		}
+		// 2. …but never as required. buildOpenAPI declares every query parameter
+		// optional instead of reading the field's `validate` tag, so a field the
+		// handler refuses to run without reads as optional to every generator.
+		if want.Required && got.Required {
+			t.Errorf("%s %s --%s is required in the document now; the note in LLM.md is stale",
+				registry.Service, registry.Name, got.Name)
+		}
+	}
+	// 3. And the example does not survive: it is a request body, and a bodyless
+	// op declares none for it to live in.
+	if len(spec.Example) != 0 {
+		t.Errorf("%s %s: the document carries an example now; the note in LLM.md is stale",
+			registry.Service, registry.Name)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 // linking. The same typed-op registry (a.ops) that produces the REST routes,
 // the OpenAPI document and the MCP tool list also answers a call addressed by
 // the op's NAME, carrying the op's In as the body and its Out as the reply.
-// One value (the op), four projections (REST · OpenAPI · MCP · call).
+// One value (the op), five projections (REST · OpenAPI · MCP · CLI · call).
 //
 // # Why a name and not a URL
 //

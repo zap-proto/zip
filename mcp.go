@@ -125,7 +125,7 @@ func (a *App) mcpTools() []map[string]any {
 		tools = append(tools, map[string]any{
 			"name":        opName(op),
 			"description": desc,
-			"inputSchema": schemaOfDoc(op.InType, map[string]any{}, docFields(hasDoc, doc)),
+			"inputSchema": rootSchemaOf(op.InType, docFields(hasDoc, doc)),
 		})
 	}
 	return tools

@@ -194,6 +194,56 @@ func TestOpenAPIDeclaresPathParams(t *testing.T) {
 	}
 }
 
+// countIn addresses a NUMBERED resource: the path segment binds to an int
+// field, and `page` rides the query string of the same request.
+type countIn struct {
+	N    int   `json:"n"`
+	Page int32 `json:"page"`
+}
+
+func echoCount(_ context.Context, in *countIn) (*countIn, error) { return in, nil }
+
+// A path parameter's type is the type of the field it binds to. Both halves of
+// the URL run through one binder (bindURL), so describing one half from the
+// input type and hardcoding the other to "string" made the document contradict
+// itself about the same value — and every SDK generated from it took a string
+// where the handler wanted a number.
+func TestOpenAPITypesPathParamsFromTheInput(t *testing.T) {
+	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
+	zip.Get(a, "/v1/t/counts/:n", echoCount)
+	// :missing names no field, so nothing types it and the wire carried text.
+	zip.Get(a, "/v1/t/other/:missing", echoCount)
+
+	params := paramsOf(t, a, "/v1/t/counts/{n}")
+	if len(params) != 2 {
+		t.Fatalf("parameters = %v, want the path param and the query param", params)
+	}
+	for _, p := range params {
+		decl, _ := p.(map[string]any)
+		schema, _ := decl["schema"].(map[string]any)
+		if schema["type"] != "integer" {
+			t.Errorf("%v %q schema = %v, want integer", decl["in"], decl["name"], schema)
+		}
+	}
+	missing, _ := paramsOf(t, a, "/v1/t/other/{missing}")[0].(map[string]any)
+	if s, _ := missing["schema"].(map[string]any); s["type"] != "string" {
+		t.Errorf("undeclared param schema = %v, want string", s)
+	}
+}
+
+func paramsOf(t *testing.T, a *zip.App, path string) []any {
+	t.Helper()
+	spec := a.OpenAPISpec()
+	paths, _ := spec["paths"].(map[string]map[string]any)
+	item, ok := paths[path]
+	if !ok {
+		t.Fatalf("no path %q in spec", path)
+	}
+	get, _ := item["get"].(map[string]any)
+	params, _ := get["parameters"].([]any)
+	return params
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

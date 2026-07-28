@@ -18,6 +18,10 @@ import (
 // line: an op becomes `<service> <operation>`, its In fields become flags, its
 // doc comment becomes the help, and its Example becomes the example invocation.
 //
+// A command carries the op's OWN identity, not a second one: Command.OperationID
+// is the token the document, the tool list and zip.Call all address it by, and
+// an explicit WithOperationID renames the command with them.
+//
 // Nothing about a command is written anywhere. Registering a typed route adds
 // the command, its flags, its help and its example — with no edit to any CLI
 // source, which is the only test that proves a CLI is derived rather than
@@ -50,6 +54,12 @@ type Command struct {
 	// Name is the operation token under it ("invoices-list").
 	Service string
 	Name    string
+
+	// OperationID is the op's identity — the SAME token the OpenAPI document's
+	// operationId, the MCP tool's name and zip.Call all address it by. A command
+	// is a projection of an op, not a second thing with a second name, and this
+	// is what says WHICH op it projects.
+	OperationID string
 
 	// Summary is the one-line help; Description is the full prose. Both come
 	// from the handler's doc comment when cmd/zipdoc has run.
@@ -99,7 +109,7 @@ func (a *App) Commands() []Command {
 	cmds := make([]Command, 0, len(a.ops))
 	for _, op := range a.ops {
 		doc, has := docFor(op.Method, op.Path)
-		c := newCommand(op.Method, op.Path, op.Summary, doc, has)
+		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op
 		c.Args, c.Flags = bindIn(op.InType, colonParams(op.Path), docFields(has, doc))
 		cmds = append(cmds, c)
@@ -110,9 +120,9 @@ func (a *App) Commands() []Command {
 
 // newCommand fills in everything that comes from the op's identity and its doc,
 // which is the half both derivations share.
-func newCommand(method, path, summary string, doc Doc, has bool) Command {
-	svc, name := commandName(method, path)
-	c := Command{Service: svc, Name: name, Summary: summary, Method: method, Path: path}
+func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
+	svc, name := commandName(method, path, id)
+	c := Command{Service: svc, Name: name, OperationID: id, Summary: summary, Method: method, Path: path}
 	if has {
 		c.Description = doc.Description
 		c.Example = doc.Example
@@ -179,29 +189,32 @@ func isParam(params []string, name string) bool {
 	return false
 }
 
-// flagType maps a Go type to the flag's value kind. Anything compound is JSON:
-// a struct, map or slice has no unambiguous flat spelling, and inventing one
-// would be a second encoding of a value JSON already encodes.
+// flagType is a flag's value kind, read off the ONE schema derivation: what a
+// field IS on the wire is what schemaOf says it is, and specType is the SAME
+// schema-type → flag-kind rule the spec-derived tree uses. A flag spelled from a
+// Go type and the same flag spelled from that type's published schema are then
+// equal by construction, rather than by two lists of kinds someone has to keep
+// in step.
+//
+// Anything compound lands on JSON: a struct, map or slice has no unambiguous
+// flat spelling, and inventing one would be a second encoding of a value JSON
+// already encodes. No registry is passed because none is needed — the kind of a
+// struct is "object" whatever its fields are, and expanding them here would
+// build a definition with nowhere to live.
 func flagType(t reflect.Type) string {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	switch t.Kind() {
-	case reflect.String:
-		return "string"
-	case reflect.Bool:
-		return "boolean"
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return "integer"
-	case reflect.Float32, reflect.Float64:
-		return "number"
-	}
-	return "json"
+	kind, _ := schemaOf(t, nil, nil)["type"].(string)
+	return specType(kind)
 }
 
-// commandName derives `<service> <operation>` from an op's identity — method and
-// path, the same pair the router, the document and the tool surface key on.
+// commandName derives `<service> <operation>` from an op's identity.
+//
+// The SERVICE is where the command lives in the tree: the first non-version
+// static segment of the path, which is the same thing the router groups on.
+//
+// The OPERATION is the op's own name. An explicit id (WithOperationID) is that
+// name — renaming an op has to rename it in EVERY projection or the command line
+// addresses something the document has never heard of. Absent one, id is the
+// method+path default and the words below spell it out long-hand:
 //
 //	GET    /v1/paas/apps              → paas    apps-list
 //	GET    /v1/paas/apps/:app         → paas    apps-get <app>
@@ -219,7 +232,12 @@ func flagType(t reflect.Type) string {
 // on a path ending in a verb IS the REST spelling of "run this" — `apps-deploy`
 // rather than `apps-deploy-create`. Every other method still appends its own
 // verb, so no two ops on one path can collide.
-func commandName(method, path string) (service, name string) {
+func commandName(method, path, id string) (service, name string) {
+	// An id that IS the default says nothing the path does not; only an
+	// explicit one renames the command.
+	if id == defaultOpID(method, path) {
+		id = ""
+	}
 	segs := make([]string, 0, 8)
 	for _, s := range strings.Split(path, "/") {
 		if s != "" && !isVersion(s) {
@@ -233,7 +251,7 @@ func commandName(method, path string) (service, name string) {
 		svc++
 	}
 	if svc == len(segs) {
-		return "root", methodVerb(method, len(segs) > 0)
+		return "root", opWord("root", id, methodVerb(method, len(segs) > 0))
 	}
 	service = segs[svc]
 	rest := segs[svc+1:]
@@ -270,7 +288,24 @@ func commandName(method, path string) (service, name string) {
 	for i, w := range words {
 		words[i] = kebab(w)
 	}
-	return kebab(service), strings.Join(words, "-")
+	service = kebab(service)
+	return service, opWord(service, id, strings.Join(words, "-"))
+}
+
+// opWord is the operation token: the explicit id when there is one, else the
+// name spelled out of the route. An explicit id is kebab-cased like any other
+// identifier and loses a leading service word it would otherwise repeat —
+// `billing_charge_create` under `billing` is `charge-create`, because the
+// command line has already said billing.
+func opWord(service, id, derived string) string {
+	if id == "" {
+		return derived
+	}
+	name := kebab(id)
+	if p := service + "-"; strings.HasPrefix(name, p) && len(name) > len(p) {
+		name = name[len(p):]
+	}
+	return name
 }
 
 // plural is the collection test. English "ends in s" is crude, but it reads the

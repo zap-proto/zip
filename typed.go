@@ -18,9 +18,14 @@ import (
 type TypedHandler[In, Out any] func(ctx context.Context, in *In) (*Out, error)
 
 // registeredOp is the bookkeeping zip keeps for a typed route — the ONE value
-// every projection reads: the REST route, the OpenAPI doc, and the MCP tool all
-// come from this. invoke is the transport-agnostic handler core (decode → run →
-// result), so a REST request and an MCP tools/call run the exact same fn.
+// every projection reads: the REST route, the OpenAPI doc, the MCP tool, the CLI
+// command and the by-name call plane all come from this. invoke is the
+// transport-agnostic handler core (decode → run → result), so a REST request, an
+// MCP tools/call, a command and a zip.Call run the exact same fn.
+//
+// An UNTYPED route (app.Get(path, func(c *Ctx) error)) appends nothing here, so
+// it is in none of those five. That is the whole cost of the escape hatch, and
+// the reason a route that can name its input and output should not use it.
 type registeredOp struct {
 	Method      string
 	Path        string

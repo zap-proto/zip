@@ -2,8 +2,10 @@ package zip
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zap-proto/fiber/v3"
@@ -59,7 +61,9 @@ func (a *App) buildOpenAPI() map[string]any {
 	}
 
 	paths := map[string]map[string]any{}
-	schemas := map[string]any{}
+	// One registry for the whole document: a type reached by two ops is one
+	// definition in components.schemas that both point at.
+	reg := newSchemaRegistry(specDefs)
 
 	// Sort ops by path,method for deterministic output.
 	ops := append([]*registeredOp{}, a.ops...)
@@ -108,10 +112,8 @@ func (a *App) buildOpenAPI() map[string]any {
 
 		// Request body.
 		if hasBody(op.Method) {
-			inName := typeName(op.InType)
-			if op.InType != nil && inName != "" {
-				schemas[inName] = schemaOfDoc(op.InType, schemas, docFields(hasDoc, doc))
-				media := map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/" + inName}}
+			if op.InType != nil && typeName(op.InType) != "" {
+				media := map[string]any{"schema": schemaOf(op.InType, reg, docFields(hasDoc, doc))}
 				// An example is what makes a spec explorable — it is the
 				// difference between a reference someone reads and one they can
 				// press "try it" on.
@@ -144,6 +146,12 @@ func (a *App) buildOpenAPI() map[string]any {
 			return decl
 		}
 
+		// A parameter's TYPE is the type of the field it binds to, wherever the
+		// URL carried it from. bindURL is one binder over one set of fields, so
+		// the document reads that one set too — declaring every path param a
+		// string while consulting the input for query params described the same
+		// value two different ways depending on which half of the URL it rode in.
+		url := urlFields(op.InType)
 		params := colonParams(op.Path)
 		decls := make([]any, 0, len(params))
 		named := make(map[string]bool, len(params))
@@ -151,7 +159,7 @@ func (a *App) buildOpenAPI() map[string]any {
 			named[strings.ToLower(p)] = true
 			decls = append(decls, describe(map[string]any{
 				"name": p, "in": "path", "required": true,
-				"schema": map[string]any{"type": "string"},
+				"schema": url.paramSchema(p),
 			}, p))
 		}
 		// Query parameters. A bodyless method binds its input from the URL
@@ -161,7 +169,7 @@ func (a *App) buildOpenAPI() map[string]any {
 		// there is no requestBody, because that is exactly where the binder
 		// treats the URL as the whole input.
 		if !hasBody(op.Method) {
-			for _, f := range queryFields(op.InType) {
+			for _, f := range url {
 				if named[strings.ToLower(f.name)] {
 					continue
 				}
@@ -176,10 +184,8 @@ func (a *App) buildOpenAPI() map[string]any {
 		}
 
 		// 200 response.
-		outName := typeName(op.OutType)
-		if op.OutType != nil && outName != "" {
-			schemas[outName] = schemaOfDoc(op.OutType, schemas, docFields(hasDoc, doc))
-			respMedia := map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/" + outName}}
+		if op.OutType != nil && typeName(op.OutType) != "" {
+			respMedia := map[string]any{"schema": schemaOf(op.OutType, reg, docFields(hasDoc, doc))}
 			if hasDoc && len(doc.Response) > 0 {
 				respMedia["example"] = json.RawMessage(doc.Response)
 			}
@@ -207,7 +213,7 @@ func (a *App) buildOpenAPI() map[string]any {
 		},
 		"paths": paths,
 		"components": map[string]any{
-			"schemas": schemas,
+			"schemas": reg.defs,
 		},
 	}
 }
@@ -233,18 +239,20 @@ func hasBody(method string) bool {
 	return true
 }
 
-// queryField is one URL-bindable input field: the name a caller writes in the
-// query string and the schema of the value.
-type queryField struct {
+// urlField is one URL-bindable input field: the name a caller writes in the URL
+// and the schema of the value.
+type urlField struct {
 	name   string
 	schema map[string]any
 }
 
-// queryFields lists the top-level scalar fields of a bodyless op's input — the
-// exact set bindURL can fill from the URL. Non-scalars are omitted because the
-// binder cannot fill them either, so naming them would promise a parameter that
-// silently does nothing.
-func queryFields(t reflect.Type) []queryField {
+// urlFields lists the top-level scalar fields of an op's input — the exact set
+// bindURL can fill, whether the value arrives as a path segment or a query key.
+// ONE list serves both because it is ONE binder: a path param and a query param
+// are the same kind of value, so the document describes them from the same
+// place. Non-scalars are omitted because the binder cannot fill them either, so
+// naming them would promise a parameter that silently does nothing.
+func urlFields(t reflect.Type) urlFieldList {
 	if t == nil {
 		return nil
 	}
@@ -254,7 +262,7 @@ func queryFields(t reflect.Type) []queryField {
 	if t.Kind() != reflect.Struct {
 		return nil
 	}
-	var out []queryField
+	var out urlFieldList
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
@@ -273,10 +281,25 @@ func queryFields(t reflect.Type) []queryField {
 			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 			reflect.Float32, reflect.Float64:
-			out = append(out, queryField{name: name, schema: schemaOf(ft, nil)})
+			out = append(out, urlField{name: name, schema: schemaOf(ft, nil, nil)})
 		}
 	}
 	return out
+}
+
+type urlFieldList []urlField
+
+// paramSchema is the schema of the field a URL-borne name binds to, matched the
+// way bindURL matches it. A name the input does not declare is a string: the
+// router still matches that segment and the wire still carried text, and bindURL
+// drops it for the same reason the document cannot type it — there is no field.
+func (l urlFieldList) paramSchema(name string) map[string]any {
+	for _, f := range l {
+		if strings.EqualFold(f.name, name) {
+			return f.schema
+		}
+	}
+	return map[string]any{"type": "string"}
 }
 
 // colonParams lists the ":name" params of a fiber route pattern, in order.
@@ -314,16 +337,92 @@ func typeName(t reflect.Type) string {
 	return t.Name()
 }
 
-// schemaOf builds a minimal JSON Schema for t. Handles structs, primitives,
-// slices, and pointers. Anonymous types become "object" without a ref.
-func schemaOf(t reflect.Type, registry map[string]any) map[string]any {
-	return schemaOfDoc(t, registry, nil)
+// Where a projection keeps the definitions its schemas refer to. An OpenAPI
+// document has one place for them; a schema sent on its own carries its own.
+const (
+	specDefs = "#/components/schemas/"
+	selfDefs = "#/$defs/"
+)
+
+// schemaRegistry is where a named struct type is described ONCE. Every use of it
+// is a $ref into the registry — which is also the cycle guard: the entry is
+// claimed BEFORE the type's fields are walked, so a type that contains itself
+// finds the definition already in flight instead of recursing forever. Without
+// it a self-referential In type overflows the stack while the document is built
+// AND while the tools are listed, which is fatal — a stack overflow is not
+// recoverable, so the service simply cannot start.
+//
+// prefix is the JSON Pointer that reaches defs. The projection owns where its
+// definitions live; the derivation that fills them is the same one either way.
+type schemaRegistry struct {
+	prefix string
+	defs   map[string]any          // name → definition
+	names  map[reflect.Type]string // type → the name it is defined under
+	refs   map[string]int          // name → how many $refs point at it
 }
 
-// schemaOfDoc is schemaOf with the extraction in hand, so a field's doc comment
-// becomes its description. Keyed by "Type.field" because an In and an Out can
-// both have a "limit" and they are not the same thing.
-func schemaOfDoc(t reflect.Type, registry map[string]any, fields map[string]string) map[string]any {
+func newSchemaRegistry(prefix string) *schemaRegistry {
+	return &schemaRegistry{
+		prefix: prefix,
+		defs:   map[string]any{},
+		names:  map[reflect.Type]string{},
+		refs:   map[string]int{},
+	}
+}
+
+// define describes t in the registry, if it is not there already, and returns
+// the name it is described under. The entry is claimed before the fields are
+// walked: whatever the walk reaches — including t itself — finds it.
+func (r *schemaRegistry) define(t reflect.Type, fields map[string]string) string {
+	if name, ok := r.names[t]; ok {
+		return name
+	}
+	name := r.nameFor(t)
+	def := map[string]any{}
+	r.names[t] = name
+	r.defs[name] = def
+	structSchema(def, t, r, fields)
+	return name
+}
+
+// nameFor is the name t is described under: its Go name, qualified by its
+// package when a DIFFERENT type already holds that name. Two packages may both
+// call a type Config, and a registry that let the second overwrite the first
+// would publish one type's fields under the other's name — with both ops'
+// $refs pointing at whichever arrived last.
+func (r *schemaRegistry) nameFor(t reflect.Type) string {
+	base := t.Name()
+	if _, taken := r.defs[base]; !taken {
+		return base
+	}
+	if p := t.PkgPath(); p != "" {
+		base = p[strings.LastIndexByte(p, '/')+1:] + "." + base
+	}
+	for name, n := base, 2; ; n++ {
+		if _, taken := r.defs[name]; !taken {
+			return name
+		}
+		name = base + strconv.Itoa(n)
+	}
+}
+
+// ref points at a definition. The count is what lets a standalone schema tell a
+// definition something still refers to from one only its own root named.
+func (r *schemaRegistry) ref(name string) map[string]any {
+	r.refs[name]++
+	return map[string]any{"$ref": r.prefix + name}
+}
+
+// schemaOf builds the JSON Schema for t. A named struct is DEFINED in reg and
+// referred to by $ref, so one type is described once however many ops reach it;
+// everything else is inlined, having no name to be referred to by. A field's doc
+// comment becomes its description, keyed "Type.field" because an In and an Out
+// can both have a "limit" and they are not the same thing.
+//
+// reg may be nil, which describes a struct by its shape without expanding it: a
+// caller that only needs to know WHAT a value is — the CLI asking a field's flag
+// kind — has nowhere to put a definition and no use for one.
+func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map[string]any {
 	if t == nil {
 		return map[string]any{"type": "object"}
 	}
@@ -343,46 +442,85 @@ func schemaOfDoc(t reflect.Type, registry map[string]any, fields map[string]stri
 	case reflect.Slice, reflect.Array:
 		return map[string]any{
 			"type":  "array",
-			"items": schemaOfDoc(t.Elem(), registry, fields),
+			"items": schemaOf(t.Elem(), reg, fields),
 		}
 	case reflect.Map:
 		return map[string]any{
 			"type":                 "object",
-			"additionalProperties": schemaOfDoc(t.Elem(), registry, fields),
+			"additionalProperties": schemaOf(t.Elem(), reg, fields),
 		}
 	case reflect.Struct:
-		props := map[string]any{}
-		required := []string{}
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if !f.IsExported() {
-				continue
-			}
-			name := jsonFieldName(f)
-			if name == "-" {
-				continue
-			}
-			fs := schemaOfDoc(f.Type, registry, fields)
-			if fields != nil {
-				if d := fields[t.Name()+"."+name]; d != "" {
-					fs["description"] = d
-				}
-			}
-			props[name] = fs
-			if tag := f.Tag.Get("validate"); strings.Contains(tag, "required") {
-				required = append(required, name)
-			}
+		if reg == nil {
+			return map[string]any{"type": "object"}
 		}
-		out := map[string]any{
-			"type":       "object",
-			"properties": props,
+		if t.Name() == "" {
+			// Anonymous: nothing to name a definition after — and nothing that
+			// can name it, so Go cannot spell a recursive one either.
+			out := map[string]any{}
+			structSchema(out, t, reg, fields)
+			return out
 		}
-		if len(required) > 0 {
-			out["required"] = required
-		}
-		return out
+		return reg.ref(reg.define(t, fields))
 	}
 	return map[string]any{"type": "object"}
+}
+
+// structSchema fills in one struct's object schema. It is separate from schemaOf
+// because a definition is claimed in the registry before it is filled — that
+// claim is the cycle guard, and it needs the map to exist first.
+func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fields map[string]string) {
+	props := map[string]any{}
+	var required []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name := jsonFieldName(f)
+		if name == "-" {
+			continue
+		}
+		fs := schemaOf(f.Type, reg, fields)
+		if d := fields[t.Name()+"."+name]; d != "" {
+			fs["description"] = d
+		}
+		props[name] = fs
+		if tag := f.Tag.Get("validate"); strings.Contains(tag, "required") {
+			required = append(required, name)
+		}
+	}
+	into["type"] = "object"
+	into["properties"] = props
+	if len(required) > 0 {
+		into["required"] = required
+	}
+}
+
+// rootSchemaOf is one type's schema as a STANDALONE document: the type itself
+// inlined — an MCP tool's inputSchema has to BE the object, not a pointer at one
+// — with every other named type it reaches carried alongside in $defs, so the
+// value is self-contained wherever it is sent. What it describes is the same
+// definition the OpenAPI document carries, which is the point: one type, one
+// schema, whichever projection you read it from.
+func rootSchemaOf(t reflect.Type, fields map[string]string) map[string]any {
+	reg := newSchemaRegistry(selfDefs)
+	root := schemaOf(t, reg, fields)
+	ref, isRef := root["$ref"].(string)
+	if !isRef {
+		return root // already inline: a scalar, a slice, an anonymous struct
+	}
+	// The root IS a definition. Inline a copy of it, and leave the entry behind
+	// only if something OTHER than the copy still points at it — which is
+	// exactly what a self-referential type does.
+	name := strings.TrimPrefix(ref, reg.prefix)
+	root = maps.Clone(reg.defs[name].(map[string]any))
+	if reg.refs[name] == 1 {
+		delete(reg.defs, name)
+	}
+	if len(reg.defs) > 0 {
+		root["$defs"] = reg.defs
+	}
+	return root
 }
 
 // firstSentence is the summary when none was given explicitly: a doc comment's
