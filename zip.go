@@ -17,6 +17,8 @@
 //	func New(Config) *App
 //	func Get[I, O](app *App, path string, fn func(ctx, *I) (*O, error))
 //	func Post[I, O](app *App, path string, fn func(ctx, *I) (*O, error))
+//	func Dial(addr string) (*Conn, error) / DialApp(name string) (*Conn, error)
+//	func Call[I, O](ctx, *Conn, op string, in *I) (*O, error)
 //	...
 //
 // All other behavior lives in subpackages: `middleware`, `runtime`.

@@ -466,7 +466,7 @@ func start(spec Plugin) (*instance, error) {
 		}
 	}
 
-	sock := filepath.Join(dir, spec.Name+".sock")
+	sock := socketIn(dir, spec.Name)
 	cmd := exec.Command(bin, spec.Args...)
 	cmd.Env = append(append(os.Environ(), spec.Env...), AddrEnv+"="+sock)
 	// The child's output is the operator's only window into it, so it goes where

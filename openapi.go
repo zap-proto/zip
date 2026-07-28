@@ -82,8 +82,11 @@ func (a *App) buildOpenAPI() map[string]any {
 		if _, ok := paths[path]; !ok {
 			paths[path] = map[string]any{}
 		}
+		// opName is the ONE place the id rule lives, shared with the MCP tool
+		// list, the op-call plane and the Authorizer's Op — so an operation is
+		// addressed by the same token whichever projection you came through.
 		opObj := map[string]any{
-			"operationId": op.OperationID,
+			"operationId": opName(op),
 			"summary":     op.Summary,
 		}
 		// Prose and examples extracted from the source by cmd/zipdoc. Absent
@@ -98,9 +101,6 @@ func (a *App) buildOpenAPI() map[string]any {
 			if op.Summary == "" {
 				opObj["summary"] = firstSentence(doc.Description)
 			}
-		}
-		if op.OperationID == "" {
-			opObj["operationId"] = defaultOpID(op.Method, op.Path)
 		}
 		if len(op.Tags) > 0 {
 			opObj["tags"] = op.Tags

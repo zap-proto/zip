@@ -2,6 +2,8 @@ package zip
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -139,13 +141,15 @@ func transportFor(raw string) (scheme, addr string, t Transport, err error) {
 	return scheme, addr, t, nil
 }
 
-// prepare installs the deferred projections (OpenAPI doc + MCP tool surface)
-// before any listener starts, so every transport exposes the same routes. Runs
-// exactly once even if Listen is called again.
+// prepare installs the deferred projections of the typed-op registry (the
+// OpenAPI document, the MCP tool surface, the op-call plane) before any
+// listener starts, so every transport exposes the same routes. Runs exactly
+// once even if Listen is called again.
 func (a *App) prepare() {
 	a.prepareOnce.Do(func() {
 		a.installOpenAPIRoutes()
 		a.installMCP()
+		a.installCallPlane()
 	})
 }
 
@@ -168,6 +172,9 @@ func (a *App) Listen(addrs ...string) error {
 		}
 		if t.Serve == nil {
 			return fmt.Errorf("zip: transport %q cannot serve (dial-only)", scheme)
+		}
+		if err := makeSocketDir(addr); err != nil {
+			return err
 		}
 		s := t.Serve(addr, h)
 		// Push the App's per-conn wire tuning (ReadBufferSize / WriteBufferSize /
@@ -253,6 +260,25 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
 	a.All(prefix, h)
 	a.All(prefix+"/*", h)
+}
+
+// makeSocketDir creates the directory a unix socket will be bound in, so
+// serving at the canonical zip.SocketPath("name") works on a host where the
+// runtime dir does not exist yet — which is every host, the first time.
+//
+// 0700, so the fleet's sockets are reachable only by the user running them.
+// An existing directory keeps its own mode: a deployment that needs a socket
+// shared across users creates the directory itself, with the mode it means,
+// and points ZIP_RUNTIME_DIR at it. An abstract socket (@name) has no
+// directory and a tcp address has no path.
+func makeSocketDir(addr string) error {
+	if networkOf(addr) != "unix" || strings.HasPrefix(addr, "@") {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(addr), 0o700); err != nil {
+		return fmt.Errorf("zip: socket dir for %s: %w", addr, err)
+	}
+	return nil
 }
 
 // closeServers stops every running listener. Called from Shutdown.
