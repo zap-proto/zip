@@ -95,14 +95,25 @@ func (a *App) handleMCP(fc fiber.Ctx) error {
 }
 
 // mcpTools projects every typed op into an MCP tool descriptor. The inputSchema
-// is the SAME schemaOf(InType) the OpenAPI doc uses — one schema, two surfaces.
+// is the SAME schemaOfDoc(InType) the OpenAPI doc uses, carrying the SAME prose
+// cmd/zipdoc lifted from the handler — one comment, three surfaces (spec, CLI
+// help, tool list). A model picking a tool from a list is doing what a human
+// reading the spec does and needs the same words to do it; reading only
+// WithSummary here left every zipdoc'd op with a nameless schema and an empty
+// description. WithSummary remains the fallback for a package the generator has
+// not run over, so an undocumented op still names itself.
 func (a *App) mcpTools() []map[string]any {
 	tools := make([]map[string]any, 0, len(a.ops))
 	for _, op := range a.ops {
+		doc, hasDoc := docFor(op.Method, op.Path)
+		desc := op.Summary
+		if hasDoc && doc.Description != "" {
+			desc = doc.Description
+		}
 		tools = append(tools, map[string]any{
 			"name":        opName(op),
-			"description": op.Summary,
-			"inputSchema": schemaOf(op.InType, map[string]any{}),
+			"description": desc,
+			"inputSchema": schemaOfDoc(op.InType, map[string]any{}, docFields(hasDoc, doc)),
 		})
 	}
 	return tools
