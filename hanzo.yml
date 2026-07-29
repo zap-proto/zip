@@ -23,5 +23,5 @@ test:
     # The full suite includes the load-bearing contract pins: route-chain
     # ORDER (middleware-first/handler-last — an inversion here silently breaks
     # every auth gate in every app built on zip), the no-Next abort, empty-leaf
-    # group roots, static fallback, and the zaprpc/runtime/middleware packages.
+    # group roots, static fallback, and the runtime/middleware packages.
     run: go test -count=1 -timeout 10m ./...
