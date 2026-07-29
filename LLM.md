@@ -10,6 +10,32 @@ been deleted; every ref it held is on `origin`, so `git clone` restores it if
 anyone ever needs it. `~/work/hanzo/zip` is `github.com/hanzoai/zip`, a dead
 fork, now carrying a `DEPRECATED.md` pointing here — nothing should import it.
 
+## Upgrading to v1.18.0 — read this before bumping
+
+Four changes are visible from outside. Everything else is additive.
+
+1. **A typed `Delete` no longer reads a request body.** Its input is the URL:
+   path params and query string, which is what the document always said and what
+   every generated client already sent. **Check every `zip.Delete` op whose In
+   type has a field that is NOT a path param** — those fields used to arrive in
+   a body and now must arrive as `?field=value`. A DELETE with only path-param
+   fields is unaffected. (GET/HEAD were already URL-only.)
+2. **`zip/zaprpc` is deleted.** Nothing in the estate imported it. If you have
+   `zaprpc "github.com/zap-proto/go/rpc"`, that is a DIFFERENT module and is
+   untouched — see below.
+3. **The document says more.** A URL-borne field's `validate:"required"` now
+   reaches its parameter, and a bodyless op's example now rides its parameters.
+   Regenerated SDKs will make those arguments required — which they already were
+   at run time.
+4. **`zip.Get` and friends take an `OpTarget`, not a `*App`.** `zip.Get(app, …)`
+   is unchanged; `zip.Get(v1Group, …)` now also works. Only an external type
+   implementing `zip.Router` breaks, and `Router` was never a parameter of
+   anything.
+
+A validation failure now names the field by its WIRE name (`reason`), not its Go
+name (`Reason`) — if anything matched on those strings, it matched on the wrong
+one.
+
 ## The verbs
 
 Everything composes through these. There is deliberately no second way to do
@@ -17,7 +43,7 @@ any of them.
 
 | verb | what it does |
 |---|---|
-| **`zip.Get/Post[In,Out](app, …)`** | **declare a typed op — THE way to declare a route.** The schema, and what every projection is derived from |
+| **`zip.Get/Post[In,Out](on, …)`** | **declare a typed op — THE way to declare a route.** The schema, and what every projection is derived from. `on` is the App or any Router of it |
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
 | `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
@@ -37,9 +63,24 @@ are the two exemptions in the tree and each states its reason in the file header
 Everything else is a typed op. If you can name what goes in and what comes out,
 declare it: that declaration IS the API.
 
-Note that a typed op takes the WHOLE path — `zip.Get(app, …)` registers on the
-`*App`, so there is no `Group` prefix for it to inherit. An app built on
-`app.Group("/v1")` spells the prefix out per route on the way across.
+**A typed op declares on a Group as readily as on the App** (v1.18.0). `zip.Get`
+and friends take an `OpTarget` — `*App`, any `Router`, or `app.With(mw…)` — so a
+group's prefix is part of the op's path, and `With`'s middleware composes around
+its handler:
+
+```go
+v1 := app.Group("/v1")
+zip.Get(v1, "/users/:id", getUser)             // op path: /v1/users/:id
+zip.Post(app.With(RateLimit), "/v1/keys", mint) // gated, and still one op
+```
+
+Until then `zip.Get` took the `*App` only, so a group-structured app had to
+spell its prefix out per route to have typed ops at all — friction pushing
+exactly the wrong way, since the untyped handler inherited the prefix for free.
+zip composes the op's path with the router's own rule (`joinPath` mirrors
+fiber's `getGroupPath`) and registers the composed path, so op.Path IS the route:
+one string, no second composition to drift. `OpTarget`'s only method is
+unexported, so nothing outside the package can claim to be somewhere an op lives.
 
 ## One registry, five projections
 
@@ -289,11 +330,17 @@ SAME schema-type → flag-kind rule the spec-derived CLI uses — rather than
 re-deriving the vocabulary from `reflect`. A flag spelled from a Go type and the
 same flag spelled from that type's published schema are equal by construction.
 
-`urlFields` is the one list of URL-bindable fields, read by both the path and the
-query parameter declarations, because `bindURL` is one binder over both halves of
-the URL. Path params used to be hardcoded `"type":"string"` while query params
-consulted the input type — the document described the same value two ways
-depending on which half of the URL carried it.
+`urlFields` is the one list of URL-bindable fields, read by the path parameter
+declarations, the query parameter declarations AND the CLI's flags for a
+bodyless op — because `bindURL` is one binder over both halves of the URL, and
+those are exactly the fields it can fill. Path params used to be hardcoded
+`"type":"string"` while query params consulted the input type; the CLI offered
+flags the URL could not carry.
+
+`jsonFieldName` is the wire-name rule, and `validate.go` reads it too (v1.18.0):
+a failed validation names the field the way the CALLER named it. It used to
+report the Go name, so someone who sent `reason` was told `field "Reason"` is
+required — a name appearing nowhere in the document they were working from.
 
 ## The doc comment reaches every prose surface (v1.17.6)
 
@@ -320,38 +367,30 @@ not the sentence, so it consumes `opName` and `op.invoke` only.)
 
 zip does not define a ZAP envelope, registry, dispatcher or listener.
 `zap-proto/go` owns the wire format and `zap-proto/http` owns HTTP semantics
-over ZAP frames.
+over ZAP frames. As of v1.18.0 zip holds no second implementation of any of
+them.
 
-### `zaprpc/` — deprecated, and NOT what hanzoai/cloud imports
+### `zaprpc/` — DELETED in v1.18.0, and never what cloud imported
 
-Establish this before touching it: **`github.com/zap-proto/zip/zaprpc` and
-`github.com/zap-proto/go/rpc` are different packages in different modules.**
+Settled, so nobody has to work it out again: **`github.com/zap-proto/zip/zaprpc`
+and `github.com/zap-proto/go/rpc` were different packages in different modules.**
 cloud's internal service-to-service plane imports the LATTER, under the local
 alias `zaprpc` — `zaprpc "github.com/zap-proto/go/rpc"`, in `rpc.go`, `dial.go`
-and `zapface/*`. The alias is the whole reason the two get confused. Nothing in
-the estate imports `zip/zaprpc`, including zip itself.
+and `zapface/*`. That alias is the whole reason the two got confused, and it is
+why the deletion touches cloud not at all.
 
-| | `zip/zaprpc` | `zap-proto/go/rpc` (what cloud uses) |
+| | `zip/zaprpc` (deleted) | `zap-proto/go/rpc` (what cloud uses) |
 |---|---|---|
-| request | `Envelope{Service, Method string, Payload []byte}` | `Call{Method, PromiseID, Target uint32, Cap, Payload []byte}` |
+| request | `Envelope{Service, Method string, Payload []byte}` | `Call{Method, PromiseID, Target uint32, Cap, Payload}` |
 | header | 24 bytes | 28 request / 20 response |
 | addressing | service+method **strings** | u32 **ordinals**, promise pipelining |
 
-A peer speaking one cannot decode the other, so `zip/zaprpc` is unreachable by
-the rest of the ZAP fleet. It is marked **Deprecated** as of v1.17.8, and its
-doc no longer cites `app.ZAPRegistry()` — a method that has never existed in
-this module (the only implementation was in the dead `hanzoai/zip` fork). It was
-NOT deleted: removing an exported package from a public module is a breaking
-change and belongs in a release that says so, not in a patch. Deleting it is
-owed. To reach another service use the op-call plane (`zip.DialApp` +
-`zip.Call`); for the ZAP wire format use `zap-proto/go/rpc`.
-
-`zap-proto/http` v0.3.0 carries headers as length-prefixed name/value pairs —
-`[u32 count]` then `[u32 nameLen][name][u32 valueLen][value]`. It used to be a
-JSON `map[string][]string` inside the ZAP frame, encoded by two implementations
-kept byte-identical to each other. Decode is now 0 allocs/op because every name
-and value is a subslice of the frame. That was a wire break: peers must agree
-on the version, so v0.3.0 and v0.2.x cannot talk.
+A peer speaking one could not decode the other, so `zip/zaprpc` was unreachable
+by the rest of the ZAP fleet; nothing in the estate imported it, including zip.
+Its docs cited `app.ZAPRegistry()`, a method that never existed in this module
+(the only implementation was in the dead `hanzoai/zip` fork). To reach another
+service use the op-call plane (`zip.DialApp` + `zip.Call`); for the ZAP wire
+format use `zap-proto/go/rpc`, which owns it.
 
 ## Testing
 
@@ -359,45 +398,46 @@ on the version, so v0.3.0 and v0.2.x cannot talk.
 (`-ldflags -X main.version=`) from `internal/testplugin` and assert which one
 answered, which is the only honest way to prove a reload swapped processes.
 
-## Known bug — `hasBody` is the ONE rule spelled in three places, and DELETE has already drifted
+## A bodyless method, spelled once (v1.18.0 — WIRE CHANGE)
 
-`openapi.go`'s `hasBody` says it is "the ONE place that rule lives … two copies
-would eventually disagree". They already do — nothing calls it but the document:
+`hasBody` is the ONE rule about what a method carries on the wire, and it is now
+the only spelling of it. It used to be documentation for a rule three other
+sites re-stated differently, and DELETE had drifted:
 
-| site | spelling | DELETE carries |
+| site | was | now |
 |---|---|---|
-| `openapi.go` `hasBody` | `GET, HEAD, DELETE` → no body | query params |
-| `typed.go` (`registerTyped`'s fiber handler) | `method != "GET" && method != "HEAD"` | **a body** |
-| `cli.go` (`Remote.Invoke`) | `c.Method == "GET" \|\| c.Method == "HEAD"` | **a body** |
+| `openapi.go` `hasBody` | `GET, HEAD, DELETE` → no body | unchanged, and now the only definition |
+| `typed.go` route handler | `method != "GET" && method != "HEAD"` → **read a DELETE body** | `hasBody(method)` |
+| `cli.go` `Remote.Invoke` | same two methods → **sent a DELETE body** | `hasBody(c.Method)` |
+| `cli.go` `bindIn` | every field became a flag | a bodyless op's flags are `urlFields` |
 
-So a typed `Delete` route reads a JSON body the OpenAPI document says does not
-exist, and any SDK generated from that document sends query params instead.
-Both happen to work today (`bindURL(query)` runs either way), which is why it
-has gone unnoticed; the CLI's spec path and its in-process path disagree about
-the same op.
+**What changed on the wire: a typed `Delete` no longer reads a JSON request
+body.** Its input comes from the URL — the path params and the query string,
+which is what every client generated from the document already sent. A service
+that shipped a DELETE whose caller put fields in the body must move them to the
+query string. Nothing else moves: GET/HEAD were already URL-only, and every
+method with a body still has one.
 
-The fix is to call `hasBody` from `typed.go` and `cli.go` — but it moves
-DELETE's input from the body to the URL on the wire, so it belongs in a release
-where consumers can be checked, not in a patch. Not fixed here deliberately.
+It is about the WIRE, not about the op. `op.invoke` still decodes whatever JSON
+it is handed for any method, because a call addressed BY NAME — MCP `tools/call`,
+`zip.Call`, a CLI command — has no URL to carry half the input in. There the
+arguments object is the whole input.
 
-**It is no longer hidden.** `cli_test.go`'s `TestCLI_SpecAndRegistryAgree` used
-to `continue` past `GET/HEAD/DELETE` — while the fixture registered no DELETE at
-all, so the case was skipped twice over. It now registers one and asserts the
-divergence precisely, in `assertURLBoundDivergence`, which pins three things
-about a bodyless op's trip through the document:
+Two things a bodyless op used to lose in the document are closed with it:
 
-1. the document names the registry's **scalar** flags and only those, because
-   those are what a URL can carry (`urlFields`);
-2. it declares every query parameter **optional**, never reading the field's
-   `validate:"required"` tag — so a field the handler refuses to run without
-   reads as optional to every generator;
-3. the doc comment's **Example does not survive**, an example being a request
-   body and a bodyless op declaring none.
+1. **required-ness reaches the parameter.** `urlField.required` reads the same
+   `validate:"required"` tag the body schema does, so a field the handler
+   refuses to run without is required in the document. It used to be hardcoded
+   `required: false`, so every generated client made the argument optional.
+2. **the example survives.** A bodyless op has no `requestBody` for the doc
+   comment's Example to live in, so it rides the parameters that carry its
+   values (`exampleFields`), and `CommandsFromSpec` rebuilds the object from
+   them (`specOp.example`). Every GET and DELETE reached the reference and the
+   generated CLI with no example at all before this.
 
-None of the three is endorsed. Close any one and that test fails and sends you
-here — which is the point of pinning them rather than skipping them. (2) and (3)
-are doc-shape changes that move published SDK signatures, so they ride the same
-coordinated release as `hasBody`.
+`TestCLI_SpecAndRegistryAgree` is now plain equality across every field of every
+command for every method — no skip, no divergence helper. That test is the pin:
+the registry-derived command tree and the document-derived one are one tree.
 
 ## Known bug — zipdoc: module-load extraction diverges from package-load
 

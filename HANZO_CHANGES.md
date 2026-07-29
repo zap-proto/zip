@@ -26,7 +26,7 @@ Every file from upstream has been deleted. We kept the name.
 |---|---|
 | Core | `*fiber.App` under the hood; `zip.App` is the public type. |
 | Ctx | `fiber.Ctx` interface wrapped + `Org/User/UserEmail/IsAdmin/RequestID/Host` accessors. |
-| Typed handlers | Generic `zip.Get[In, Out](app, path, fn)` etc. with reflection-build OpenAPI 3.1. |
+| Typed handlers | Generic `zip.Get[In, Out](on, path, fn)` etc. with reflection-built OpenAPI 3.1. `on` is the App, any Group of it, or `app.With(mw…)`. |
 | Validation | ~120 LOC reflection: `required`, `min/max`, `minlen/maxlen` struct tags. |
 | OpenAPI | Auto-generated at `/.well-known/openapi.json`; Swagger UI at `/docs`. |
 | Extension routes | `app.Module(method+path, runtime, dir)` — HIP-0105 surface. Loader is duck-typed (no hanzoai/base dep). |
@@ -36,8 +36,7 @@ Every file from upstream has been deleted. We kept the name.
 | WebSocket | `wsx.Upgrade(fn)` over fasthttp/websocket. |
 | Streaming | `c.SendStream(reader)` + `c.SendStreamWriter(fn)`. |
 | Transport | ONE verb `app.Listen(addrs...)`; the address scheme selects the transport (`:9653`=ZAP default, `http://:8080`=HTTP, any `RegisterTransport`'d proto). `app.Listen(":9653", "http://:8080")` serves both from one call. Routes ARE the surface over every transport. |
-| Free MCP | Typed handlers auto-project to a Model Context Protocol tool surface at `/mcp` (JSON-RPC 2.0: initialize/tools/list/tools/call). Same op registry as OpenAPI (one schema, three projections: REST·OpenAPI·MCP), served over every transport → ZAP-native MCP for free. `Config.MCP.Disabled` to suppress. |
-| Named-service RPC (optional) | `zaprpc.Service`/`Registry`/`Dispatch` + `zaprpc.HTTPHandler(reg)` for a gRPC-style named-service surface on top of the transport. |
+| Free MCP | Typed handlers auto-project to a Model Context Protocol tool surface at `/mcp` (JSON-RPC 2.0: initialize/tools/list/tools/call). Same op registry as OpenAPI — one schema, five projections (REST·OpenAPI·MCP·CLI·call plane) — served over every transport, so ZAP-native MCP is free. `Config.MCP.Disabled` to suppress. |
 
 ## Dependencies
 

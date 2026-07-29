@@ -53,8 +53,13 @@ type Nothing struct{}
 type usersSubsystem struct{}
 
 func (usersSubsystem) Mount(app *zip.App, _ Deps) error {
+	// The subsystem owns a prefix, so it takes a Group and declares its ops on
+	// that — the prefix is part of every op it registers, and the composition
+	// root never repeats it.
+	users := app.Group("/v1/users")
+
 	// GetUser returns one user, scoped to the caller's org.
-	zip.Get(app, "/v1/users/:id", func(ctx context.Context, in *GetUserIn) (*User, error) {
+	zip.Get(users, "/:id", func(ctx context.Context, in *GetUserIn) (*User, error) {
 		// The gateway's identity reaches a typed handler through the ctx —
 		// c.Org() is the untyped spelling of the same headers.
 		return &User{ID: in.ID, Org: zip.CallerOf(ctx).Org}, nil
