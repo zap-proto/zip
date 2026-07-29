@@ -56,7 +56,15 @@ Module path `github.com/zap-proto/zip`. Requires Go 1.26+.
 
 ## Features
 
-- **Typed ops are the API** — `zip.Get/Post/Put/Patch/Delete[In, Out](app, path, fn)` is how a route is declared. It registers ONE operation; every interface below is derived from it, and `op.invoke` (decode → validate → authorize → run) is the one handler core all of them share. The In/Out types are the contract, so the document, the tool, the command and the client cannot drift from the code — there is nowhere for them to drift *to*.
+- **Typed ops are the API** — `zip.Get/Post/Put/Patch/Delete[In, Out](on, path, fn)` is how a route is declared. It registers ONE operation; every interface below is derived from it, and `op.invoke` (decode → validate → authorize → run) is the one handler core all of them share. The In/Out types are the contract, so the document, the tool, the command and the client cannot drift from the code — there is nowhere for them to drift *to*.
+
+  `on` is the App, any `Group` of it, or `app.With(mw…)` — a group's prefix is part of the op and `With`'s middleware wraps its handler, so structuring the router costs nothing in schema:
+
+  ```go
+  v1 := app.Group("/v1")
+  zip.Get(v1, "/users/:id", getUser)               // one op at /v1/users/:id
+  zip.Post(app.With(RateLimit), "/v1/keys", mint)  // gated, and still one op
+  ```
 - **Untyped routes are the escape hatch, and they cost every projection** — `app.Get(path, func(c *zip.Ctx) error)` registers a route and **no operation**. The endpoint is then in no OpenAPI document, is no MCP tool, has no command, and no service can reach it with `zip.Call`; it is reachable only by someone who already knows the URL. That is the right trade when the response is something a schema cannot describe — an SSE stream, a protocol upgrade, a proxied byte range, a non-JSON body — and the wrong one for everything else. If you can name what goes in and what comes out, declare it.
 - **Transport is a value, not a method** — one verb, `app.Listen(addrs...)`, and the address scheme selects the transport (mirrors `net.Listen`):
 

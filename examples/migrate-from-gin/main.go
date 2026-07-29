@@ -23,9 +23,9 @@
 // mechanically to get it running, then type it; do not ship a service that
 // stopped halfway.
 //
-// A typed op takes the whole path — zip.Get(app, …) registers on the App, so
-// there is no Group prefix to inherit. A gin codebase built on router groups
-// spells the prefix out once per route on the way across.
+// A gin codebase built on router groups keeps them: zip.Get takes the App or
+// any Group of it, so a group's prefix is part of the op exactly as it is part
+// of an untyped route. The port does not have to flatten the router to type it.
 package main
 
 import (
@@ -62,11 +62,13 @@ func main() {
 		return c.JSON(200, map[string]string{"id": c.Param("id")})
 	})
 
-	// STEP 2 — the same routes as typed ops. The hand-written c.Param and
-	// c.Bind are gone: the In type says what the request IS, and one declaration
-	// feeds the route, the document, the tool list, the CLI and the call plane.
-	zip.Get(app, "/v1/users/:id", getUser)
-	zip.Post(app, "/v1/users", createUser)
+	// STEP 2 — the same routes as typed ops, declared on the group the gin
+	// router already had. The hand-written c.Param and c.Bind are gone: the In
+	// type says what the request IS, and one declaration feeds the route, the
+	// document, the tool list, the CLI and the call plane.
+	v1 := app.Group("/v1")
+	zip.Get(v1, "/users/:id", getUser)
+	zip.Post(v1, "/users", createUser)
 
 	log.Fatal(app.Listen("http://:8080"))
 }
