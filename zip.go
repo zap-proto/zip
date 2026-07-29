@@ -193,6 +193,10 @@ func New(cfg Config) *App {
 	}
 }
 
+// opTarget makes the App itself a place a typed op can be declared — the root,
+// with no prefix and no middleware wrapped around the handler.
+func (a *App) opTarget() (*App, string, Middleware) { return a, "", nil }
+
 // Fiber returns the underlying *fiber.App. Use for one-off escape into
 // Fiber-only APIs (rare). Prefer staying on the zip surface.
 func (a *App) Fiber() *fiber.App { return a.fiber }
