@@ -3,11 +3,14 @@
 // The loader is constructed by the embedding binary (typically
 // *extruntime.Loader from hanzoai/base/plugins/extruntime, with
 // gojavm + wasmvm + pyvm + starlarkvm registered). zip is a CONSUMER
-// of the loader — it accepts anything that satisfies zip/runtime.Loader.
+// of the loader — it accepts anything that satisfies zip.Loader, which is
+// declared at the zip root so this example compiles with no JS toolchain.
 //
 // This example stubs a tiny in-memory loader so the example compiles
-// without pulling hanzoai/base. Replace with real *extruntime.Loader
-// in production.
+// without pulling hanzoai/base. In production, back it with
+// *extruntime.Loader through an adapter that returns zip.Module — Go
+// requires identical result types, so extruntime's own Module type does
+// not satisfy zip.Loader by direct assignment.
 package main
 
 import (
@@ -17,10 +20,9 @@ import (
 
 	"github.com/zap-proto/zip"
 	"github.com/zap-proto/zip/middleware"
-	"github.com/zap-proto/zip/runtime"
 )
 
-// stubLoader is a zero-dependency runtime.Loader that echoes the
+// stubLoader is a zero-dependency zip.Loader that echoes the
 // envelope back. Replace with *extruntime.Loader in a real service.
 type stubLoader struct{}
 
@@ -28,11 +30,11 @@ func (stubLoader) Runtimes() []string {
 	return []string{"goja", "wazero", "pyvm", "starlark", "native"}
 }
 
-func (stubLoader) LoadDir(_ context.Context, _ string) (map[string]runtime.Module, error) {
-	return map[string]runtime.Module{}, nil
+func (stubLoader) LoadDir(_ context.Context, _ string) (map[string]zip.Module, error) {
+	return map[string]zip.Module{}, nil
 }
 
-func (stubLoader) LoadOne(_ context.Context, dir string) (runtime.Module, error) {
+func (stubLoader) LoadOne(_ context.Context, dir string) (zip.Module, error) {
 	return &stubModule{dir: dir, rt: "goja"}, nil
 }
 

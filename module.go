@@ -10,6 +10,53 @@ import (
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
+// Module is one loaded extension — the zip-side projection of the HIP-0105
+// Module contract. [App.Module] mounts one of these at one route.
+type Module interface {
+	Name() string
+	Runtime() string
+	Exports() []string
+	Invoke(ctx context.Context, fn string, payload []byte) ([]byte, error)
+	Close() error
+}
+
+// Loader loads extensions for [App.Module]. It is the zip-side projection of
+// the HIP-0105 extension runtime contract and it lives HERE, at the root,
+// because the root is what consumes it: [Config.Loader] holds one and
+// [App.Module] calls it.
+//
+// The interface is duck-typed and zip does NOT import an implementation —
+// so a consumer that never evaluates JavaScript never compiles one. Build your
+// loader and pass it in:
+//
+//	app := zip.New(zip.Config{Loader: myLoader})
+//
+// Duck-typed here means structural, not loose: LoadDir must return
+// map[string][Module] EXACTLY. A backend that declares its own Module type
+// (hanzoai/base/plugins/extruntime does) therefore satisfies this through a
+// thin adapter that returns [Module], not by direct assignment — Go requires
+// identical result types, and an equivalent method set is not enough.
+//
+// The in-tree JavaScript implementation is package
+// [github.com/zap-proto/zip/runtime] — goja to evaluate and esbuild to
+// bundle. It is a SEPARATE import on purpose: that cost belongs to the
+// binaries that ask for JS, not to every consumer of zip.
+type Loader interface {
+	// LoadDir scans a directory for extension manifests and returns
+	// loaded modules keyed by manifest name.
+	LoadDir(ctx context.Context, dir string) (map[string]Module, error)
+
+	// LoadOne loads a single extension by directory. zip uses this for
+	// [App.Module], which mounts ONE extension at one route. Implementers
+	// may implement it by calling LoadDir on the parent and selecting
+	// the result.
+	LoadOne(ctx context.Context, dir string) (Module, error)
+
+	// Runtimes returns the registered runtime names ("goja", "wazero",
+	// "v8go", "pyvm", "starlark", "native").
+	Runtimes() []string
+}
+
 // moduleEnvelope is the JSON shape every extension runtime receives.
 // Same shape across wasm / goja / pyvm / starlark — the host serializes
 // once and the guest sees the same bytes regardless of which engine ran
@@ -63,11 +110,10 @@ type moduleResponse struct {
 //  1. THERE IS NO TYPE TO DERIVE A SCHEMA FROM. A typed op's schema comes from
 //     its In/Out Go types. A module is LOADED at run time out of a directory —
 //     that is the whole point of an extension — so at the moment this route is
-//     registered zip holds a [github.com/zap-proto/zip/runtime.Module]
-//     (Name/Runtime/Exports/Invoke) and no declaration of what the module
-//     accepts or returns. Registering it as an open object would put the path
-//     in the document while saying nothing about the contract, which is not
-//     the same thing as documenting it.
+//     registered zip holds a [Module] (Name/Runtime/Exports/Invoke) and no
+//     declaration of what the module accepts or returns. Registering it as an
+//     open object would put the path in the document while saying nothing
+//     about the contract, which is not the same thing as documenting it.
 //  2. A TYPED OP CANNOT EXPRESS THE MODULE'S RESPONSE. A module answers with a
 //     moduleResponse — status, headers, body — and modules use it (a redirect,
 //     a 404, a non-JSON body). A typed op returns Out and zip decides the
@@ -75,11 +121,11 @@ type moduleResponse struct {
 //     capability the envelope exists to provide.
 //
 // What closes it is (1): an extension that DECLARES its contract, via a
-// manifest schema surfaced on [github.com/zap-proto/zip/runtime.Module]. The op
-// would then carry the module's own schema and every projection follows, with
-// the route keeping the envelope it has now. Until an extension declares one
-// there is nothing to project, and inventing a shape for it here would be a
-// second source of truth for a contract zip does not own.
+// manifest schema surfaced on [Module]. The op would then carry the module's
+// own schema and every projection follows, with the route keeping the envelope
+// it has now. Until an extension declares one there is nothing to project, and
+// inventing a shape for it here would be a second source of truth for a
+// contract zip does not own.
 //
 // A route whose contract IS known belongs in a typed op — declare it with
 // [Get]/[Post] and let the module be an implementation detail behind it.

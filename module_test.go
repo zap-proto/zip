@@ -9,17 +9,16 @@ import (
 	"testing"
 
 	"github.com/zap-proto/zip"
-	"github.com/zap-proto/zip/runtime"
 )
 
-// stubLoader is a minimal runtime.Loader fixture for tests.
+// stubLoader is a minimal zip.Loader fixture for tests.
 type stubLoader struct{ rt string }
 
 func (s stubLoader) Runtimes() []string { return []string{s.rt} }
-func (s stubLoader) LoadDir(_ context.Context, _ string) (map[string]runtime.Module, error) {
-	return map[string]runtime.Module{}, nil
+func (s stubLoader) LoadDir(_ context.Context, _ string) (map[string]zip.Module, error) {
+	return map[string]zip.Module{}, nil
 }
-func (s stubLoader) LoadOne(_ context.Context, dir string) (runtime.Module, error) {
+func (s stubLoader) LoadOne(_ context.Context, dir string) (zip.Module, error) {
 	return &stubModule{dir: dir, rt: s.rt}, nil
 }
 

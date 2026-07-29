@@ -75,8 +75,8 @@ the allowed list.
 
 ## Loader injection
 
-zip does NOT depend on `hanzoai/base/plugins/extruntime`. The
-`zip/runtime.Loader` interface is duck-typed:
+zip does NOT depend on `hanzoai/base/plugins/extruntime`. The `zip.Loader`
+interface is declared at the zip root and is duck-typed:
 
 ```go
 type Loader interface {
@@ -86,9 +86,17 @@ type Loader interface {
 }
 ```
 
+Because the contract lives at the root and no implementation is imported
+with it, a service that never evaluates JavaScript does not compile one:
+goja and esbuild live in `zip/runtime`, a separate import that only the
+binaries wanting JS pay for.
+
 A real service binary constructs `*extruntime.Loader` from
 `hanzoai/base/plugins/extruntime` with the runtimes it cares about
-(goja + wazero + pyvm + starlark + native), and passes it in:
+(goja + wazero + pyvm + starlark + native), and passes it in. Note that
+`extruntime` declares its own `Module` type, so it reaches `zip.Loader`
+through a thin adapter whose `LoadDir`/`LoadOne` return `zip.Module`: Go
+demands identical result types and an equivalent method set is not enough.
 
 ```go
 loader := extruntime.NewLoader(

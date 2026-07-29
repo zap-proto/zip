@@ -1,16 +1,15 @@
-// Package runtime is the zip-side projection of HIP-0105's extension
-// runtime contract. Consumers of zip pass a Loader implementation here
-// (typically *extruntime.Loader from hanzoai/base/plugins/extruntime)
-// and zip mounts modules as routes via app.Module().
-package runtime
-
-import internal "github.com/zap-proto/zip/internal/runtime"
-
-// Loader is re-exported from internal/runtime for ergonomic use:
+// Package runtime is zip's in-tree JavaScript extension runtime: goja to
+// evaluate and esbuild to bundle/transpile. It is a SEPARATE import from
+// the root zip package on purpose — a service that never evaluates JS must
+// not compile a JS interpreter and bundler, so the root declares only the
+// [github.com/zap-proto/zip.Loader] contract and this package is opted into
+// by the binaries that want JS:
 //
-//	loader := myextruntime.NewLoader(...) // implements zipruntime.Loader
-//	app := zip.New(zip.Config{Loader: loader})
-type Loader = internal.Loader
-
-// Module is re-exported from internal/runtime.
-type Module = internal.Module
+//	rt, _ := runtime.NewJSRuntime(runtime.JSOptions{PoolSize: 8})
+//	app := zip.New(zip.Config{Loader: myLoader}) // Loader is zip.Loader
+//
+// The Loader/Module contract app.Module() consumes lives at the zip root
+// ([github.com/zap-proto/zip.Loader], [github.com/zap-proto/zip.Module]) —
+// it is duck-typed, so an implementation registers itself by being passed
+// in, never by zip importing it.
+package runtime

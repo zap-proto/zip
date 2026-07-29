@@ -8,7 +8,8 @@
 //
 // DEPENDENCY DIRECTION. zip does NOT import hanzoai/base. The Engine
 // interface here is a zip-side projection — duck-typed, exactly like the
-// Loader/Module projection in package internal/runtime. base's backends
+// [github.com/zap-proto/zip.Loader] / [github.com/zap-proto/zip.Module]
+// projection at the zip root. base's backends
 // (gojavm, pyvm, v8vm, wasmvm, starkvm) implement an extruntime.Runtime
 // SPI; a thin adapter at the host's app-startup makes each satisfy this
 // Engine and registers it. base imports zip and registers; zip exposes
