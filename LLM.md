@@ -54,6 +54,7 @@ any of them.
 | verb | what it does |
 |---|---|
 | **`zip.Get/Post[In,Out](on, …)`** | **declare a typed op — THE way to declare a route.** The schema, and what every projection is derived from. `on` is the App or any Router of it |
+| `zip.WithStatus(201)` | declare the SUCCESS status; it keys the document's response, not just the wire |
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
 | `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
@@ -299,6 +300,26 @@ order (`static ≻ :param ≻ *`), and equal-specificity overlaps panic at start
 rather than silently shadowing. A `Mount` is an **ordinary wildcard route**, so
 a more specific route registered afterwards still wins — pinned by
 `TestMount_StaticBeatsRemoteMount`.
+
+## The status is part of the contract (v1.18.2)
+
+`WithStatus(code)` declares the status a successful op answers with — 201 for an
+op that creates, 202 for one that accepts work it has not finished. Without it an
+op answers 200, or 204 when the handler returns a nil Out.
+
+It is an OpOption rather than something a handler sets per request because the
+status is a CONTRACT detail, and the contract is what the registry projects.
+`op.Status` keys the document's `responses` object, so a generated SDK expects
+the status the service actually sends. A handler that reached around the
+framework to set 201 wrote that detail into a side channel no projection could
+read: the document said 200, every SDK said 200, and the wire said 201. That is
+the same failure as a query parameter's required-ness being invisible — a
+contract detail that only exists at run time is not a contract.
+
+It is HTTP-only by construction: the REST route and the document read it, and the
+MCP tool, the CLI command and the op-call plane are untouched, because each of
+those carries its own outcome. A non-2xx panics at declaration — an error status
+is the error a handler returns, and two places to say it is one too many.
 
 ## The schema derivation — one type, one definition (v1.17.8)
 
