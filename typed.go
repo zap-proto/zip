@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"cmp"
 	"context"
 	"reflect"
 	"strconv"
@@ -31,6 +32,7 @@ type registeredOp struct {
 	Path        string
 	OperationID string
 	Summary     string
+	Status      int // the success status; 0 means the default (200, or 204 for a nil Out)
 	Tags        []string
 	InType      reflect.Type
 	OutType     reflect.Type
@@ -77,6 +79,33 @@ func WithTags(tags ...string) OpOption { return func(op *registeredOp) { op.Tags
 // WithOperationID sets the operation ID in OpenAPI.
 func WithOperationID(id string) OpOption {
 	return func(op *registeredOp) { op.OperationID = id }
+}
+
+// WithStatus declares the status a SUCCESSFUL op answers with — 201 for an op
+// that creates a resource, 202 for one that accepts work it has not finished.
+// Without it an op answers 200, or 204 when its handler returns a nil Out.
+//
+// It is declared on the op because the status is part of the CONTRACT, and the
+// contract is what the registry projects: the OpenAPI document keys its response
+// on this code, so a generated SDK expects the status the service actually
+// sends. Setting it per request instead — reaching around the framework from
+// inside a handler — writes a contract detail into a side channel no projection
+// can read, which is how a document comes to say 200 about a route that has
+// always answered 201.
+//
+// The status is an HTTP notion, so it applies to the REST route and the document
+// and to nothing else: an MCP tools/call, a CLI command and a zip.Call all carry
+// their own outcome and are untouched.
+//
+// A non-2xx is refused here, at declaration, rather than at request time. An
+// error status comes from the error a handler returns ([ErrNotFound] and
+// friends); letting a declaration state one too would be two places for one
+// fact, free to disagree.
+func WithStatus(code int) OpOption {
+	if code < 200 || code > 299 {
+		panic("zip: WithStatus wants a 2xx success status — an error status is the error a handler returns")
+	}
+	return func(op *registeredOp) { op.Status = code }
 }
 
 // bindURL copies URL-borne values onto the decoded input, matching a name to the
@@ -258,8 +287,13 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 			return err
 		}
 		if out == nil {
-			c.Status(204)
+			// A void op answers with the status it DECLARED, else the 204 a nil
+			// Out has always meant.
+			c.Status(cmp.Or(op.Status, 204))
 			return nil
+		}
+		if op.Status != 0 {
+			c.Status(op.Status)
 		}
 		return c.JSON(out)
 	}

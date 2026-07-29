@@ -1,8 +1,10 @@
 package zip
 
 import (
+	"cmp"
 	"encoding/json"
 	"maps"
+	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
@@ -192,21 +194,26 @@ func (a *App) buildOpenAPI() map[string]any {
 			opObj["parameters"] = decls
 		}
 
-		// 200 response.
+		// The success response, keyed on the status the op DECLARED — the whole
+		// reason WithStatus is on the op rather than set per request: a 201 that
+		// only reached the wire would leave every generated client expecting a
+		// 200 the service never sends.
 		if op.OutType != nil && typeName(op.OutType) != "" {
 			respMedia := map[string]any{"schema": schemaOf(op.OutType, reg, docFields(hasDoc, doc))}
 			if hasDoc && len(doc.Response) > 0 {
 				respMedia["example"] = json.RawMessage(doc.Response)
 			}
+			code := cmp.Or(op.Status, 200)
 			opObj["responses"] = map[string]any{
-				"200": map[string]any{
-					"description": "ok",
+				strconv.Itoa(code): map[string]any{
+					"description": statusText(code),
 					"content":     map[string]any{"application/json": respMedia},
 				},
 			}
 		} else {
+			code := cmp.Or(op.Status, 204)
 			opObj["responses"] = map[string]any{
-				"204": map[string]any{"description": "no content"},
+				strconv.Itoa(code): map[string]any{"description": statusText(code)},
 			}
 		}
 
@@ -553,6 +560,22 @@ func rootSchemaOf(t reflect.Type, fields map[string]string) map[string]any {
 		root["$defs"] = reg.defs
 	}
 	return root
+}
+
+// statusText describes one response. The two defaults keep the words they have
+// always had, so a document that never declared a status does not churn; anything
+// declared gets the standard reason phrase, lowercased to match them.
+func statusText(code int) string {
+	switch code {
+	case 200:
+		return "ok"
+	case 204:
+		return "no content"
+	}
+	if s := http.StatusText(code); s != "" {
+		return strings.ToLower(s)
+	}
+	return "ok"
 }
 
 // exampleFields splits an op's example object into its fields, so a parameter
