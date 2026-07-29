@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/zap-proto/zip/internal/jsonenc"
 	"io"
 	"reflect"
 	"sort"
@@ -423,7 +424,7 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 	}
 	// No query map: a command's arguments are named, so they bind as path
 	// values. A CLI has no URL for the "?a=b" half to have come from.
-	return c.op.invoke(ctx, body, nil, path)
+	return c.op.invoke(ctx, jsonenc.Unmarshal, body, nil, path)
 }
 
 // Remote executes a command against a running zip service, and reads that

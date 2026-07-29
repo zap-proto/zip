@@ -2,14 +2,13 @@ package zip
 
 import (
 	"context"
+	"github.com/zap-proto/zip/internal/zapenc"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
-
-	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
 // The op-call plane — the projection that lets services compose WITHOUT
@@ -67,6 +66,37 @@ import (
 // it.
 const CallPath = "/.well-known/zip/op/"
 
+// CallContentType marks a body on the op-call plane. It names ZAP explicitly so
+// a request that arrives with anything else is a caller that has not been
+// updated, rather than a body silently read under the wrong codec.
+const CallContentType = "application/zap"
+
+// callFault is how a refusal crosses the plane: the status the op chose, its
+// code and its message, as ZAP like everything else here. The REST error
+// handler renders JSON for browsers; this plane never does.
+type callFault struct {
+	Status int32
+	Code   string
+	Msg    string
+}
+
+// sendCallError writes a refusal in the plane's own encoding, preserving the
+// status the op chose — 402 vs 403 vs 404 vs 503 is the whole answer, and a
+// plane that collapsed them would make every failure look alike.
+func sendCallError(fc fiber.Ctx, err error) error {
+	f := callFault{Status: 500, Msg: err.Error()}
+	if he, ok := asHTTPError(err); ok {
+		f.Status, f.Code, f.Msg = int32(he.Status), he.Code, he.Msg
+	}
+	body, merr := zapenc.Marshal(&f)
+	if merr != nil {
+		return err // fall back to the app's own handler rather than lose the error
+	}
+	fc.Set(fiber.HeaderContentType, CallContentType)
+	fc.Status(int(f.Status))
+	return fc.Send(body)
+}
+
 // RuntimeDirEnv names the directory holding one socket per app. It is the one
 // knob in the socket-path scheme; see [SocketPath].
 const RuntimeDirEnv = "ZIP_RUNTIME_DIR"
@@ -118,18 +148,29 @@ func (a *App) installCallPlane() {
 		// the same pair tools/call runs, without MCP's agent-facing envelope.
 		op := a.opByName(fc.Params("op"))
 		if op == nil || op.invoke == nil {
-			return ErrNotFound("unknown op: " + fc.Params("op"))
+			return sendCallError(fc, ErrNotFound("unknown op: "+fc.Params("op")))
 		}
 		// The whole input arrives as the body, exactly as it does over MCP:
 		// addressing by name means there is no URL to carry half of it.
-		out, err := op.invoke(callerContext(fc), fc.Body(), nil, nil)
+		//
+		// THE BODY IS ZAP, and only ZAP. This plane is service-to-service, so it
+		// carries the same bytes both ends hold in memory rather than serializing
+		// through a text format on the way. JSON is the BOUNDARY encoding — it
+		// belongs on the REST routes a browser reaches and in the MCP envelope an
+		// agent reads, and has no place inside the binary protocol.
+		out, err := op.invoke(callerContext(fc), zapenc.Unmarshal, fc.Body(), nil, nil)
 		if err != nil {
-			return err
+			return sendCallError(fc, err)
 		}
 		if out == nil {
 			return fc.SendStatus(fiber.StatusNoContent)
 		}
-		return fc.JSON(out)
+		body, merr := zapenc.Marshal(out)
+		if merr != nil {
+			return sendCallError(fc, ErrInternal("zip: encode reply: "+merr.Error()))
+		}
+		fc.Set(fiber.HeaderContentType, CallContentType)
+		return fc.Send(body)
 	})
 	a.logger.Info("zip call plane", "path", CallPath, "ops", len(a.ops))
 }
@@ -224,7 +265,7 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 
 	var body []byte
 	if in != nil {
-		b, err := jsonenc.Marshal(in)
+		b, err := zapenc.Marshal(in)
 		if err != nil {
 			return nil, ErrBadRequest("zip: encode " + op + ": " + err.Error())
 		}
@@ -237,7 +278,7 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 	defer fasthttp.ReleaseResponse(resp)
 
 	req.Header.SetMethod(fasthttp.MethodPost)
-	req.Header.SetContentType("application/json")
+	req.Header.SetContentType(CallContentType)
 	req.SetHost(c.name)
 	req.URI().SetPath(CallPath + op)
 	req.SetBody(body)
@@ -259,7 +300,7 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 		return nil, nil
 	}
 	var out Out
-	if err := jsonenc.Unmarshal(resp.Body(), &out); err != nil {
+	if err := zapenc.Unmarshal(resp.Body(), &out); err != nil {
 		return nil, Errorf(502, "zip: decode %s reply: %v", op, err)
 	}
 	return &out, nil
@@ -269,15 +310,20 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 // zip.errorHandler writes for every route — {status, code, error} — so an
 // HTTPError survives the crossing whole rather than being flattened into a
 // string the caller has to parse.
+// remoteError rebuilds the refusal the callee chose, so errors.As on this side
+// sees the *HTTPError the other side returned with its status intact. The body
+// is ZAP like everything else on this plane; a body that does not decode leaves
+// the transport's own status, which is still an honest answer.
 func remoteError(code int, op string, body []byte) error {
-	he := &HTTPError{}
-	if err := jsonenc.Unmarshal(body, he); err != nil || he.Msg == "" {
+	var f callFault
+	if err := zapenc.Unmarshal(body, &f); err != nil || f.Msg == "" {
 		return Errorf(code, "zip: call %s: %s", op, body)
 	}
-	if he.Status == 0 {
-		he.Status = code
+	status := int(f.Status)
+	if status == 0 {
+		status = code
 	}
-	return he
+	return &HTTPError{Status: status, Code: f.Code, Msg: f.Msg}
 }
 
 // validOpName rejects a name that would address something other than an op.
