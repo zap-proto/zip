@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"github.com/zap-proto/zip/internal/zapenc"
 	"net"
 	"os"
 	"path/filepath"
@@ -185,14 +186,21 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod("POST")
-	req.Header.SetContentType("application/json")
+	req.Header.SetContentType(zip.CallContentType)
 	req.SetHost("flags")
 	req.URI().SetPath(zip.CallPath + "flags_bool")
-	req.SetBodyString(`{"flag":"beta"}`)
-
-	frame, err := zaphttp.MarshalRequest(req)
+	// The body is ZAP, because this plane carries nothing else — a JSON body
+	// here is a caller that has not been updated, and is refused rather than
+	// read under the wrong codec.
+	inBody, err := zapenc.Marshal(&boolIn{Flag: "beta"})
 	if err != nil {
-		t.Fatalf("marshal ZAP request frame: %v", err)
+		t.Fatalf("marshal ZAP body: %v", err)
+	}
+	req.SetBody(inBody)
+
+	frame, merr := zaphttp.MarshalRequest(req)
+	if merr != nil {
+		t.Fatalf("marshal ZAP request frame: %v", merr)
 	}
 
 	conn, err := net.Dial("unix", sock)
@@ -226,8 +234,20 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	if err := zaphttp.UnmarshalResponse(respFrame, resp); err != nil {
 		t.Fatalf("the reply is not a ZAP response frame: %v", err)
 	}
-	if resp.StatusCode() != 200 || !strings.Contains(string(resp.Body()), `"enabled":true`) {
+	if resp.StatusCode() != 200 {
 		t.Fatalf("ZAP frame carried the wrong reply: %d %s", resp.StatusCode(), resp.Body())
+	}
+	// The reply is ZAP too. Decoding it with the JSON reader would fail, which is
+	// the point: there is no text encoding anywhere on this plane.
+	var out boolOut
+	if derr := zapenc.Unmarshal(resp.Body(), &out); derr != nil {
+		t.Fatalf("the reply is not a ZAP message: %v", derr)
+	}
+	if !out.Enabled {
+		t.Fatalf("ZAP frame carried the wrong reply: %+v", out)
+	}
+	if strings.Contains(string(resp.Body()), `"enabled"`) {
+		t.Fatal("a field name appeared on the wire — this plane is not JSON")
 	}
 
 	// --- negative: HTTP text gets no HTTP answer ------------------------------

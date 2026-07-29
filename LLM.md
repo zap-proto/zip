@@ -155,6 +155,23 @@ error handler, validator and `Authorizer` — it is exposed exactly as much as t
 REST routes and no more. The whole input arrives as the body: addressing by name
 means there is no URL to carry half of it, the same way `tools/call` does it.
 
+**The body is ZAP, and only ZAP (v1.18.5).** `internal/zapenc` derives a wire
+layout from the In/Out type itself — fields take slots in declaration order,
+each aligned to its own width, which is the rule zap's own schema builder
+applies. Nothing is named on the wire: a field IS its offset. So a
+service-to-service call carries the same bytes both ends hold in memory, with no
+text format in the middle. JSON is the BOUNDARY encoding and stays on the REST
+routes a browser reaches and in the MCP envelope an agent reads; it has no place
+inside the binary protocol. Refusals cross as ZAP too (`callFault`), status
+intact, so `errors.As` still recovers the `*HTTPError` the callee returned.
+
+`op.invoke` takes the decoder as a PARAMETER, so there is still exactly ONE
+handler core under REST, MCP, CLI and the call plane — the encoding belongs to
+the transport, not to the contract.
+
+**The compatibility rule follows from the layout: reordering, inserting or
+retyping a field changes the wire. Append at the end, and only at the end.**
+
 Errors cross whole. The wire form is what `errorHandler` writes for every route
 (`{status, code, error}`), so `errors.As(err, &he)` on the caller's side sees the
 `*HTTPError` the callee returned, status intact. A void op yields `(nil, nil)`.

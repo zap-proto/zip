@@ -36,8 +36,14 @@ type registeredOp struct {
 	Tags        []string
 	InType      reflect.Type
 	OutType     reflect.Type
-	invoke      func(ctx context.Context, rawIn []byte, query, path map[string]string) (any, error)
+	invoke      func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error)
 }
+
+// decoder reads a request body into an op's In. It is a PARAMETER rather than a
+// property of the op because the encoding belongs to the transport, not to the
+// contract: the same op answers a browser over JSON and a sibling service over
+// ZAP, and there is still exactly one handler core underneath both.
+type decoder func([]byte, any) error
 
 // Get registers a GET typed handler at path, on the App or on any Router of it
 // — a Group's prefix is part of the op's path, so a group-structured app
@@ -222,11 +228,11 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// The transport-agnostic core: decode raw JSON args → In, validate, authorize,
 	// run fn, return Out (or a literal nil for a void result). REST and MCP both
 	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
-	op.invoke = func(ctx context.Context, rawIn []byte, query, path map[string]string) (any, error) {
+	op.invoke = func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error) {
 		var in In
 		if len(rawIn) > 0 {
-			if err := jsonenc.Unmarshal(rawIn, &in); err != nil {
-				return nil, ErrBadRequest("invalid json body: " + err.Error())
+			if err := dec(rawIn, &in); err != nil {
+				return nil, ErrBadRequest("invalid body: " + err.Error())
 			}
 		}
 		// The three sources bind in increasing authority: body, then query, then
@@ -282,7 +288,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		// API — so every route that carries `?q=` had to stay an untyped handler,
 		// invisible to OpenAPI and MCP. Reading it here is what makes those routes
 		// expressible as ops.
-		out, err := op.invoke(callerContext(c), body, c.Queries(), path)
+		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path)
 		if err != nil {
 			return err
 		}
