@@ -134,7 +134,7 @@ which is what the typing migration is for: converting a route to
 `app.Module()` (HIP-0105 extension routes) is the one remaining registrar that
 cannot register an op; `module.go`'s doc comment states both structural reasons
 and the one thing that would close it (an extension declaring its contract on
-`runtime.Module`).
+`zip.Module`).
 
 ## Calling another service — `call.go`
 

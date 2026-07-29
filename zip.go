@@ -33,7 +33,6 @@ import (
 	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
-	"github.com/zap-proto/zip/runtime"
 )
 
 // JSONVariant reports which JSON implementation zip is using in this
@@ -56,10 +55,15 @@ type Config struct {
 	Logger luxlog.Logger
 
 	// Loader is the HIP-0105 extension runtime loader. nil disables
-	// app.Module() — only native handlers will work. The interface is
-	// satisfied by *extruntime.Loader from hanzoai/base/plugins/extruntime;
-	// zip does NOT take a hard dep on hanzoai/base.
-	Loader runtime.Loader
+	// app.Module() — only native handlers will work. zip does NOT take a hard
+	// dep on hanzoai/base: the consumer builds the loader and passes it in.
+	// Note that [Loader] is satisfied structurally but NOT loosely — LoadDir
+	// must return map[string][Module] exactly, so a backend with its own
+	// Module type (e.g. hanzoai/base/plugins/extruntime) needs a thin adapter,
+	// not a direct assignment. For JavaScript, import
+	// [github.com/zap-proto/zip/runtime] — a separate import so its goja +
+	// esbuild cost lands only on binaries that evaluate JS.
+	Loader Loader
 
 	// AllowedRuntimes restricts which extension runtimes app.Module()
 	// will accept (e.g. ["goja","wazero"] for hard multi-tenant safety).
@@ -117,7 +121,7 @@ type Config struct {
 type App struct {
 	cfg     Config
 	logger  luxlog.Logger
-	loader  runtime.Loader
+	loader  Loader
 	fiber   *fiber.App
 	ops     []*registeredOp
 	servers []Server // the running transport listeners, set by Listen
