@@ -32,7 +32,12 @@ func validate(v any) error {
 		if tag == "" || tag == "-" {
 			continue
 		}
-		if err := validateField(field.Name, val.Field(i), tag); err != nil {
+		// The field is named to the caller the way the caller named it: its wire
+		// name, from the same jsonFieldName rule the decoder, the schema and the
+		// flag all read. Reporting the Go name told someone who sent `reason`
+		// that `"Reason"` was missing — a name that appears nowhere in the
+		// document they were working from.
+		if err := validateField(jsonFieldName(field), val.Field(i), tag); err != nil {
 			return err
 		}
 	}

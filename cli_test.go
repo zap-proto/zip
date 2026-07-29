@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -469,23 +470,25 @@ type purgeIn struct {
 
 // TestCLI_SpecAndRegistryAgree proves the two derivations are one derivation:
 // the command tree read from the live registry and the command tree read from
-// the document that registry generates are the same commands.
+// the document that registry generates are the same commands — every field, for
+// every method, with nothing skipped.
 //
-// Where they do NOT agree, they disagree in exactly one place and this test says
-// so out loud. A bodyless method (GET/HEAD/DELETE per openapi.go's hasBody)
-// carries its input in the URL, so the document can only name what a URL can
-// carry — the scalar fields — and carries no example, an example being a request
-// body. This used to be a `continue` that listed DELETE while the fixture had no
-// DELETE route: the divergence was hidden twice, once by the skip and once by
-// never exercising it. See LLM.md's known-bug section; fixing either half makes
-// this test fail and point at the note.
+// It used to `continue` past GET/HEAD/DELETE while the fixture registered no
+// DELETE at all, so three methods' worth of divergence was hidden twice over.
+// The divergence was real: a bodyless op's flags, their required-ness and its
+// example each stopped at the document's edge. All three are closed — hasBody is
+// one predicate, a URL-borne field's `validate:"required"` reaches its
+// parameter, and an example rides the parameters when there is no body for it to
+// live in — so the comparison is now plain equality.
 func TestCLI_SpecAndRegistryAgree(t *testing.T) {
 	app := deployApp(t)
 	// The DELETE the skip used to name. Its input has one field of each kind
 	// that matters here, so the bodyless case is actually exercised.
 	zip.Describe("DELETE /v1/paas/apps/:app", zip.Doc{
 		Description: "Purge deletes an app and everything it owns.",
-		Example:     json.RawMessage(`{"app":"acme","before":"2026-01-01"}`),
+		// Deliberately not in sorted order: the document rebuilds a bodyless
+		// op's example out of its parameters, so what round-trips is the value.
+		Example: json.RawMessage(`{"before":"2026-01-01","app":"acme"}`),
 	})
 	zip.Delete(app, "/v1/paas/apps/:app", func(_ context.Context, in *purgeIn) (*deployOut, error) {
 		return &deployOut{App: in.App}, nil
@@ -517,56 +520,27 @@ func TestCLI_SpecAndRegistryAgree(t *testing.T) {
 		if r.OperationID != s.OperationID {
 			t.Errorf("%s %s id: spec %q, registry %q", r.Service, r.Name, s.OperationID, r.OperationID)
 		}
-		if r.Method != "GET" && r.Method != "HEAD" && r.Method != "DELETE" {
-			if fmt.Sprint(r.Flags) != fmt.Sprint(s.Flags) {
-				t.Errorf("%s %s flags: spec %v, registry %v", r.Service, r.Name, s.Flags, r.Flags)
-			}
-			if string(r.Example) != string(s.Example) {
-				t.Errorf("%s %s example: spec %s, registry %s", r.Service, r.Name, s.Example, r.Example)
-			}
-			continue
+		if fmt.Sprint(r.Flags) != fmt.Sprint(s.Flags) {
+			t.Errorf("%s %s flags: spec %v, registry %v", r.Service, r.Name, s.Flags, r.Flags)
 		}
-		assertURLBoundDivergence(t, r, s)
+		// The example is a JSON value, not a byte string: the document splits it
+		// across parameters when there is no body, so it comes back rebuilt
+		// rather than echoed. What has to survive is what it MEANS.
+		if !sameJSON(r.Example, s.Example) {
+			t.Errorf("%s %s example: spec %s, registry %s", r.Service, r.Name, s.Example, r.Example)
+		}
 	}
 }
 
-// assertURLBoundDivergence pins what a bodyless op loses on its way through the
-// document — precisely, so the loss is a statement rather than a skipped branch.
-// Every line here is a divergence zip KNOWS about and has chosen not to close in
-// a patch; none of it is endorsed. Close one and this test fails, which is the
-// point: the next change to it has to say which.
-func assertURLBoundDivergence(t *testing.T, registry, spec zip.Command) {
-	t.Helper()
-	// 1. The document names the scalars, because those are what a URL carries.
-	var scalars []zip.Flag
-	for _, f := range registry.Flags {
-		if f.Type != "json" {
-			scalars = append(scalars, f)
-		}
+func sameJSON(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == len(b)
 	}
-	if len(spec.Flags) != len(scalars) {
-		t.Fatalf("%s %s: spec flags %v, want the registry's scalar flags %v",
-			registry.Service, registry.Name, spec.Flags, scalars)
+	var av, bv any
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return false
 	}
-	for i, want := range scalars {
-		got := spec.Flags[i]
-		if got.Name != want.Name || got.Field != want.Field || got.Type != want.Type {
-			t.Errorf("%s %s flag %d: spec %+v, registry %+v", registry.Service, registry.Name, i, got, want)
-		}
-		// 2. …but never as required. buildOpenAPI declares every query parameter
-		// optional instead of reading the field's `validate` tag, so a field the
-		// handler refuses to run without reads as optional to every generator.
-		if want.Required && got.Required {
-			t.Errorf("%s %s --%s is required in the document now; the note in LLM.md is stale",
-				registry.Service, registry.Name, got.Name)
-		}
-	}
-	// 3. And the example does not survive: it is a request body, and a bodyless
-	// op declares none for it to live in.
-	if len(spec.Example) != 0 {
-		t.Errorf("%s %s: the document carries an example now; the note in LLM.md is stale",
-			registry.Service, registry.Name)
-	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // TestCLI_RemoteRunsAgainstARunningService is the client case end to end: a

@@ -37,29 +37,32 @@ type registeredOp struct {
 	invoke      func(ctx context.Context, rawIn []byte, query, path map[string]string) (any, error)
 }
 
-// Get registers a GET typed handler at path.
-func Get[In, Out any](app *App, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(app, "GET", path, fn, opts...)
+// Get registers a GET typed handler at path, on the App or on any Router of it
+// — a Group's prefix is part of the op's path, so a group-structured app
+// declares typed ops without spelling its prefix out per route.
+func Get[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+	registerTyped(on, "GET", path, fn, opts...)
 }
 
 // Post registers a POST typed handler at path.
-func Post[In, Out any](app *App, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(app, "POST", path, fn, opts...)
+func Post[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+	registerTyped(on, "POST", path, fn, opts...)
 }
 
 // Put registers a PUT typed handler at path.
-func Put[In, Out any](app *App, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(app, "PUT", path, fn, opts...)
+func Put[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+	registerTyped(on, "PUT", path, fn, opts...)
 }
 
 // Patch registers a PATCH typed handler at path.
-func Patch[In, Out any](app *App, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(app, "PATCH", path, fn, opts...)
+func Patch[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+	registerTyped(on, "PATCH", path, fn, opts...)
 }
 
-// Delete registers a DELETE typed handler at path.
-func Delete[In, Out any](app *App, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(app, "DELETE", path, fn, opts...)
+// Delete registers a DELETE typed handler at path. A DELETE addresses what it
+// deletes with its URL and carries no request body — see [hasBody].
+func Delete[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+	registerTyped(on, "DELETE", path, fn, opts...)
 }
 
 // OpOption configures a typed handler registration (OpenAPI metadata).
@@ -163,7 +166,13 @@ func setScalar(fv reflect.Value, val string) {
 	}
 }
 
-func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+	app, prefix, wrap := on.opTarget()
+	// The op's path is the WHOLE path — the group's prefix composed with the
+	// leaf, exactly as the router composes it. Every projection keys on
+	// op.Path, so a prefix left out here would name a route that does not exist.
+	path = joinPath(prefix, path)
+
 	var inZero In
 	var outZero Out
 	op := &registeredOp{
@@ -223,8 +232,12 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 	app.ops = append(app.ops, op)
 
 	handler := func(c fiber.Ctx) error {
+		// hasBody is THE rule about what a method carries, read here as well as
+		// by the document and the CLI's remote invoker. Reading the body for a
+		// method the document says has none is how a DELETE came to accept an
+		// input no generated client would ever send.
 		var body []byte
-		if method != "GET" && method != "HEAD" {
+		if hasBody(method) {
 			body = c.Body()
 		}
 		var path map[string]string
@@ -248,6 +261,15 @@ func registerTyped[In, Out any](app *App, method, path string, fn TypedHandler[I
 			return nil
 		}
 		return c.JSON(out)
+	}
+	// With() middleware composes around the op only when there IS any: wrapping
+	// unconditionally would materialise a *Ctx on every typed request to hand to
+	// a chain of length zero, and the typed path is measured (see LLM.md).
+	if wrap != nil {
+		// core, not handler: the closure must call the op, and `handler` is
+		// about to be reassigned to the wrapper that contains it.
+		core := handler
+		handler = toFiberHandler(app, wrap(func(c *Ctx) error { return core(c.fc) }))
 	}
 	app.fiber.Add([]string{method}, path, handler)
 }

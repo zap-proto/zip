@@ -139,9 +139,18 @@ func (a *App) buildOpenAPI() map[string]any {
 		// argument the registry documents fine.
 		fields := docFields(hasDoc, doc)
 		inName := typeName(op.InType)
+		// A parameter's example is that field's value in the op's OWN example —
+		// the one the doc comment already wrote, split across the parameters
+		// that carry it. A bodyless op has no requestBody for the example to
+		// live in, and an example that only survives for methods with a body is
+		// an example missing from every GET and DELETE in the document.
+		example := exampleFields(doc.Example)
 		describe := func(decl map[string]any, field string) map[string]any {
 			if help := fields[inName+"."+field]; help != "" {
 				decl["description"] = help
+			}
+			if v, ok := example[field]; ok {
+				decl["example"] = v
 			}
 			return decl
 		}
@@ -174,7 +183,7 @@ func (a *App) buildOpenAPI() map[string]any {
 					continue
 				}
 				decls = append(decls, describe(map[string]any{
-					"name": f.name, "in": "query", "required": false,
+					"name": f.name, "in": "query", "required": f.required,
 					"schema": f.schema,
 				}, f.name))
 			}
@@ -226,11 +235,23 @@ func defaultOpID(method, path string) string {
 	return strings.ToLower(method) + clean
 }
 
-// hasBody reports whether a method carries a JSON request body. It is the ONE
-// place that rule lives: the same predicate decides that the input is decoded
-// from the body (typed.go) and that the document declares a requestBody rather
-// than query parameters. Two copies of it would eventually disagree, and the
-// document would describe a request the router cannot parse.
+// hasBody reports whether a method carries a JSON request body ON THE WIRE. It
+// is the ONE place that rule lives, and since v1.18.0 it is the only place:
+//
+//   - typed.go reads the request body only when it says so;
+//   - openapi.go declares a requestBody, else query parameters;
+//   - cli.go's Remote.Invoke sends a body, else a query string;
+//   - cli.go's bindIn offers flags for what that shape can actually carry.
+//
+// It is about the WIRE, not about the op. op.invoke always decodes the JSON it
+// is handed, because addressing an op by name (MCP tools/call, zip.Call, a
+// command) has no URL to carry half the input in — there the arguments object
+// IS the whole input, whatever the method would have done over HTTP.
+//
+// DELETE carries no body. It used to, in the route and in the CLI's remote
+// invoker, while the document said it did not — so a typed Delete read an input
+// no generated client would ever send. Three spellings, one of them the
+// document's; they are now one predicate.
 func hasBody(method string) bool {
 	switch method {
 	case "GET", "HEAD", "DELETE":
@@ -239,11 +260,12 @@ func hasBody(method string) bool {
 	return true
 }
 
-// urlField is one URL-bindable input field: the name a caller writes in the URL
-// and the schema of the value.
+// urlField is one URL-bindable input field: the name a caller writes in the URL,
+// the schema of the value, and whether the handler refuses to run without it.
 type urlField struct {
-	name   string
-	schema map[string]any
+	name     string
+	schema   map[string]any
+	required bool
 }
 
 // urlFields lists the top-level scalar fields of an op's input — the exact set
@@ -281,7 +303,17 @@ func urlFields(t reflect.Type) urlFieldList {
 			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 			reflect.Float32, reflect.Float64:
-			out = append(out, urlField{name: name, schema: schemaOf(ft, nil, nil)})
+			out = append(out, urlField{
+				name:   name,
+				schema: schemaOf(ft, nil, nil),
+				// The same `validate:"required"` that makes a body field
+				// required in its schema makes a URL-borne one required in its
+				// parameter. The handler refuses the request either way; a
+				// document that called it optional was describing a call that
+				// cannot succeed, and every generated client made the argument
+				// optional to match.
+				required: strings.Contains(f.Tag.Get("validate"), "required"),
+			})
 		}
 	}
 	return out
@@ -521,6 +553,20 @@ func rootSchemaOf(t reflect.Type, fields map[string]string) map[string]any {
 		root["$defs"] = reg.defs
 	}
 	return root
+}
+
+// exampleFields splits an op's example object into its fields, so a parameter
+// can carry the value the example gave it. A malformed or absent example yields
+// nothing rather than failing the document — the schema is still true.
+func exampleFields(ex json.RawMessage) map[string]json.RawMessage {
+	if len(ex) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(ex, &m) != nil {
+		return nil
+	}
+	return m
 }
 
 // firstSentence is the summary when none was given explicitly: a doc comment's
