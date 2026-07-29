@@ -41,9 +41,7 @@ func CommandsFromSpec(spec []byte) ([]Command, error) {
 				c.Summary = firstSentence(op.Description)
 			}
 			c.Args, c.Flags = doc.bind(op, colonParams(route))
-			if body := op.body(); body != nil {
-				c.Example = body.Example
-			}
+			c.Example = op.example()
 			cmds = append(cmds, c)
 		}
 	}
@@ -100,8 +98,11 @@ func (d specDoc) bind(op specOp, params []string) ([]Arg, []Flag) {
 	return args, flags
 }
 
-// resolve follows a $ref into components/schemas. One level is all a zip
-// document ever emits: schemaOf inlines everything else.
+// resolve follows a $ref into components/schemas. One level is what a COMMAND
+// needs: the body's own definition names the fields that become flags, and a
+// field that is itself a named type is a compound value the CLI takes as JSON
+// either way — so a deeper walk would resolve a reference to reach the same
+// answer.
 func (d specDoc) resolve(s specSchema) specSchema {
 	const prefix = "#/components/schemas/"
 	if strings.HasPrefix(s.Ref, prefix) {
@@ -138,11 +139,12 @@ type specMedia struct {
 }
 
 type specParam struct {
-	Name        string     `json:"name"`
-	In          string     `json:"in"`
-	Description string     `json:"description"`
-	Required    bool       `json:"required"`
-	Schema      specSchema `json:"schema"`
+	Name        string          `json:"name"`
+	In          string          `json:"in"`
+	Description string          `json:"description"`
+	Required    bool            `json:"required"`
+	Schema      specSchema      `json:"schema"`
+	Example     json.RawMessage `json:"example"`
 }
 
 type specSchema struct {
@@ -162,6 +164,48 @@ func (o specOp) body() *specMedia {
 		return &m
 	}
 	return nil
+}
+
+// example is the op's example input, reassembled from wherever the document had
+// to put it: the request body carries the whole object, and a bodyless op has no
+// body, so its example lives on the parameters that carry the values. One
+// example either way — the same one the handler's doc comment wrote.
+func (o specOp) example() json.RawMessage {
+	if body := o.body(); body != nil && len(body.Example) > 0 {
+		return body.Example
+	}
+	fields := map[string]json.RawMessage{}
+	for _, p := range o.Parameters {
+		if len(p.Example) > 0 {
+			fields[p.Name] = p.Example
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	// Sorted, because a map has no order and an example rendered twice must
+	// read the same both times.
+	names := make([]string, 0, len(fields))
+	for n := range fields {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, n := range names {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		key, err := json.Marshal(n)
+		if err != nil {
+			return nil
+		}
+		b.Write(key)
+		b.WriteByte(':')
+		b.Write(fields[n])
+	}
+	b.WriteByte('}')
+	return json.RawMessage(b.String())
 }
 
 // specType maps a JSON Schema type to a flag kind. Compound values stay JSON,

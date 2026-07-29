@@ -79,8 +79,10 @@ type Command struct {
 	// Flags are the remaining In fields.
 	Flags []Flag
 
-	// Example is the request body from the doc comment, rendered by the help as
-	// a runnable command line.
+	// Example is the op's example input from the doc comment, rendered by the
+	// help as a runnable command line. It reaches a spec-derived command either
+	// from the request body or, for a bodyless method, rebuilt from the
+	// parameters the document had to split it across.
 	Example json.RawMessage
 
 	// op is set only by App.Commands: it is what LocalInvoke runs. A
@@ -111,7 +113,7 @@ func (a *App) Commands() []Command {
 		doc, has := docFor(op.Method, op.Path)
 		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op
-		c.Args, c.Flags = bindIn(op.InType, colonParams(op.Path), docFields(has, doc))
+		c.Args, c.Flags = bindIn(op.InType, colonParams(op.Path), docFields(has, doc), hasBody(op.Method))
 		cmds = append(cmds, c)
 	}
 	sortCommands(cmds)
@@ -137,7 +139,13 @@ func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
 // matches a path parameter is positional and is NOT also a flag: the URL
 // addresses the resource, so offering a second way to set the same value would
 // be two ways to say one thing (and bindPath would overrule one of them).
-func bindIn(in reflect.Type, params []string, fieldDocs map[string]string) ([]Arg, []Flag) {
+//
+// body says the method carries one (hasBody). A bodyless op's input rides the
+// URL, so its flags are exactly the URL-bindable fields — the SAME urlFields
+// list the document reads. Offering the rest would offer flags the wire cannot
+// carry: a `--tags '["a"]'` on a DELETE marshalled fine, went out as a query
+// value, and was dropped by the binder, so the command silently did nothing.
+func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body bool) ([]Arg, []Flag) {
 	args := make([]Arg, 0, len(params))
 	for _, p := range params {
 		args = append(args, Arg{Name: p, Help: fieldDocs[typeName(in)+"."+p]})
@@ -153,22 +161,31 @@ func bindIn(in reflect.Type, params []string, fieldDocs map[string]string) ([]Ar
 		return args, nil
 	}
 	var flags []Flag
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		name := jsonFieldName(f)
+	add := func(name, kind string, required bool) {
 		if name == "-" || isParam(params, name) {
-			continue
+			return
 		}
 		flags = append(flags, Flag{
 			Name:     kebab(name),
 			Field:    name,
-			Type:     flagType(f.Type),
+			Type:     kind,
 			Help:     fieldDocs[t.Name()+"."+name],
-			Required: strings.Contains(f.Tag.Get("validate"), "required"),
+			Required: required,
 		})
+	}
+	if body {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			add(jsonFieldName(f), flagType(f.Type), strings.Contains(f.Tag.Get("validate"), "required"))
+		}
+	} else {
+		for _, f := range urlFields(t) {
+			kind, _ := f.schema["type"].(string)
+			add(f.name, specType(kind), f.required)
+		}
 	}
 	// The args' help lives under the field's own json name, which is what the
 	// extraction keyed it by; look it up now that the type is in hand.
@@ -433,9 +450,10 @@ func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, b
 	for name, val := range path {
 		url = strings.ReplaceAll(url, ":"+name, urlEscape(val))
 	}
-	// A GET/HEAD carries no body; its non-path inputs belong in the query
-	// string, which is where the route's own decoder looks for them.
-	if (c.Method == "GET" || c.Method == "HEAD") && len(body) > 0 {
+	// A bodyless method's non-path inputs belong in the query string, which is
+	// where the route's own decoder looks for them. hasBody is THE rule, read
+	// here as well as by the document and by the route itself.
+	if !hasBody(c.Method) && len(body) > 0 {
 		q, err := queryOf(body)
 		if err != nil {
 			return nil, err
