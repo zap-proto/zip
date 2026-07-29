@@ -141,12 +141,13 @@ func (e *extractor) pkg(p *packages.Package) ([]Op, error) {
 	var ops []Op
 	var err error
 	for _, f := range p.Syntax {
+		prefixes := groupPrefixes(p.TypesInfo, f)
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok || err != nil {
 				return err == nil
 			}
-			op, found, cerr := e.call(p.TypesInfo, call)
+			op, found, cerr := e.call(p.TypesInfo, call, prefixes)
 			if cerr != nil {
 				err = cerr
 				return false
@@ -162,7 +163,7 @@ func (e *extractor) pkg(p *packages.Package) ([]Op, error) {
 
 // call reads one zip.Get[In,Out](app, path, handler) — or Post/Put/Patch/Delete
 // — into an Op. Anything that is not such a call is reported as not found.
-func (e *extractor) call(info *types.Info, call *ast.CallExpr) (Op, bool, error) {
+func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[types.Object]string) (Op, bool, error) {
 	id := calleeIdent(call.Fun)
 	if id == nil {
 		return Op{}, false, nil
@@ -190,6 +191,17 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr) (Op, bool, error)
 	}
 	path := constant.StringVal(lit)
 
+	// The op's identity is the WHOLE path — a group's prefix composed with the
+	// leaf, exactly as zip composes it at registration. Filing prose under the
+	// leaf alone is how a doc comment on a group-declared op vanished from both
+	// the document and the MCP tool list: docFor looks up the composed path and
+	// never matched.
+	prefix, perr := routerPrefix(info, prefixes, call.Args[0])
+	if perr != nil {
+		return Op{}, false, fmt.Errorf("%s: zip.%s: %w", e.load.Position(call.Args[0].Pos()), fn.Name(), perr)
+	}
+	path = joinPath(prefix, path)
+
 	doc := e.handlerDoc(info, call.Args[2])
 	prose, example, response, err := splitDoc(doc)
 	if err != nil {
@@ -207,6 +219,115 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr) (Op, bool, error)
 	e.fields(args.At(0), op.Fields, seen)
 	e.fields(args.At(1), op.Fields, seen)
 	return op, true, nil
+}
+
+// groupPrefixes maps each variable that holds a router to the path prefix it was
+// created with, so a typed op declared on a group can be filed under the path it
+// actually serves. One forward pass is enough: Go requires a variable to be
+// declared before it is used, so a group built from another group is always
+// assigned after the one it derives from.
+func groupPrefixes(info *types.Info, f *ast.File) map[types.Object]string {
+	out := map[types.Object]string{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		id, ok := as.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		obj := info.Defs[id]
+		if obj == nil {
+			obj = info.Uses[id]
+		}
+		if obj == nil {
+			return true
+		}
+		if p, ok := groupCallPrefix(info, out, as.Rhs[0]); ok {
+			out[obj] = p
+		}
+		return true
+	})
+	return out
+}
+
+// groupCallPrefix reads `<router>.Group("<literal>")` into the full prefix it
+// yields, composing with the receiver's own prefix when the receiver is a group.
+func groupCallPrefix(info *types.Info, known map[types.Object]string, e ast.Expr) (string, bool) {
+	call, ok := ast.Unparen(e).(*ast.CallExpr)
+	if !ok || len(call.Args) < 1 {
+		return "", false
+	}
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Group" {
+		return "", false
+	}
+	lit := info.Types[call.Args[0]].Value
+	if lit == nil || lit.Kind() != constant.String {
+		return "", false
+	}
+	outer := ""
+	if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
+		if obj := info.Uses[id]; obj != nil {
+			outer = known[obj]
+		}
+	} else if p, ok := groupCallPrefix(info, known, sel.X); ok {
+		outer = p
+	}
+	return joinPath(outer, constant.StringVal(lit)), true
+}
+
+// routerPrefix is the prefix an op registered on this router sits under. An *App
+// is the root and has none; a group must be one this pass RESOLVED, because a
+// prefix it cannot see is prose filed under the wrong identity — which is
+// exactly the silent drop this resolution exists to end. So an unresolvable
+// router is an error naming the call, never an assumed empty prefix.
+func routerPrefix(info *types.Info, prefixes map[types.Object]string, arg ast.Expr) (string, error) {
+	if isZipApp(info.Types[arg].Type) {
+		return "", nil
+	}
+	if id, ok := ast.Unparen(arg).(*ast.Ident); ok {
+		if obj := info.Uses[id]; obj != nil {
+			if p, ok := prefixes[obj]; ok {
+				return p, nil
+			}
+		}
+	}
+	if p, ok := groupCallPrefix(info, prefixes, arg); ok {
+		return p, nil
+	}
+	return "", fmt.Errorf("cannot resolve the path prefix of the router this op registers on, so its doc comment " +
+		"would be filed under the wrong path and silently dropped from the document and the MCP tool. " +
+		"Register on the *zip.App, or on a group assigned in this file as `g := <router>.Group(\"/prefix\")`")
+}
+
+// isZipApp reports whether t is *zip.App — the root router, which has no prefix.
+func isZipApp(t types.Type) bool {
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == ZipPkg && named.Obj().Name() == "App"
+}
+
+// joinPath composes a prefix with a leaf the way the router does, so the key this
+// pass writes is the path zip registered.
+func joinPath(prefix, path string) string {
+	if path == "" {
+		path = "/"
+	}
+	if prefix == "" {
+		return path
+	}
+	if path[0] != '/' {
+		path = "/" + path
+	}
+	return strings.TrimRight(prefix, "/") + path
 }
 
 // calleeIdent is the identifier being called, past any parens and any explicit
