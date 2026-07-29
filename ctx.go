@@ -42,14 +42,31 @@ func (c *Ctx) SetLog(l luxlog.Logger) { c.log = l }
 // no gateway is in front (local dev / direct ingress).
 func (c *Ctx) Org() string { return c.fc.Get(HeaderOrg) }
 
+// Project returns the X-Project-Id from the JWT-validated gateway. It narrows
+// the org, and is empty for a request scoped to the org as a whole.
+func (c *Ctx) Project() string { return c.fc.Get(HeaderProject) }
+
 // User returns the X-User-Id from the JWT-validated gateway.
 func (c *Ctx) User() string { return c.fc.Get(HeaderUser) }
+
+// UserName returns the X-User-Name from the JWT-validated gateway — the minted
+// name, where User is the opaque id.
+func (c *Ctx) UserName() string { return c.fc.Get(HeaderUserName) }
 
 // UserEmail returns the X-User-Email from the JWT-validated gateway.
 func (c *Ctx) UserEmail() string { return c.fc.Get(HeaderUserEmail) }
 
+// UserOwner returns the X-User-Owner gateway claim: the org this principal
+// belongs to. A deployment reserving one org for platform operators gates its
+// cross-tenant surfaces on this and never on IsOrgAdmin.
+func (c *Ctx) UserOwner() string { return c.fc.Get(HeaderUserOwner) }
+
 // IsAdmin returns the X-User-IsAdmin gateway claim as a bool.
 func (c *Ctx) IsAdmin() bool { return c.fc.Get(HeaderUserAdmin) == "true" }
+
+// IsOrgAdmin returns the X-User-IsOrgAdmin gateway claim: this principal
+// administers their OWN org. It is not platform authority — see UserOwner.
+func (c *Ctx) IsOrgAdmin() bool { return c.fc.Get(HeaderUserOrgAdmin) == "true" }
 
 // RequestID returns the value of X-Request-Id (set by the RequestID middleware).
 func (c *Ctx) RequestID() string { return c.fc.Get(HeaderRequestID) }

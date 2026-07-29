@@ -29,19 +29,46 @@ import (
 // The gateway-injected identity headers, named once. Ctx.Org and friends read
 // these, Ctx.Forward propagates exactly these, and nothing else in zip spells
 // them.
+//
+// The set is what a gateway can assert and a callee can act on, which is more
+// than a subject: WHOSE tenant (org, project), WHICH person (id, name, email),
+// and the two admin scopes — which are distinct authorities and must never
+// collapse into one another. Owner names the org a principal belongs to, and a
+// deployment that reserves one org for platform operators reads platform sudo
+// off THAT and never off IsOrgAdmin, which says only "administers their own
+// org". A plane that forwarded one and dropped the other would let a callee
+// read "holds an org" as "administers it", or worse, as "administers the
+// fleet".
 const (
-	HeaderOrg       = "X-Org-Id"
-	HeaderUser      = "X-User-Id"
-	HeaderUserEmail = "X-User-Email"
-	HeaderUserAdmin = "X-User-IsAdmin"
-	HeaderRequestID = "X-Request-Id"
+	HeaderOrg          = "X-Org-Id"
+	HeaderProject      = "X-Project-Id"
+	HeaderUser         = "X-User-Id"
+	HeaderUserName     = "X-User-Name"
+	HeaderUserEmail    = "X-User-Email"
+	HeaderUserOwner    = "X-User-Owner"
+	HeaderUserAdmin    = "X-User-IsAdmin"
+	HeaderUserOrgAdmin = "X-User-IsOrgAdmin"
+	HeaderRequestID    = "X-Request-Id"
 )
 
 // identityHeaders is the set Call forwards — the caller's identity and the
-// request id that ties the two hops together in the logs. Deliberately short:
-// anything else a callee needs is an argument, and a header that is not
-// identity has no business travelling implicitly.
-var identityHeaders = [...]string{HeaderOrg, HeaderUser, HeaderUserEmail, HeaderUserAdmin, HeaderRequestID}
+// request id that ties the two hops together in the logs. It is exactly the
+// list above and nothing beyond it: anything else a callee needs is an
+// argument, and a header that is not identity has no business travelling
+// implicitly.
+//
+// Forwarding a SUBSET is the failure this list exists to prevent. A callee
+// resolving a billing subject prefers the minted name over the opaque id, and
+// one gating a privileged surface reads the owner; drop either from the plane
+// and the same handler decides differently depending on whether it was reached
+// over REST or over a call — silently, and in the direction that bills or
+// admits the wrong principal.
+var identityHeaders = [...]string{
+	HeaderOrg, HeaderProject,
+	HeaderUser, HeaderUserName, HeaderUserEmail, HeaderUserOwner,
+	HeaderUserAdmin, HeaderUserOrgAdmin,
+	HeaderRequestID,
+}
 
 // callerKey carries the live request into a handler's context. The REQUEST is
 // attached rather than a copy of what a handler might want from it, because
@@ -86,16 +113,51 @@ func (c *Ctx) Forward() context.Context { return callerContext(c.fc) }
 // with no request behind it (a background job, a test) forwards nothing, which
 // is the honest answer — an unattributed call should look unattributed rather
 // than borrow the identity of whatever ran last.
+// borrow the identity of whatever ran last. A background caller that
+// legitimately acts FOR someone says so with [WithCaller], and an inbound
+// request always wins over what it said.
 func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
-	rc := requestOf(ctx)
-	if rc == nil {
+	if rc := requestOf(ctx); rc != nil {
+		for _, h := range identityHeaders {
+			if v := rc.Request.Header.Peek(h); len(v) > 0 {
+				req.Header.SetBytesV(h, v)
+			}
+		}
 		return
 	}
-	for _, h := range identityHeaders {
-		if v := rc.Request.Header.Peek(h); len(v) > 0 {
-			req.Header.SetBytesV(h, v)
-		}
+	stated, ok := ctx.Value(statedKey{}).(Caller)
+	if !ok {
+		return
 	}
+	for h, v := range stated.headers() {
+		req.Header.Set(h, v)
+	}
+}
+
+// statedKey carries an explicitly stated caller — see [WithCaller].
+type statedKey struct{}
+
+// WithCaller states who a [Call] made with this context acts for, for a caller
+// that has no inbound request to propagate.
+//
+// The background work a service does is not all unattributed. A grant issued
+// when an org opens, a meter that debits after the response has already gone
+// out, a reactor draining a queue — each acts FOR a tenant, and the callee has
+// to know which one to write to the right books. Without this the only place
+// left to put the org is the argument, and an org in the argument is an org the
+// caller chose: any caller could then name any tenant and be believed.
+//
+//	ctx := zip.WithCaller(context.Background(), zip.Caller{Org: org})
+//	_, err := zip.Call[GrantIn, GrantOut](ctx, conn, "finance_grant", &in)
+//
+// An inbound request always wins. [forwardIdentity] prefers the gateway's
+// assertion and reads this only when there is none, so this can supply an
+// identity where none exists but can never override or launder one — which is
+// what keeps [Ctx.Forward]'s guarantee intact. It is a statement by one of our
+// own processes, trusted exactly as far as the socket's peer credential makes
+// it trustworthy (see [Peer]), and never as far as a gateway's assertion.
+func WithCaller(ctx context.Context, c Caller) context.Context {
+	return context.WithValue(ctx, statedKey{}, c)
 }
 
 // Caller is the gateway's assertion about who a request is for, read as one
@@ -104,12 +166,47 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 // Empty fields mean the gateway said nothing — local dev, a direct ingress, or
 // a call with no request behind it. Treat empty as unauthenticated, never as
 // permitted.
+// The two admin fields are separate authorities and reading one for the other
+// is a privilege escalation: OrgAdmin says a person administers THEIR OWN org,
+// Owner says which org that is. A deployment that reserves one org for platform
+// operators gates its cross-tenant surfaces on Owner alone.
 type Caller struct {
 	Org       string
+	Project   string
 	User      string
+	Name      string
 	Email     string
+	Owner     string
 	Admin     bool
+	OrgAdmin  bool
 	RequestID string
+}
+
+// headers renders a stated caller onto the wire. Empty fields are omitted
+// rather than sent blank, so "said nothing" and "said empty" stay the same
+// thing on both sides of the call.
+func (c Caller) headers() map[string]string {
+	h := make(map[string]string, len(identityHeaders))
+	for k, v := range map[string]string{
+		HeaderOrg:       c.Org,
+		HeaderProject:   c.Project,
+		HeaderUser:      c.User,
+		HeaderUserName:  c.Name,
+		HeaderUserEmail: c.Email,
+		HeaderUserOwner: c.Owner,
+		HeaderRequestID: c.RequestID,
+	} {
+		if v != "" {
+			h[k] = v
+		}
+	}
+	if c.Admin {
+		h[HeaderUserAdmin] = "true"
+	}
+	if c.OrgAdmin {
+		h[HeaderUserOrgAdmin] = "true"
+	}
+	return h
 }
 
 // CallerOf returns the identity forwarded with this call. It is the
@@ -123,17 +220,26 @@ type Caller struct {
 //	    }
 //	    ...
 //	}
+// A context with no request behind it reads back whatever [WithCaller] stated
+// on it, so what a background caller says it acts for is what the code running
+// under that context sees — one value, written and read the same way, rather
+// than a statement that only becomes visible one hop later.
 func CallerOf(ctx context.Context) Caller {
 	rc := requestOf(ctx)
 	if rc == nil {
-		return Caller{}
+		stated, _ := ctx.Value(statedKey{}).(Caller)
+		return stated
 	}
 	h := &rc.Request.Header
 	return Caller{
 		Org:       string(h.Peek(HeaderOrg)),
+		Project:   string(h.Peek(HeaderProject)),
 		User:      string(h.Peek(HeaderUser)),
+		Name:      string(h.Peek(HeaderUserName)),
 		Email:     string(h.Peek(HeaderUserEmail)),
+		Owner:     string(h.Peek(HeaderUserOwner)),
 		Admin:     string(h.Peek(HeaderUserAdmin)) == "true",
+		OrgAdmin:  string(h.Peek(HeaderUserOrgAdmin)) == "true",
 		RequestID: string(h.Peek(HeaderRequestID)),
 	}
 }
