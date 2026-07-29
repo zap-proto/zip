@@ -167,11 +167,12 @@ func setScalar(fv reflect.Value, val string) {
 }
 
 func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	app, prefix, wrap := on.opTarget()
+	scope := on.OpScope()
+	app := scope.App
 	// The op's path is the WHOLE path — the group's prefix composed with the
 	// leaf, exactly as the router composes it. Every projection keys on
 	// op.Path, so a prefix left out here would name a route that does not exist.
-	path = joinPath(prefix, path)
+	path = joinPath(scope.Prefix, path)
 
 	var inZero In
 	var outZero Out
@@ -265,11 +266,11 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// With() middleware composes around the op only when there IS any: wrapping
 	// unconditionally would materialise a *Ctx on every typed request to hand to
 	// a chain of length zero, and the typed path is measured (see LLM.md).
-	if wrap != nil {
+	if scope.Middleware != nil {
 		// core, not handler: the closure must call the op, and `handler` is
 		// about to be reassigned to the wrapper that contains it.
 		core := handler
-		handler = toFiberHandler(app, wrap(func(c *Ctx) error { return core(c.fc) }))
+		handler = toFiberHandler(app, scope.Middleware(func(c *Ctx) error { return core(c.fc) }))
 	}
 	app.fiber.Add([]string{method}, path, handler)
 }

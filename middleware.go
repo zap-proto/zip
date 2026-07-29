@@ -104,16 +104,19 @@ func (w *wrapRouter) wrapChain(hs []Handler) []Handler {
 	return out
 }
 
-// opTarget carries the wrap down to the typed op, so `zip.Post(app.With(CSRF), …)`
+// OpScope carries the wrap down to the typed op, so `zip.Post(app.With(CSRF), …)`
 // gates the op the same way `app.With(CSRF).Post(…)` gates an untyped route.
 // Delegating without it would drop the middleware silently, which for the gates
-// people reach for With to install is a hole, not an inconvenience.
-func (w *wrapRouter) opTarget() (*App, string, Middleware) {
-	app, prefix, inner := w.inner.opTarget()
-	if inner == nil {
-		return app, prefix, w.wrap
+// people reach for With to install is a hole, not an inconvenience — and it is
+// why OpTarget is implementable from outside this package at all.
+func (w *wrapRouter) OpScope() OpScope {
+	s := w.inner.OpScope()
+	if s.Middleware == nil {
+		s.Middleware = w.wrap
+		return s
 	}
-	return app, prefix, Chain(inner, w.wrap)
+	s.Middleware = Chain(s.Middleware, w.wrap)
+	return s
 }
 
 func (w *wrapRouter) Group(prefix string, handlers ...Handler) Router {

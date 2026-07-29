@@ -156,3 +156,59 @@ func anyMap2(m map[string]map[string]any) map[string]any {
 	}
 	return out
 }
+
+// gateRouter is the shape a decorating Router outside this package has to take:
+// it wraps another Router and overrides OpScope so the gate it installs on every
+// untyped route also reaches a typed op declared through it. Getting this wrong
+// is not an inconvenience — it registers an UNGATED op on a router whose whole
+// purpose is the gate. hanzoai/commerce's Mint is the real one.
+type gateRouter struct {
+	zip.Router // embedded: everything this decorator does not override
+	gate       zip.Middleware
+}
+
+func (g gateRouter) OpScope() zip.OpScope {
+	s := g.Router.OpScope()
+	if s.Middleware == nil {
+		s.Middleware = g.gate
+	} else {
+		s.Middleware = zip.Chain(s.Middleware, g.gate)
+	}
+	return s
+}
+
+// A Router implemented OUTSIDE zip can carry typed ops, and its middleware
+// reaches them. OpTarget is exported for exactly this: sealing it would have
+// made every decorating router in the fleet unable to compile, and the ones that
+// could would have silently dropped their gate.
+func TestOpTarget_AnOutsideDecoratorCanCarryOps(t *testing.T) {
+	a := zip.New(zip.Config{AppName: "g", DisableStartupMessage: true})
+	gate := func(next zip.Handler) zip.Handler {
+		return func(c *zip.Ctx) error {
+			if c.Header("X-Pass") != "yes" {
+				return zip.ErrForbidden("gated")
+			}
+			return next(c)
+		}
+	}
+	mint := gateRouter{Router: a.Group("/v1/mint"), gate: gate}
+	zip.Post(mint, "/deposit", echoGroup)
+
+	if cmds := a.Commands(); len(cmds) != 1 || cmds[0].Path != "/v1/mint/deposit" {
+		t.Fatalf("commands = %+v, want one op at /v1/mint/deposit", cmds)
+	}
+	if code, _ := call2(t, a, "POST", "/v1/mint/deposit", `{"id":"x"}`); code != 403 {
+		t.Fatalf("ungated = %d, want 403 — the decorator's gate did not reach the op", code)
+	}
+	req, _ := http.NewRequest("POST", "/v1/mint/deposit", strings.NewReader(`{"id":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Pass", "yes")
+	resp, err := a.Fiber().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("gated-through = %d, want 200", resp.StatusCode)
+	}
+}
