@@ -199,7 +199,22 @@ Two questions, two authorities, neither answered by the caller:
   `c.Forward()` propagates them onto the next hop; `zip.CallerOf(ctx)` reads
   them inside a typed handler (an untyped one has `c.Org()` and friends). `Call`
   forwards only what the ctx already carries — a bare `context.Background()`
-  forwards nothing, so an unattributed call looks unattributed.
+  forwards nothing, so an unattributed call looks unattributed. A background
+  caller that legitimately acts FOR a tenant says so with
+  `zip.WithCaller(ctx, zip.Caller{Org: …})`; an inbound request always wins over
+  what it stated, so it can supply an identity but never launder one.
+
+**The forwarded set is the WHOLE assertion (v1.18.4).** `identityHeaders` was
+five and is now nine: org, **project**, user, **name**, email, **owner**,
+isAdmin, **isOrgAdmin**, request-id. The four that were missing are the four a
+callee decides on — a billing subject prefers the minted `X-User-Name` over the
+opaque id, and platform sudo is read off `X-User-Owner` (membership of a
+reserved org), never off `isOrgAdmin`, which says only "administers their own
+org". Forwarding a subset meant the same handler decided differently depending
+on whether it was reached over REST or over a call: `owner` arrived empty and
+`isOrgAdmin` false, silently, in the direction that bills or admits the wrong
+principal. `TestForwardedIdentityCrossesWhole` fails on exactly those four if
+the array is ever narrowed again.
 - **WHAT is calling** — `zip.PeerOf(ctx)` / `c.Peer()` return the kernel's
   `SO_PEERCRED` reading of the peer process (pid/uid/gid) on a unix socket. The
   peer never sends it, so there is nothing to forge. `nil` means "this host
