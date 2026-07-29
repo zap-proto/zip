@@ -6,20 +6,36 @@ import (
 	"github.com/zap-proto/fiber/v3"
 )
 
-// OpTarget is a place a typed op can be declared: the [App], or any Router of
+// OpScope is where an op declared on a router lands: the App whose registry
+// holds it, the path prefix its route sits under, and the middleware composed
+// around its handler.
+type OpScope struct {
+	// App owns the op registry. Every op ends up on exactly one.
+	App *App
+
+	// Prefix is prepended to the op's path, as a Group's prefix is prepended to
+	// an ordinary route's.
+	Prefix string
+
+	// Middleware wraps the op's handler. nil means none — the common case, and
+	// the one that costs nothing.
+	Middleware Middleware
+}
+
+// OpTarget is a place a typed op can be declared: the [App], or any [Router] of
 // it — a Group, or the result of With. [Get] and friends take one of these, so
 // `zip.Get(app, …)` and `zip.Get(v1, …)` are the same declaration with the same
-// meaning, and a group-structured app does not have to spell its prefix out per
-// route to have typed ops.
+// meaning, and a group-structured app does not spell its prefix out per route to
+// have typed ops.
 //
-// Its only method is unexported, which seals it: an op lives on an App's
-// registry, and nothing outside this package can claim to be somewhere else it
-// could live.
+// Every Router is one, so a Router that DECORATES another must implement it,
+// and must implement it faithfully. A decorator that gates the routes it
+// registers has to return that gate in Middleware, or a typed op declared
+// through it is registered ungated — the decorator's whole purpose, silently
+// skipped. Embedding the wrapped Router and overriding this method is the
+// shape: the embedded one answers for everything else.
 type OpTarget interface {
-	// opTarget yields what registerTyped needs — the App that owns the op
-	// registry, the path prefix this router sits under, and the middleware to
-	// compose around the op's handler (nil for none).
-	opTarget() (*App, string, Middleware)
+	OpScope() OpScope
 }
 
 // Router is the path-mounting surface shared by *App and Group.
@@ -123,14 +139,14 @@ func (a *routerAdapter) Group(prefix string, handlers ...Handler) Router {
 
 func (a *routerAdapter) Fiber() fiber.Router { return a.r }
 
-// opTarget reads the prefix off the ROUTER rather than keeping a second copy of
+// OpScope reads the prefix off the ROUTER rather than keeping a second copy of
 // it: fiber composes a nested group's prefix when the group is made, so asking
 // it is the one reading that cannot drift from where the routes actually land.
-func (a *routerAdapter) opTarget() (*App, string, Middleware) {
+func (a *routerAdapter) OpScope() OpScope {
 	if g, ok := a.r.(*fiber.Group); ok {
-		return a.app, g.Prefix, nil
+		return OpScope{App: a.app, Prefix: g.Prefix}
 	}
-	return a.app, "", nil
+	return OpScope{App: a.app}
 }
 
 // joinPath composes a group's prefix with a leaf path the way the router does,

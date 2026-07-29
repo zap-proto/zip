@@ -28,9 +28,19 @@ Four changes are visible from outside. Everything else is additive.
    Regenerated SDKs will make those arguments required — which they already were
    at run time.
 4. **`zip.Get` and friends take an `OpTarget`, not a `*App`.** `zip.Get(app, …)`
-   is unchanged; `zip.Get(v1Group, …)` now also works. Only an external type
-   implementing `zip.Router` breaks, and `Router` was never a parameter of
-   anything.
+   is unchanged; `zip.Get(v1Group, …)` now also works. `Router` embeds
+   `OpTarget`, so **a Router implemented outside zip must add one method**:
+
+   ```go
+   func (m *myRouter) OpScope() zip.OpScope {
+       s := m.inner.OpScope()
+       s.Middleware = zip.Chain(s.Middleware, m.gate) // if you gate routes, GATE OPS
+       return s
+   }
+   ```
+
+   Embed the wrapped Router and override this; the embedded one answers for
+   everything else. Known implementor: `hanzoai/commerce/middleware.Mint`.
 
 A validation failure now names the field by its WIRE name (`reason`), not its Go
 name (`Reason`) — if anything matched on those strings, it matched on the wrong
@@ -79,8 +89,16 @@ spell its prefix out per route to have typed ops at all — friction pushing
 exactly the wrong way, since the untyped handler inherited the prefix for free.
 zip composes the op's path with the router's own rule (`joinPath` mirrors
 fiber's `getGroupPath`) and registers the composed path, so op.Path IS the route:
-one string, no second composition to drift. `OpTarget`'s only method is
-unexported, so nothing outside the package can claim to be somewhere an op lives.
+one string, no second composition to drift.
+
+**`OpScope` is EXPORTED, and it has to be.** `Router` embeds `OpTarget`, so a
+Router implemented outside zip must implement it — and a DECORATING router must
+implement it faithfully. `hanzoai/commerce`'s `middleware.Mint` is the case that
+proves it: it wraps a Router and prepends a platform-only gate to every route it
+registers. A sealed (unexported) method would have made Mint uncompilable, and a
+Mint that merely delegated would register a typed money-mint op with NO GATE —
+its entire purpose, silently skipped. The shape is: embed the wrapped Router,
+override `OpScope`, and fold your middleware into `s.Middleware`.
 
 ## One registry, five projections
 
