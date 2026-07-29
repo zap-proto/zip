@@ -212,6 +212,38 @@ func (p *plugin) target() (Client, string) {
 	return p.startOnDemand()
 }
 
+// Start brings the plugin named name up if it is not already, and reports the
+// address it serves on. It is what [App.Reload] is not: idempotent. Calling it
+// on a running plugin returns that plugin, where Reload would start a SECOND
+// child and retire the first.
+//
+// It exists because a lazy plugin has exactly one trigger — a request reaching
+// one of its prefixes — and a host may have another way in. Hanzo's fleet
+// reaches an app over its own unix socket, which never touches the router, so
+// the plugin was never started and the socket was never bound: correct by
+// design, inert in practice. Start is that second door, and it deliberately
+// goes through target() — the SAME single-flighted path a prefix request
+// takes — rather than a parallel one, so a burst of first callers arriving by
+// either door still produces exactly one child.
+//
+// An Unload'ed plugin stays down: bringing one back is Reload's job, and a
+// deliberate stop that any caller could undo would not be a stop at all.
+func (a *App) Start(name string) (string, error) {
+	a.plugMu.Lock()
+	p := a.plugins[name]
+	a.plugMu.Unlock()
+	if p == nil {
+		return "", fmt.Errorf("zip: Start: no plugin named %q", name)
+	}
+	if client, addr := p.target(); client != nil {
+		return addr, nil
+	}
+	if p.disabled.Load() {
+		return "", fmt.Errorf("zip: Start(%s): unloaded — Reload brings it back", name)
+	}
+	return "", fmt.Errorf("zip: Start(%s): not running", name)
+}
+
 // startOnDemand brings a lazy plugin up on its first request, single-flighted
 // so a burst of concurrent first requests produces ONE child rather than one
 // per request. A start failure is not cached: the next request tries again,
