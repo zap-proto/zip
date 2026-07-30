@@ -396,7 +396,7 @@ func (e *extractor) fields(t types.Type, out map[string]string, seen map[*types.
 			e.fields(t.Underlying(), out, seen)
 			return
 		}
-		e.structFields(reflectName(t), t.Obj().Pos(), st, out)
+		e.structFields(reflectName(t), t.Obj(), st, out)
 		for i := 0; i < st.NumFields(); i++ {
 			e.fields(st.Field(i).Type(), out, seen)
 		}
@@ -412,8 +412,8 @@ func (e *extractor) fields(t types.Type, out map[string]string, seen map[*types.
 // structFields pairs the type-checked fields (authoritative for names and tags)
 // with the parsed ones (which carry the comments). go/types preserves source
 // order, so index i is the same field in both.
-func (e *extractor) structFields(name string, pos token.Pos, st *types.Struct, out map[string]string) {
-	spec := e.typeSpec(pos)
+func (e *extractor) structFields(name string, obj *types.TypeName, st *types.Struct, out map[string]string) {
+	spec := e.typeSpec(obj.Pos(), obj.Name())
 	if spec == nil {
 		return
 	}
@@ -469,8 +469,17 @@ func reflectName(n *types.Named) string {
 	return name + "[" + strings.Join(parts, ",") + "]"
 }
 
-// file is the comment-bearing parse of the file holding pos, with pos as a byte
-// offset into it.
+// file is the comment-bearing parse of the file holding pos, with pos as a LINE
+// in it.
+//
+// The line, not the byte offset, is what identifies a declaration across the two
+// views. A position in a package this pass loaded from source has both; a position
+// in an IMPORTED package comes from export data, whose positions carry the real
+// filename and line and a synthetic offset (the importer fabricates a file whose
+// every line is one byte long). Matching on the offset therefore matched nothing
+// the moment a type lived in another package — which is every op whose In and Out
+// live in the call plane. Those ops had a description and ZERO field
+// descriptions: every field-level projection of the plane was nameless.
 func (e *extractor) file(pos token.Pos) (*ast.File, int) {
 	p := e.load.Position(pos)
 	if p.Filename == "" {
@@ -481,29 +490,32 @@ func (e *extractor) file(pos token.Pos) (*ast.File, int) {
 		f, _ = parser.ParseFile(e.own, p.Filename, nil, parser.ParseComments|parser.SkipObjectResolution)
 		e.files[p.Filename] = f
 	}
-	return f, p.Offset
+	return f, p.Line
 }
 
-func (e *extractor) offset(pos token.Pos) int { return e.own.Position(pos).Offset }
+func (e *extractor) line(pos token.Pos) int { return e.own.Position(pos).Line }
 
 // funcDecl is the declaration of the function whose name is at pos — in this
 // package or any other, since a handler is as often a package away.
 func (e *extractor) funcDecl(pos token.Pos) *ast.FuncDecl {
-	f, off := e.file(pos)
+	f, line := e.file(pos)
 	if f == nil {
 		return nil
 	}
 	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && e.offset(fd.Name.Pos()) == off {
+		if fd, ok := d.(*ast.FuncDecl); ok && e.line(fd.Name.Pos()) == line {
 			return fd
 		}
 	}
 	return nil
 }
 
-// typeSpec is the declaration of the type whose name is at pos.
-func (e *extractor) typeSpec(pos token.Pos) *ast.TypeSpec {
-	f, off := e.file(pos)
+// typeSpec is the declaration of the type named `name` at pos. The name is
+// checked as well as the line because `type ( A struct{}; B struct{} )` puts two
+// declarations on one line, and prose filed under the wrong type is worse than
+// none.
+func (e *extractor) typeSpec(pos token.Pos, name string) *ast.TypeSpec {
+	f, line := e.file(pos)
 	if f == nil {
 		return nil
 	}
@@ -513,7 +525,7 @@ func (e *extractor) typeSpec(pos token.Pos) *ast.TypeSpec {
 			continue
 		}
 		for _, s := range gd.Specs {
-			if ts, ok := s.(*ast.TypeSpec); ok && e.offset(ts.Name.Pos()) == off {
+			if ts, ok := s.(*ast.TypeSpec); ok && ts.Name.Name == name && e.line(ts.Name.Pos()) == line {
 				return ts
 			}
 		}
