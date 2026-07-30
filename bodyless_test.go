@@ -147,6 +147,72 @@ func TestBodyless_FlagsAreWhatTheURLCanCarry(t *testing.T) {
 	}
 }
 
+// verifyIn addresses its target entirely with the URL. There is nothing left for
+// a body to carry.
+type verifyIn struct {
+	ID string `json:"id"`
+}
+
+type verifyOut struct {
+	Verified bool `json:"verified"`
+}
+
+func verifyApp() *zip.App {
+	a := zip.New(zip.Config{AppName: "verify", DisableStartupMessage: true})
+	zip.Post(a, "/v1/drop/things/:id/verify", func(_ context.Context, in *verifyIn) (*verifyOut, error) {
+		return &verifyOut{Verified: in.ID == "t_1"}, nil
+	})
+	return a
+}
+
+// A POST whose input is nothing but its path parameters has no request body, and
+// publishing one anyway put a REQUIRED argument into every generated SDK whose
+// only properties were the path params the caller already passes. The body was
+// never read for anything — bindURL binds the path last — so the phantom was
+// only ever in the document.
+func TestBodyless_PostWithOnlyPathParamsPublishesNoBody(t *testing.T) {
+	a := verifyApp()
+	spec := a.OpenAPISpec()
+	paths, _ := spec["paths"].(map[string]map[string]any)
+	op, _ := paths["/v1/drop/things/{id}/verify"]["post"].(map[string]any)
+	if op == nil {
+		t.Fatalf("no POST in spec; paths = %v", keysOf(anyMap2(paths)))
+	}
+	if rb, ok := op["requestBody"]; ok {
+		t.Errorf("requestBody = %v, want none — the URL is the whole input", rb)
+	}
+	// And no query parameters either: every field IS a path param, so there is
+	// nothing to declare a second way.
+	params, _ := op["parameters"].([]any)
+	if len(params) != 1 {
+		t.Fatalf("parameters = %v, want just the path param", params)
+	}
+
+	// The CLI agrees, from the same registry: one positional, no flags.
+	cmds := a.Commands()
+	if len(cmds) != 1 || len(cmds[0].Args) != 1 || len(cmds[0].Flags) != 0 {
+		t.Errorf("command = %+v, want one arg and no flags", cmds[0])
+	}
+}
+
+// The WIRE is untouched. POST still carries a body on the wire, so the route
+// still reads one and still refuses one it cannot parse. Only the document
+// stopped claiming an argument that does nothing.
+func TestBodyless_PostStillReadsTheWireItAlwaysDid(t *testing.T) {
+	a := verifyApp()
+	if code, body := call2(t, a, "POST", "/v1/drop/things/t_1/verify", ""); code != 200 || !strings.Contains(body, `"verified":true`) {
+		t.Errorf("POST with no body = %d %s, want 200 verified", code, body)
+	}
+	// The URL is the addressing authority: a body that repeats a path param
+	// never won, which is exactly why removing it from the document is safe.
+	if code, body := call2(t, a, "POST", "/v1/drop/things/t_1/verify", `{"id":"t_9"}`); code != 200 || !strings.Contains(body, `"verified":true`) {
+		t.Errorf("POST with a smuggled id = %d %s, want the URL's id to win", code, body)
+	}
+	if code, _ := call2(t, a, "POST", "/v1/drop/things/t_1/verify", `{`); code != 400 {
+		t.Errorf("POST with a malformed body = %d, want the 400 it has always answered", code)
+	}
+}
+
 func paramsOf2(t *testing.T, a *zip.App, path, method string) []any {
 	t.Helper()
 	paths, _ := a.OpenAPISpec()["paths"].(map[string]map[string]any)
