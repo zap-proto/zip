@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 
 	"github.com/zap-proto/zip"
 )
@@ -35,7 +37,7 @@ func main() {
 	// exactly as a linked-in service's do.
 	zip.Get(app, "/v1/demo/version", func(context.Context, *Nothing) (*Version, error) {
 		return &Version{Version: version}, nil
-	})
+	}, zip.WithSummary("Reports which build of the plugin is answering."))
 
 	// Crashes the process the way a real bug does — a panic on a goroutine,
 	// which no handler recover() can catch. Used to prove the host survives a
@@ -43,7 +45,7 @@ func main() {
 	zip.Get(app, "/v1/demo/crash", func(context.Context, *Nothing) (*Crashing, error) {
 		go func() { panic("testplugin: deliberate crash") }()
 		return &Crashing{Crashing: "true"}, nil
-	})
+	}, zip.WithSummary("Crashes the plugin process, to prove the host survives it."))
 
 	// Untyped on purpose, and the one route here that has to be. It echoes
 	// whatever path reached it, so a host that mounts this plugin at more than
@@ -55,6 +57,19 @@ func main() {
 	app.All("/*", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"echo": c.Path(), "version": version})
 	})
+
+	// `testplugin tools` prints this plugin's MCP catalogue instead of serving —
+	// the build-time step a host's Plugin.Tools is captured from, and the same
+	// thing hanzoai/cloud's `<app> describe` does. Projecting it is the whole of
+	// what a plugin does to be on a host's composed MCP door.
+	if len(os.Args) > 1 && os.Args[1] == "tools" {
+		b, err := json.Marshal(app.MCPTools())
+		if err != nil {
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(b)
+		return
+	}
 
 	// Addr is the whole plugin side of the contract: serve where the host said.
 	_ = app.Listen(zip.Addr(":9999"))

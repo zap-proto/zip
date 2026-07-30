@@ -275,20 +275,34 @@ func (a *App) mount(prefix, addr string) error {
 func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	h := func(c *Ctx) error {
 		client, host := to()
-		if client == nil {
-			return Errorf(503, "mount %s: no instance running", prefix)
-		}
-		req, resp := c.fc.Request(), c.fc.Response()
-		req.SetHost(host)
-		if err := client.Do(req, resp); err != nil {
-			// The upstream, not this hop, is what failed.
-			return Errorf(502, "mount %s: %v", prefix, err)
-		}
-		return nil
+		return forward(c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
 	}
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
 	a.All(prefix, h)
 	a.All(prefix+"/*", h)
+}
+
+// forward is THE proxy hop: the inbound fasthttp request object is handed to the
+// client and the reply written straight back, so nothing is re-encoded in
+// between. A non-empty path rewrites the target — which is the whole difference
+// between a mounted prefix (same path) and the composed MCP door (the owner's own
+// /mcp) — so there is one forwarder in the framework and not two.
+//
+// what names the caller in the error, because "no instance running" is worth
+// nothing without knowing what did not run.
+func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host, path, what string) error {
+	if client == nil {
+		return Errorf(503, "%s: no instance running", what)
+	}
+	req.SetHost(host)
+	if path != "" {
+		req.URI().SetPath(path)
+	}
+	if err := client.Do(req, resp); err != nil {
+		// The upstream, not this hop, is what failed.
+		return Errorf(502, "%s: %v", what, err)
+	}
+	return nil
 }
 
 // claim records owner as the holder of prefix, or refuses because someone else

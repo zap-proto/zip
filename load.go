@@ -137,6 +137,43 @@ type Plugin struct {
 	// actually reaches. The cost moves to the first request, which is why it is
 	// opt-in: a latency-critical prefix should stay eager.
 	Lazy bool
+
+	// Tools is this plugin's MCP catalogue: the JSON array [App.MCPTools]
+	// projects, captured at BUILD time and normally go:embed'd beside Bin. Given
+	// it, the host serves every plugin's tools on its own /mcp door and forwards
+	// a tools/call to the owner.
+	//
+	// It is a byte slice and not a call because MCPTools is in-process: a host
+	// cannot ask a plugin that is not running, and asking would defeat Lazy —
+	// tools/list is the method an MCP client calls constantly, so a host that
+	// woke every child to answer it would pay 112 processes for a question with
+	// a build-time answer. The answer IS build-time: the same typed-op registry
+	// that emits the plugin's OpenAPI document emits this.
+	//
+	// The catalogue can only be INCOMPLETE, never wrong: the child's own registry
+	// answers the call, so a name the host no longer serves yields that child's
+	// -32602 rather than a mis-dispatch. Two plugins declaring one tool name is
+	// refused at Load, for the same reason a duplicate prefix is — a name is
+	// dispatch, so a duplicate is unroutable.
+	//
+	// The forward target is this plugin's own MCP path, which means a plugin that
+	// moved it (MCPConfig.Path) or turned it off (MCPConfig.Disabled) must not
+	// ship a catalogue: the host would name tools the child does not answer at
+	// that path. Leave Tools empty and the plugin is simply not on the host's
+	// door.
+	Tools []byte
+
+	// MCPPath is where this plugin serves its own MCP door, when it is not zip's
+	// default. Set it only alongside a matching MCPConfig.Path in the plugin.
+	MCPPath string
+}
+
+// mcpPath is where a tools/call is forwarded: the plugin's own door.
+func (p Plugin) mcpPath() string {
+	if p.MCPPath != "" {
+		return p.MCPPath
+	}
+	return defaultMCPPath
 }
 
 // plugin is one Load'ed service across restarts. cur is read on every request
@@ -309,6 +346,15 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		}
 	}
 
+	// The MCP catalogue is read BEFORE anything is mounted or spawned, for the
+	// same reason the prefixes are claimed first: a composition that cannot be
+	// described must not first pay for its process.
+	tools, err := parseTools(spec.Name, spec.Tools)
+	if err != nil {
+		a.release(prefixes)
+		return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
+	}
+
 	if spec.Addr != "" {
 		for _, pre := range prefixes {
 			if err := a.mount(pre, spec.Addr); err != nil {
@@ -323,8 +369,14 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		if a.plugins == nil {
 			a.plugins = map[string]*plugin{}
 		}
-		a.plugins[spec.Name] = &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec}
+		rp := &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec}
+		a.plugins[spec.Name] = rp
+		err := a.installTools(rp, tools)
 		a.plugMu.Unlock()
+		if err != nil {
+			a.release(prefixes)
+			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
+		}
 		return nil
 	}
 	if len(spec.Bin) == 0 && spec.Path == "" && spec.URL == "" {
@@ -358,7 +410,16 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		return fmt.Errorf("zip: Load(%s): plugin %q already loaded", prefix, spec.Name)
 	}
 	a.plugins[spec.Name] = p
+	toolErr := a.installTools(p, tools)
 	a.plugMu.Unlock()
+	if toolErr != nil {
+		a.plugMu.Lock()
+		delete(a.plugins, spec.Name)
+		a.plugMu.Unlock()
+		a.release(prefixes)
+		stop(in, 0)
+		return fmt.Errorf("zip: Load(%s): %w", spec.Name, toolErr)
+	}
 
 	if in != nil {
 		a.logger.Info("zip loaded plugin", "name", spec.Name, "prefix", prefix,
