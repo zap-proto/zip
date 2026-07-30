@@ -14,7 +14,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// CLI — the FOURTH projection. The same typed-op registry (a.ops) that produces
+// CLI — the FOURTH projection. The same typed-op registry (a.registry) that produces
 // the REST routes, the OpenAPI document and the MCP tools produces a command
 // line: an op becomes `<service> <operation>`, its In fields become flags, its
 // doc comment becomes the help, and its Example becomes the example invocation.
@@ -109,8 +109,8 @@ type Flag struct {
 // Commands projects every registered typed op into a command. This is the whole
 // derivation: no registration, no list of commands, no per-endpoint code.
 func (a *App) Commands() []Command {
-	cmds := make([]Command, 0, len(a.ops))
-	for _, op := range a.ops {
+	cmds := make([]Command, 0, len(a.registry))
+	for _, op := range a.registry {
 		doc, has := docFor(op.Method, op.Path)
 		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op

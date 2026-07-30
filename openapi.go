@@ -16,6 +16,15 @@ import (
 	"github.com/zap-proto/zip/internal/jsontag"
 )
 
+// SpecPath and DocsPath are where an app serves its own OpenAPI document and
+// the interactive page over it. Both are zip's control plane — a projection of
+// the app, not a door its owner wrote — so neither appears in a [Declaration]
+// and a host serves its own.
+const (
+	SpecPath = "/.well-known/openapi.json"
+	DocsPath = "/docs"
+)
+
 // OpenAPIConfig configures the auto-generated /.well-known/openapi.json
 // endpoint zip serves when typed handlers are registered.
 type OpenAPIConfig struct {
@@ -32,17 +41,17 @@ type OpenAPIConfig struct {
 // installOpenAPIRoutes wires /.well-known/openapi.json and /docs.
 // Called from Listen / Serve. Idempotent if there are no typed ops.
 func (a *App) installOpenAPIRoutes() {
-	if a.cfg.OpenAPI.Disabled || len(a.ops) == 0 {
+	if a.cfg.OpenAPI.Disabled || len(a.registry) == 0 {
 		return
 	}
 	spec := a.buildOpenAPI()
 	specJSON, _ := jsonenc.Marshal(spec)
 
-	a.fiber.Get("/.well-known/openapi.json", func(fc fiber.Ctx) error {
+	a.control(fiber.MethodGet, SpecPath, func(fc fiber.Ctx) error {
 		fc.Set("Content-Type", "application/json")
 		return fc.Send(specJSON)
 	})
-	a.fiber.Get("/docs", func(fc fiber.Ctx) error {
+	a.control(fiber.MethodGet, DocsPath, func(fc fiber.Ctx) error {
 		fc.Set("Content-Type", "text/html; charset=utf-8")
 		return fc.SendString(swaggerHTML)
 	})
@@ -68,7 +77,7 @@ func (a *App) buildOpenAPI() map[string]any {
 	reg := newSchemaRegistry(specDefs)
 
 	// Sort ops by path,method for deterministic output.
-	ops := append([]*registeredOp{}, a.ops...)
+	ops := append([]*registeredOp{}, a.registry...)
 	sort.Slice(ops, func(i, j int) bool {
 		if ops[i].Path != ops[j].Path {
 			return ops[i].Path < ops[j].Path

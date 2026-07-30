@@ -12,7 +12,7 @@ import (
 )
 
 // The op-call plane — the projection that lets services compose WITHOUT
-// linking. The same typed-op registry (a.ops) that produces the REST routes,
+// linking. The same typed-op registry (a.registry) that produces the REST routes,
 // the OpenAPI document and the MCP tool list also answers a call addressed by
 // the op's NAME, carrying the op's In as the body and its Out as the reply.
 // One value (the op), five projections (REST · OpenAPI · MCP · CLI · call).
@@ -140,10 +140,10 @@ func socketIn(dir, name string) string { return filepath.Join(dir, name+".sock")
 // installCallPlane mounts the by-name op plane when there are ops to call.
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.
 func (a *App) installCallPlane() {
-	if len(a.ops) == 0 {
+	if len(a.registry) == 0 {
 		return
 	}
-	a.fiber.Post(CallPath+":op", func(fc fiber.Ctx) error {
+	a.control(fiber.MethodPost, CallPath+":op", func(fc fiber.Ctx) error {
 		// opByName is the ONE by-name lookup and op.invoke the ONE dispatcher —
 		// the same pair tools/call runs, without MCP's agent-facing envelope.
 		op := a.opByName(fc.Params("op"))
@@ -172,7 +172,7 @@ func (a *App) installCallPlane() {
 		fc.Set(fiber.HeaderContentType, CallContentType)
 		return fc.Send(body)
 	})
-	a.logger.Info("zip call plane", "path", CallPath, "ops", len(a.ops))
+	a.logger.Info("zip call plane", "path", CallPath, "ops", len(a.registry))
 }
 
 // Conn is a handle to another zip app, dialed once and used concurrently. It

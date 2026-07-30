@@ -1,4 +1,4 @@
-package runtime
+package js
 
 import "github.com/zap-proto/zip/internal/jsonenc"
 

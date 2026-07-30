@@ -19,7 +19,7 @@
 // The one in-tree Engine zip ships is the goja engine — zip's own
 // *JSRuntime, surfaced via (*JSRuntime).Engine(). It is pure Go, no cgo,
 // and is the canonical "js" backend. Everything else plugs in from base.
-package runtime
+package js
 
 import (
 	"context"
@@ -32,7 +32,7 @@ import (
 
 // ErrUnknownLanguage is returned by Run when no engine is registered for
 // the requested language.
-var ErrUnknownLanguage = errors.New("zip/runtime: unknown language")
+var ErrUnknownLanguage = errors.New("zip/js: unknown language")
 
 // Engine executes source in one language. It is the zip-side projection
 // of base's extruntime backends; any value implementing Eval satisfies
@@ -103,15 +103,15 @@ type runner struct {
 
 func (r *runner) Register(lang string, engine Engine) error {
 	if lang == "" {
-		return fmt.Errorf("zip/runtime: Register: empty language")
+		return fmt.Errorf("zip/js: Register: empty language")
 	}
 	if engine == nil {
-		return fmt.Errorf("zip/runtime: Register %q: nil engine", lang)
+		return fmt.Errorf("zip/js: Register %q: nil engine", lang)
 	}
 	_, interruptible := engine.(Interruptible)
 	_, selfManaged := engine.(ctxHonorer)
 	if !interruptible && !selfManaged {
-		slog.Warn("zip/runtime: engine is not interruptible; ctx cancel will not abort a running call",
+		slog.Warn("zip/js: engine is not interruptible; ctx cancel will not abort a running call",
 			"language", lang)
 	}
 	r.mu.Lock()

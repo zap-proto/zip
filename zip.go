@@ -21,13 +21,15 @@
 //	func Call[I, O](ctx, *Conn, op string, in *I) (*O, error)
 //	...
 //
-// All other behavior lives in subpackages: `middleware`, `runtime`.
+// All other behavior lives in subpackages: `middleware`, `js`.
 package zip
 
 import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	luxlog "github.com/luxfi/log"
 	"github.com/zap-proto/fiber/v3"
@@ -61,7 +63,7 @@ type Config struct {
 	// must return map[string][Module] exactly, so a backend with its own
 	// Module type (e.g. hanzoai/base/plugins/extruntime) needs a thin adapter,
 	// not a direct assignment. For JavaScript, import
-	// [github.com/zap-proto/zip/runtime] — a separate import so its goja +
+	// [github.com/zap-proto/zip/js] — a separate import so its goja +
 	// esbuild cost lands only on binaries that evaluate JS.
 	Loader Loader
 
@@ -77,8 +79,22 @@ type Config struct {
 	// BodyLimit is the maximum request body size (default 4 MiB).
 	BodyLimit int
 
-	// AppName forwards to fiber.Config.AppName.
+	// AppName forwards to fiber.Config.AppName. It is also the plugin's ONE
+	// name: the binary's name, its socket's stem ([SocketPath]), its
+	// [Declaration].Name and its <org>-<app> IAM segment. No mapping table.
 	AppName string
+
+	// Eager says this app's work is NOT request-driven: it owns a listener, a
+	// consumer or a background loop, so a host MUST start it rather than defer
+	// it to the first request that reaches one of its routes.
+	//
+	// It is the ONE fact about an app that its router cannot show, which is why
+	// it is stated here and travels in the [Declaration]. Everything else a host
+	// needs to route is projected from the router itself.
+	//
+	// A host reads it as the ceiling on its own deferral choice
+	// ([Plugin].Lazy): deferring an eager app is the mismatch §3.4 rejects.
+	Eager bool
 
 	// DisableStartupMessage suppresses Fiber's startup banner.
 	DisableStartupMessage bool
@@ -119,12 +135,15 @@ type Config struct {
 // App is the zip application. It wraps *fiber.App and exposes the zip
 // handler signature alongside generic typed handlers.
 type App struct {
-	cfg     Config
-	logger  luxlog.Logger
-	loader  Loader
-	fiber   *fiber.App
-	ops     []*registeredOp
-	servers []Server // the running transport listeners, set by Listen
+	cfg    Config
+	logger luxlog.Logger
+	loader Loader
+	fiber  *fiber.App
+	// registry is THE op registry — the one entry a typed op makes, from which
+	// the OpenAPI document, the MCP tool, the CLI command and the plane op are
+	// all projected. Four documents, one registration.
+	registry []*registeredOp
+	servers  []Server // the running transport listeners, set by Listen
 
 	// authorizer, when set via Authorize, runs at every typed op's invoke seam
 	// on the decoded In — the one place REST and MCP both funnel the value the
@@ -143,7 +162,30 @@ type App struct {
 	// Running plugins, by name, so Reload can find one after Load composed it.
 	// Guarded by plugMu.
 	plugins map[string]*plugin
-	plugMu  sync.Mutex
+
+	// claims maps a mounted prefix to the name that claimed it, so a SECOND
+	// claim of the same prefix is an error instead of a silent no-op. Guarded by
+	// plugMu.
+	claims map[string]string
+	plugMu sync.Mutex
+
+	// The ops sibling (/healthz, /readyz, /metrics) and the listener count its
+	// readiness reports. born is the process's own clock for zip_uptime_seconds.
+	ops      *App // the /healthz + /readyz + /metrics sibling; see App.Ops
+	opsOnce  sync.Once
+	peer     *App // the peer-op sibling served on the canonical socket; see App.Peer
+	peerOnce sync.Once
+	// sibling marks an App that IS one of the two above, so it does not grow
+	// siblings of its own and does not try to bind the process's ops port.
+	sibling   bool
+	listening atomic.Int32
+	born      time.Time
+
+	// controls is zip's OWN routes, keyed "METHOD path" — the openapi document,
+	// the docs page, the MCP door, the op plane, this app's declaration. Written
+	// only by App.control, read only by Declaration, so a control route cannot
+	// be added without being excluded from every plugin's declaration.
+	controls map[string]bool
 
 	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
 }
@@ -194,6 +236,7 @@ func New(cfg Config) *App {
 		logger: cfg.Logger,
 		loader: cfg.Loader,
 		fiber:  fiber.New(fcfg),
+		born:   time.Now(),
 	}
 }
 

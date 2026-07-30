@@ -10,7 +10,7 @@
 // functions and modules registered at construction time, and requests
 // borrow a free VM (or a one-off when the pool is saturated) so they
 // never pay per-request VM creation cost.
-package runtime
+package js
 
 import (
 	"context"
@@ -88,7 +88,7 @@ func (rt *JSRuntime) provision(vm *goja.Runtime) error {
 	defer rt.mu.Unlock()
 	for name, fn := range rt.hostFns {
 		if err := vm.Set(name, fn); err != nil {
-			return fmt.Errorf("zip/runtime: register host fn %q: %w", name, err)
+			return fmt.Errorf("zip/js: register host fn %q: %w", name, err)
 		}
 	}
 	if err := installRequire(vm, rt.modules); err != nil {
@@ -185,7 +185,7 @@ func (rt *JSRuntime) InvokeFunc(ctx context.Context, fnName string, args ...any)
 	err := rt.pool.run(func(vm *goja.Runtime) error {
 		fn, ok := goja.AssertFunction(vm.Get(fnName))
 		if !ok {
-			return fmt.Errorf("zip/runtime: %q is not a callable JS function", fnName)
+			return fmt.Errorf("zip/js: %q is not a callable JS function", fnName)
 		}
 		argv := make([]goja.Value, len(args))
 		for i, a := range args {
@@ -214,7 +214,7 @@ func (rt *JSRuntime) RegisterHostFn(name string, fn any) error {
 	rt.mu.Unlock()
 	return rt.pool.forEach(func(vm *goja.Runtime) error {
 		if err := vm.Set(name, fn); err != nil {
-			return fmt.Errorf("zip/runtime: register host fn %q: %w", name, err)
+			return fmt.Errorf("zip/js: register host fn %q: %w", name, err)
 		}
 		return nil
 	})

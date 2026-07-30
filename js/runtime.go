@@ -12,4 +12,4 @@
 // ([github.com/zap-proto/zip.Loader], [github.com/zap-proto/zip.Module]) —
 // it is duck-typed, so an implementation registers itself by being passed
 // in, never by zip importing it.
-package runtime
+package js
