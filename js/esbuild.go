@@ -7,7 +7,7 @@
 // Run TranspileToES5 at service startup (or at build time) to compile
 // bundled handlers before serving; the resulting bytes are handed to
 // JSRuntime.LoadModule / Eval.
-package runtime
+package js
 
 import (
 	"fmt"
@@ -55,7 +55,7 @@ func TranspileToES5(src []byte, opts ESOptions) ([]byte, error) {
 		MinifySyntax:      opts.Minify,
 	})
 	if len(result.Errors) > 0 {
-		return nil, fmt.Errorf("zip/runtime: esbuild: %s", formatMessages(result.Errors))
+		return nil, fmt.Errorf("zip/js: esbuild: %s", formatMessages(result.Errors))
 	}
 	return result.Code, nil
 }
@@ -96,7 +96,7 @@ const virtualNamespace = "zip-virtual"
 // error-level diagnostic (including an unresolved import).
 func BundleToES2015(entry string, files map[string][]byte, opts BundleOptions) ([]byte, error) {
 	if _, ok := files[entry]; !ok {
-		return nil, fmt.Errorf("zip/runtime: bundle entry %q not in files map", entry)
+		return nil, fmt.Errorf("zip/js: bundle entry %q not in files map", entry)
 	}
 	entry = path.Clean(entry)
 
@@ -159,10 +159,10 @@ func BundleToES2015(entry string, files map[string][]byte, opts BundleOptions) (
 		Plugins:             []api.Plugin{plugin},
 	})
 	if len(result.Errors) > 0 {
-		return nil, fmt.Errorf("zip/runtime: esbuild bundle: %s", formatMessages(result.Errors))
+		return nil, fmt.Errorf("zip/js: esbuild bundle: %s", formatMessages(result.Errors))
 	}
 	if len(result.OutputFiles) == 0 {
-		return nil, fmt.Errorf("zip/runtime: esbuild bundle produced no output")
+		return nil, fmt.Errorf("zip/js: esbuild bundle produced no output")
 	}
 	return result.OutputFiles[0].Contents, nil
 }

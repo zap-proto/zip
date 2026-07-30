@@ -88,7 +88,7 @@ type Loader interface {
 
 Because the contract lives at the root and no implementation is imported
 with it, a service that never evaluates JavaScript does not compile one:
-goja and esbuild live in `zip/runtime`, a separate import that only the
+goja and esbuild live in `zip/js`, a separate import that only the
 binaries wanting JS pay for.
 
 A real service binary constructs `*extruntime.Loader` from

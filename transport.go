@@ -150,6 +150,7 @@ func (a *App) prepare() {
 		a.installOpenAPIRoutes()
 		a.installMCP()
 		a.installCallPlane()
+		a.installPluginRoute()
 	})
 }
 
@@ -195,6 +196,18 @@ func (a *App) Listen(addrs ...string) error {
 	a.srvMu.Lock()
 	a.servers = servers
 	a.srvMu.Unlock()
+	a.listening.Add(int32(len(servers)))
+
+	// The two listeners a plugin main does not have to write. Each appears only
+	// when the app actually has the thing it serves, so one verb — Listen —
+	// covers a plugin run standalone and the same plugin run as a child.
+	//
+	// HIP-0119 §1: the ops surface is a SECOND listener, up only when the
+	// deployment named an ops port (a host names none on a child).
+	a.serveOps()
+	// HIP-0106 §2(3): peer ops ride a SECOND app served only on the canonical
+	// socket, so an internal op is never reachable on the edge.
+	a.servePeer()
 
 	// Serve every transport concurrently; return the first error (Shutdown
 	// closes the rest via closeServers).
@@ -225,6 +238,18 @@ func (a *App) Listen(addrs ...string) error {
 // without relinking it. Moving a service between Mount and a linked-in route
 // tree is a deployment decision, not a code change.
 func (a *App) Mount(prefix, addr string) error {
+	// A bare Mount is its own claimant, and the address is the only name it has.
+	if err := a.claim(prefix, addr); err != nil {
+		return err
+	}
+	return a.mount(prefix, addr)
+}
+
+// mount registers prefix onto a dialled address. The prefix is already CLAIMED
+// by the caller — [Mount] claims its one, [App.load] claims a plugin's whole set
+// all-or-nothing before spawning anything — so this does not claim again and
+// there is exactly one claim per prefix however the composition came in.
+func (a *App) mount(prefix, addr string) error {
 	scheme, hostport, t, err := transportFor(addr)
 	if err != nil {
 		return err
@@ -243,6 +268,10 @@ func (a *App) Mount(prefix, addr string) error {
 // returns, so the router is never touched twice. Re-registering routes on
 // every reload would grow the route table without bound — the leak that makes
 // naive hot-reload untenable.
+//
+// Registering the route is a separate concern from CLAIMING the prefix (see
+// [App.claim]): a reload re-resolves the target without re-registering, and an
+// ownership assertion happens once, at the door the composition came in.
 func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	h := func(c *Ctx) error {
 		client, host := to()
@@ -260,6 +289,40 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
 	a.All(prefix, h)
 	a.All(prefix+"/*", h)
+}
+
+// claim records owner as the holder of prefix, or refuses because someone else
+// already holds it. The comparison is on the NORMALISED prefix, so "/v1/x" and
+// "/v1/x/" are one claim and not two.
+//
+// This catches an exact duplicate at compose time, with a message naming both
+// claimants. It does NOT catch SHADOWING — a parameter sibling swallowing
+// another plugin's deeper static path, which is sometimes legitimate — which is
+// why a host also runs the router oracle over the composed union (HIP-0106
+// §3.5). Two checks, two distinct failures, not two ways to do one thing.
+func (a *App) claim(prefix, owner string) error {
+	key := strings.TrimSuffix(normPath(prefix), "/")
+	a.plugMu.Lock()
+	defer a.plugMu.Unlock()
+	if held, dup := a.claims[key]; dup {
+		return fmt.Errorf("zip: %q is already claimed by %q — %q cannot have it too", key, held, owner)
+	}
+	if a.claims == nil {
+		a.claims = map[string]string{}
+	}
+	a.claims[key] = owner
+	return nil
+}
+
+// release drops a claim, so Unload frees the prefix its plugin held and a
+// replacement can take it. Without this an Unload+Load cycle refuses its own
+// second half.
+func (a *App) release(prefixes []string) {
+	a.plugMu.Lock()
+	defer a.plugMu.Unlock()
+	for _, p := range prefixes {
+		delete(a.claims, strings.TrimSuffix(normPath(p), "/"))
+	}
 }
 
 // makeSocketDir creates the directory a unix socket will be bound in, so

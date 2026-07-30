@@ -8,7 +8,7 @@ import (
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
-// MCP — the THIRD projection. The same typed-op registry (a.ops) that produces
+// MCP — the THIRD projection. The same typed-op registry (a.registry) that produces
 // the REST routes and the OpenAPI doc also produces a Model Context Protocol
 // tool surface, for FREE: every typed handler (Get/Post[In,Out]) becomes an MCP
 // tool whose inputSchema is schemaOf(In) and whose call runs the exact same fn
@@ -52,11 +52,11 @@ func (a *App) mcpName() string {
 // installMCP mounts the JSON-RPC 2.0 MCP endpoint when there are typed ops to
 // expose. Called from prepare() alongside installOpenAPIRoutes.
 func (a *App) installMCP() {
-	if a.cfg.MCP.Disabled || len(a.ops) == 0 {
+	if a.cfg.MCP.Disabled || len(a.registry) == 0 {
 		return
 	}
-	a.fiber.Post(a.mcpPath(), a.handleMCP)
-	a.logger.Info("zip mcp", "path", a.mcpPath(), "tools", len(a.ops))
+	a.control(fiber.MethodPost, a.mcpPath(), a.handleMCP)
+	a.logger.Info("zip mcp", "path", a.mcpPath(), "tools", len(a.registry))
 }
 
 type mcpRequest struct {
@@ -115,8 +115,8 @@ func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
 // description. WithSummary remains the fallback for a package the generator has
 // not run over, so an undocumented op still names itself.
 func (a *App) mcpTools() []map[string]any {
-	tools := make([]map[string]any, 0, len(a.ops))
-	for _, op := range a.ops {
+	tools := make([]map[string]any, 0, len(a.registry))
+	for _, op := range a.registry {
 		doc, hasDoc := docFor(op.Method, op.Path)
 		desc := op.Summary
 		if hasDoc && doc.Description != "" {
@@ -168,7 +168,7 @@ func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
 }
 
 func (a *App) opByName(name string) *registeredOp {
-	for _, op := range a.ops {
+	for _, op := range a.registry {
 		if opName(op) == name {
 			return op
 		}

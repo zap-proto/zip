@@ -10,7 +10,7 @@
 //
 //	req.method   req.path   req.query   req.headers   req.body
 //	res.status(n)   res.set(k,v)   res.json(v)   res.send(v)
-package runtime
+package js
 
 import (
 	"fmt"
@@ -40,7 +40,7 @@ func JSHandler(rt *JSRuntime, fnName string) fiber.Handler {
 			fnVal := vm.Get(fnName)
 			fn, ok := goja.AssertFunction(fnVal)
 			if !ok {
-				return fmt.Errorf("zip/runtime: %q is not a callable JS function", fnName)
+				return fmt.Errorf("zip/js: %q is not a callable JS function", fnName)
 			}
 			return invokeJS(fc, vm, fn)
 		})
@@ -60,7 +60,7 @@ func JSModule(rt *JSRuntime, modulePath string) (fiber.Handler, error) {
 			return err
 		}
 		if _, ok := goja.AssertFunction(exports); !ok {
-			return fmt.Errorf("zip/runtime: module %q exports is not a function", modulePath)
+			return fmt.Errorf("zip/js: module %q exports is not a function", modulePath)
 		}
 		return nil
 	})
@@ -77,7 +77,7 @@ func JSModule(rt *JSRuntime, modulePath string) (fiber.Handler, error) {
 			}
 			fn, ok := goja.AssertFunction(exports)
 			if !ok {
-				return fmt.Errorf("zip/runtime: module %q exports is not a function", modulePath)
+				return fmt.Errorf("zip/js: module %q exports is not a function", modulePath)
 			}
 			return invokeJS(fc, vm, fn)
 		})

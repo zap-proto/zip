@@ -296,9 +296,23 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		return fmt.Errorf("zip: Load(%s) needs at least one prefix", spec.Name)
 	}
 	prefix := prefixes[0]
+
+	// Claimed BEFORE anything is mounted or spawned: a composition that cannot
+	// route this plugin must not first pay for its process, and a duplicate must
+	// fail at compose time rather than become a live prefix serving another
+	// plugin's 404. All-or-nothing — a plugin owning three prefixes and losing
+	// the third leaves the first two free for whoever really owns them.
+	for i, pre := range prefixes {
+		if err := a.claim(pre, spec.Name); err != nil {
+			a.release(prefixes[:i])
+			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
+		}
+	}
+
 	if spec.Addr != "" {
 		for _, pre := range prefixes {
-			if err := a.Mount(pre, spec.Addr); err != nil {
+			if err := a.mount(pre, spec.Addr); err != nil {
+				a.release(prefixes)
 				return err
 			}
 		}
@@ -314,9 +328,11 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		return nil
 	}
 	if len(spec.Bin) == 0 && spec.Path == "" && spec.URL == "" {
+		a.release(prefixes)
 		return fmt.Errorf("zip: Load(%s): plugin %q has no Addr, Bin, Path, or URL", prefix, spec.Name)
 	}
 	if spec.URL != "" && spec.Sum == "" {
+		a.release(prefixes)
 		return fmt.Errorf("zip: Load(%s): plugin %q has URL but no Sum — refusing to run an unverified download", prefix, spec.Name)
 	}
 
@@ -325,6 +341,7 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	if !spec.Lazy {
 		var err error
 		if in, err = start(spec); err != nil {
+			a.release(prefixes)
 			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
 		}
 		p.cur.Store(in)
@@ -336,6 +353,7 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	}
 	if _, dup := a.plugins[spec.Name]; dup {
 		a.plugMu.Unlock()
+		a.release(prefixes)
 		stop(in, 0) // nil for a lazy plugin — stop handles that
 		return fmt.Errorf("zip: Load(%s): plugin %q already loaded", prefix, spec.Name)
 	}

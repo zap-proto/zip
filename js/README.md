@@ -1,4 +1,4 @@
-# zip/runtime — embedded multi-language code runner
+# zip/js — embedded multi-language code runner
 
 `runtime` embeds language backends into a zip service so a request can run
 arbitrary-language source in-process — no separate runtime service, no

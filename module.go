@@ -38,7 +38,7 @@ type Module interface {
 // identical result types, and an equivalent method set is not enough.
 //
 // The in-tree JavaScript implementation is package
-// [github.com/zap-proto/zip/runtime] — goja to evaluate and esbuild to
+// [github.com/zap-proto/zip/js] — goja to evaluate and esbuild to
 // bundle. It is a SEPARATE import on purpose: that cost belongs to the
 // binaries that ask for JS, not to every consumer of zip.
 type Loader interface {

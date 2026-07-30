@@ -1,4 +1,4 @@
-package runtime
+package js
 
 import (
 	"fmt"
@@ -89,18 +89,18 @@ func requireModule(vm *goja.Runtime, name string) (goja.Value, error) {
 	src, ok := t.sources[name]
 	t.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("zip/runtime: module not found: %q", name)
+		return nil, fmt.Errorf("zip/js: module not found: %q", name)
 	}
 
 	// Wrap in the CommonJS scope and evaluate.
 	wrapped := "(function(module, exports, require){" + src + "\n})"
 	fnVal, err := vm.RunString(wrapped)
 	if err != nil {
-		return nil, fmt.Errorf("zip/runtime: load module %q: %w", name, err)
+		return nil, fmt.Errorf("zip/js: load module %q: %w", name, err)
 	}
 	fn, ok := goja.AssertFunction(fnVal)
 	if !ok {
-		return nil, fmt.Errorf("zip/runtime: module %q did not compile to a function", name)
+		return nil, fmt.Errorf("zip/js: module %q did not compile to a function", name)
 	}
 
 	module := vm.NewObject()
@@ -109,7 +109,7 @@ func requireModule(vm *goja.Runtime, name string) (goja.Value, error) {
 	requireFn := vm.Get("require")
 
 	if _, err := fn(goja.Undefined(), module, exports, requireFn); err != nil {
-		return nil, fmt.Errorf("zip/runtime: eval module %q: %w", name, err)
+		return nil, fmt.Errorf("zip/js: eval module %q: %w", name, err)
 	}
 
 	result := module.Get("exports")

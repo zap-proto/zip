@@ -65,7 +65,7 @@ Fiber's own `middleware/adaptor` package which is part of the v3 core.
   X-User-IsAdmin`.
 - HIP-0105 extension contract — duck-typed via `zip.Loader` at the root, so the
   framework stays decoupled from `hanzoai/base` AND from a JS toolchain: the
-  goja/esbuild implementation is the separate opt-in import `zip/runtime`.
+  goja/esbuild implementation is the separate opt-in import `zip/js`.
 - HIP-0106 Mount() contract — `examples/subsystem-mount` is the
   reference; the binary composes N subsystems via the same `Mount(app,
   deps) error` signature commerce/checkout uses today.

@@ -28,7 +28,7 @@ import (
 
 	"github.com/zap-proto/zip"
 	"github.com/zap-proto/zip/middleware"
-	"github.com/zap-proto/zip/runtime"
+	"github.com/zap-proto/zip/js"
 )
 
 //go:embed app.ts
@@ -39,7 +39,7 @@ var appTS []byte
 // it via app.Fiber().Test(...) without binding a port.
 func setup() (*zip.App, error) {
 	// 1. Transpile the legacy TS to goja-runnable JS.
-	js, err := runtime.TranspileToES5(appTS, runtime.ESOptions{
+	src, err := js.TranspileToES5(appTS, js.ESOptions{
 		Loader:     "ts",
 		Sourcefile: "app.ts",
 	})
@@ -48,16 +48,16 @@ func setup() (*zip.App, error) {
 	}
 
 	// 2. Embedded JS runtime, register the module (module.exports = fn).
-	rt, err := runtime.NewJSRuntime(runtime.JSOptions{PoolSize: 8})
+	rt, err := js.NewJSRuntime(js.JSOptions{PoolSize: 8})
 	if err != nil {
 		return nil, err
 	}
-	if err := rt.LoadModule("app", string(js)); err != nil {
+	if err := rt.LoadModule("app", string(src)); err != nil {
 		return nil, err
 	}
 
 	// 3. Fiber handler from the module's exported function.
-	h, err := runtime.JSModule(rt, "app")
+	h, err := js.JSModule(rt, "app")
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func setup() (*zip.App, error) {
 	//    zip ships the goja "js" engine in-tree; a host that imports base
 	//    additionally registers pyvm/v8vm/wasmvm/starkvm here at startup — zip
 	//    never imports base (see runtime/README).
-	runner := runtime.NewRunner()
+	runner := js.NewRunner()
 	if err := runner.Register("js", rt.Engine()); err != nil {
 		return nil, err
 	}
@@ -115,11 +115,11 @@ type RunOut struct {
 // runSource dispatches the source to the engine registered for :lang. An
 // unregistered language is a 404; an evaluation error is a 200 carrying the
 // error string, so the caller sees the engine's own message.
-func runSource(runner runtime.Runner) func(context.Context, *RunIn) (*RunOut, error) {
+func runSource(runner js.Runner) func(context.Context, *RunIn) (*RunOut, error) {
 	return func(ctx context.Context, in *RunIn) (*RunOut, error) {
 		res, err := runner.Run(ctx, in.Lang, []byte(in.Source))
 		if err != nil {
-			if errors.Is(err, runtime.ErrUnknownLanguage) {
+			if errors.Is(err, js.ErrUnknownLanguage) {
 				return nil, zip.ErrNotFound("unknown language")
 			}
 			return &RunOut{Error: err.Error()}, nil

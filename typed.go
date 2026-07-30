@@ -265,7 +265,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		}
 		return out, nil
 	}
-	app.ops = append(app.ops, op)
+	app.registry = append(app.registry, op)
 
 	handler := func(c fiber.Ctx) error {
 		// hasBody is THE rule about what a method carries, read here as well as
