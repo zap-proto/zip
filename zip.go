@@ -26,6 +26,7 @@ package zip
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -167,7 +168,20 @@ type App struct {
 	// claim of the same prefix is an error instead of a silent no-op. Guarded by
 	// plugMu.
 	claims map[string]string
-	plugMu sync.Mutex
+
+	// The composed MCP surface of the plugins this app Load'ed: every tool
+	// descriptor a plugin's build-time catalogue declared, and which plugin owns
+	// each name. Written by load (under plugMu), read by installMCP and by a
+	// tools/call. It is what lets a host expose 112 lazy children's tools without
+	// running any of them — see [Plugin.Tools].
+	pluginTools []mcpTool
+	toolOwners  map[string]*plugin
+	plugMu      sync.Mutex
+
+	// mcpList is the whole tools/list array, rendered once by installMCP: own ops
+	// ++ every plugin catalogue, sorted by name. Serving bytes is what makes the
+	// most-called MCP method free.
+	mcpList json.RawMessage
 
 	// The ops sibling (/healthz, /readyz, /metrics) and the listener count its
 	// readiness reports. born is the process's own clock for zip_uptime_seconds.
