@@ -305,12 +305,14 @@ func hasRequestBody(op *registeredOp) bool {
 	for _, p := range colonParams(op.Path) {
 		named[strings.ToLower(p)] = true
 	}
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		// A field is in the body when `json:` puts it there, and is already
-		// carried when `url:` binds it to a segment the route matched on. The two
-		// tags answer two questions, so both are asked.
-		if !f.IsExported() || jsonFieldName(f) == "-" {
+	// wireFields, not NumField: an embedded struct's fields ARE in the body, and
+	// asking the outer type alone declared no body for an input whose own fields
+	// were all path params — the phantom body's mirror image.
+	for _, f := range wireFields(t) {
+		// A field is in the body when `json:` puts it there, and is already carried
+		// when `url:` binds it to a segment the route matched on. The two tags
+		// answer two questions, so both are asked.
+		if jsonFieldName(f) == "-" {
 			continue
 		}
 		if !named[strings.ToLower(urlFieldName(f))] {
@@ -345,14 +347,10 @@ func urlFields(t reflect.Type) urlFieldList {
 		return nil
 	}
 	var out urlFieldList
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
+	for _, f := range wireFields(t) {
 		name := urlFieldName(f)
 		if name == "-" {
-			continue
+			continue // on the wire, but not in the URL.
 		}
 		ft := f.Type
 		for ft.Kind() == reflect.Pointer {
@@ -589,14 +587,10 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fields map[string]string) {
 	props := map[string]any{}
 	var required []string
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
+	for _, f := range wireFields(t) {
 		name := jsonFieldName(f)
 		if name == "-" {
-			continue
+			continue // exists, but the body does not carry it.
 		}
 		fs := schemaOf(f.Type, reg, fields)
 		if d := fields[t.Name()+"."+name]; d != "" {
@@ -748,6 +742,69 @@ func urlFieldName(f reflect.StructField) string {
 		return jsontag.Name(f.Name, tag)
 	}
 	return jsonFieldName(f)
+}
+
+// wireFields is the struct's fields AS THE DECODER SEES THEM: its own, plus the
+// promoted fields of every embedded struct, in the order encoding/json resolves
+// them. index is the path to the field through those embeddings, so a caller can
+// reach the value with reflect.Value.FieldByIndex.
+//
+// It exists because four things asked "what fields does this type carry on the
+// wire" and each answered with its own loop over NumField — which is not that
+// question. encoding/json PROMOTES an embedded struct's fields to the outer
+// object, and an embedded type is very often unexported (a shared patch body
+// reused by two routes), so every one of those loops skipped it on IsExported and
+// silently dropped every field it carried: the schema published an object with
+// only the outer fields, the CLI offered no flag for them, the document declared
+// no request body at all when the outer fields were all path params, and bindURL
+// would not bind one from the URL. The wire took them the whole time.
+//
+// One function, so the promotion rule lives once. It answers STRUCTURE only:
+// which fields exist, the outer type's and the promoted ones together. WHICH HALF
+// of the request carries a field is a different question, answered by `json:` and
+// `url:`, and each caller asks it — because a field can be URL-only
+// (`json:"-" url:"script"`) or body-only (`json:"script" url:"-"`), and a filter
+// here would silently drop one of the two halves.
+//
+// An embedded POINTER is skipped rather than followed: the decoder allocates it on
+// demand, and a nil one has no fields to promote — a projection must not describe
+// what binding cannot reach.
+func wireFields(t reflect.Type) []reflect.StructField {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return nil
+	}
+	var out []reflect.StructField
+	var walk func(reflect.Type, []int)
+	seen := map[reflect.Type]bool{}
+	walk = func(t reflect.Type, index []int) {
+		if seen[t] {
+			return // a struct embedding its own type: promote it once.
+		}
+		seen[t] = true
+		defer delete(seen, t)
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			at := append(append([]int{}, index...), i)
+			if f.Anonymous && f.Type.Kind() == reflect.Struct {
+				// A tagged embedded struct is a NAMED object, not a promotion —
+				// that is encoding/json's rule, so it is this one's too.
+				if _, tagged := f.Tag.Lookup("json"); !tagged {
+					walk(f.Type, at)
+					continue
+				}
+			}
+			if !f.IsExported() {
+				continue
+			}
+			f.Index = at
+			out = append(out, f)
+		}
+	}
+	walk(t, nil)
+	return out
 }
 
 // jsonMarshaler and timeType are the two types schemaOf consults about a value's

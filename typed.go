@@ -156,15 +156,15 @@ func bindURL(in any, values map[string]string) {
 	if v.Kind() != reflect.Struct {
 		return
 	}
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		fv := v.Field(i)
-		if !fv.CanSet() {
-			continue
-		}
+	for _, f := range wireFields(v.Type()) {
 		name := urlFieldName(f)
 		if name == "-" {
+			continue
+		}
+		// FieldByIndex, because wireFields reaches through embedding: the index is
+		// the path to the field, which is just [i] for the type's own fields.
+		fv := v.FieldByIndex(f.Index)
+		if !fv.CanSet() {
 			continue
 		}
 		for k, val := range values {
