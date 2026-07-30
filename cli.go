@@ -180,11 +180,9 @@ func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body 
 		})
 	}
 	if body {
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if !f.IsExported() {
-				continue
-			}
+		// wireFields, so an embedded body type's promoted fields get flags. Reading
+		// only the outer type left a command unable to send them at all.
+		for _, f := range wireFields(t) {
 			add(jsonFieldName(f), urlFieldName(f), flagType(f.Type), strings.Contains(f.Tag.Get("validate"), "required"))
 		}
 	} else {
