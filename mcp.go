@@ -67,9 +67,18 @@ func (a *App) installMCP() {
 	if a.cfg.MCP.Disabled || (len(a.registry) == 0 && len(a.pluginTools) == 0) {
 		return
 	}
-	a.mcpList = a.composeTools()
+	a.renderTools()
 	a.control(fiber.MethodPost, a.mcpPath(), a.handleMCP)
 	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.registry), "plugin tools", len(a.pluginTools))
+}
+
+// renderTools re-renders the served list from the current ops + catalogues. Called
+// by installMCP, and again by any load that lands AFTER it — a host that composes a
+// plugin at run time must not serve a list frozen at boot, and the alternative
+// (rendering per request) would give back the memcpy that makes tools/list free.
+func (a *App) renderTools() {
+	list := a.composeTools()
+	a.mcpList.Store(&list)
 }
 
 // mcpTool is one tool descriptor with its name lifted out, so the composed list
@@ -131,6 +140,11 @@ func (a *App) installTools(p *plugin, tools []mcpTool) error {
 		a.toolOwners[t.name] = p
 	}
 	a.pluginTools = append(a.pluginTools, tools...)
+	// The door is already up (this Load came after Listen): re-render, so a plugin
+	// composed at run time is on the list rather than invisible until a restart.
+	if a.mcpList.Load() != nil {
+		a.renderTools()
+	}
 	return nil
 }
 
@@ -180,7 +194,11 @@ func (a *App) handleMCP(fc fiber.Ctx) error {
 	case "tools/list":
 		// The pre-rendered array, verbatim: no marshal of 451 schemas per call and
 		// — the load-bearing half — no plugin touched to produce it.
-		return fc.JSON(mcpResult(req.ID, map[string]any{"tools": a.mcpList}))
+		tools := json.RawMessage("[]")
+		if cur := a.mcpList.Load(); cur != nil {
+			tools = *cur
+		}
+		return fc.JSON(mcpResult(req.ID, map[string]any{"tools": tools}))
 	case "tools/call":
 		return a.mcpCall(fc, req)
 	case "ping":

@@ -211,3 +211,52 @@ func TestMCP_NoOpsNoCatalogueNoDoor(t *testing.T) {
 		t.Fatalf("no ops and no catalogue must serve no door, got %d", status)
 	}
 }
+
+// TestMCP_LoadAfterListenIsOnTheList — a host may compose a plugin at run time, and
+// the served list is re-rendered rather than frozen at boot. Without this a plugin
+// added after Listen is invisible until a restart, which is not a state anything can
+// see or explain.
+func TestMCP_LoadAfterListenIsOnTheList(t *testing.T) {
+	bin := buildPluginBin(t, "v1")
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true,
+		MCP: zip.MCPConfig{Path: "/v1/mcp"}})
+	// One plugin at boot, so the door installs; a second one after.
+	if err := app.Add(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: catalogue(t, bin)}, "/v1/a")); err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	app.Prepare()
+	before := len(toolNames(t, listBody(t, app)))
+
+	// A second catalogue with a distinct name, as a differently-built plugin would
+	// have — the duplicate case is refused, and is proven separately.
+	if err := app.Add(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
+		Tools: []byte(`[{"name":"b_extra","description":"Added after Listen.","inputSchema":{"type":"object"}}]`)}, "/v1/b")); err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	names := toolNames(t, listBody(t, app))
+	if len(names) != before+1 {
+		t.Fatalf("a plugin Load'ed after Listen is not on the list: %v", names)
+	}
+	var found bool
+	for _, n := range names {
+		if n == "b_extra" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("b_extra missing: %v", names)
+	}
+	if up := running(t, app); len(up) != 0 {
+		t.Fatalf("re-rendering the list woke %v", up)
+	}
+}
+
+func listBody(t *testing.T, app *zip.App) string {
+	t.Helper()
+	status, body := call(t, app, "POST", "/v1/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if status != 200 {
+		t.Fatalf("tools/list: %d %s", status, body)
+	}
+	return body
+}

@@ -178,10 +178,12 @@ type App struct {
 	toolOwners  map[string]*plugin
 	plugMu      sync.Mutex
 
-	// mcpList is the whole tools/list array, rendered once by installMCP: own ops
-	// ++ every plugin catalogue, sorted by name. Serving bytes is what makes the
-	// most-called MCP method free.
-	mcpList json.RawMessage
+	// mcpList is the whole tools/list array, rendered by installMCP and re-rendered
+	// by any later load: own ops ++ every plugin catalogue, sorted by name. Serving
+	// bytes is what makes the most-called MCP method free. Atomic because a Load
+	// after Listen re-renders it while requests are reading it — nil until the door
+	// is installed, which is also how installTools knows whether to re-render.
+	mcpList atomic.Pointer[json.RawMessage]
 
 	// The ops sibling (/healthz, /readyz, /metrics) and the listener count its
 	// readiness reports. born is the process's own clock for zip_uptime_seconds.
