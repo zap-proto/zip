@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zap-proto/fiber/v3"
 
@@ -122,19 +123,17 @@ func (a *App) buildOpenAPI() map[string]any {
 		}
 
 		// Request body.
-		if hasBody(op.Method) {
-			if op.InType != nil && typeName(op.InType) != "" {
-				media := map[string]any{"schema": schemaOf(op.InType, reg, docFields(hasDoc, doc))}
-				// An example is what makes a spec explorable — it is the
-				// difference between a reference someone reads and one they can
-				// press "try it" on.
-				if hasDoc && len(doc.Example) > 0 {
-					media["example"] = json.RawMessage(doc.Example)
-				}
-				opObj["requestBody"] = map[string]any{
-					"required": true,
-					"content":  map[string]any{"application/json": media},
-				}
+		if hasRequestBody(op) {
+			media := map[string]any{"schema": schemaOf(op.InType, reg, docFields(hasDoc, doc))}
+			// An example is what makes a spec explorable — it is the difference
+			// between a reference someone reads and one they can press "try it"
+			// on.
+			if hasDoc && len(doc.Example) > 0 {
+				media["example"] = json.RawMessage(doc.Example)
+			}
+			opObj["requestBody"] = map[string]any{
+				"required": true,
+				"content":  map[string]any{"application/json": media},
 			}
 		}
 
@@ -276,6 +275,51 @@ func hasBody(method string) bool {
 	return true
 }
 
+// hasRequestBody reports whether an op PUBLISHES a request body: its method
+// carries one, its input has a name to describe, and the input has at least one
+// field the URL does not already carry.
+//
+// That last clause is the one that was missing. POST /v1/things/:id/verify binds
+// its whole input from the path, so the requestBody the document declared had
+// exactly one property — the path param — and it was marked required. Every SDK
+// generated from that document gained a phantom argument: an object the caller
+// must construct, to repeat a value it already passes in the URL.
+//
+// It is a refinement OF [hasBody], not a rival to it. The wire is untouched: the
+// route still reads the body for a method that carries one, and bindURL binds the
+// path last, so a body that repeated a path param never won anyway. The only
+// thing that changes is what the document, and therefore every client generated
+// from it, believes it has to send.
+func hasRequestBody(op *registeredOp) bool {
+	if !hasBody(op.Method) || typeName(op.InType) == "" {
+		return false
+	}
+	t := op.InType
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return true // the body IS the whole value — a list, a raw message
+	}
+	named := map[string]bool{}
+	for _, p := range colonParams(op.Path) {
+		named[strings.ToLower(p)] = true
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		// A field is in the body when `json:` puts it there, and is already
+		// carried when `url:` binds it to a segment the route matched on. The two
+		// tags answer two questions, so both are asked.
+		if !f.IsExported() || jsonFieldName(f) == "-" {
+			continue
+		}
+		if !named[strings.ToLower(urlFieldName(f))] {
+			return true
+		}
+	}
+	return false
+}
+
 // urlField is one URL-bindable input field: the name a caller writes in the URL,
 // the schema of the value, and whether the handler refuses to run without it.
 type urlField struct {
@@ -306,7 +350,7 @@ func urlFields(t reflect.Type) urlFieldList {
 		if !f.IsExported() {
 			continue
 		}
-		name := jsonFieldName(f)
+		name := urlFieldName(f)
 		if name == "-" {
 			continue
 		}
@@ -477,6 +521,25 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	// A type that states its own wire form — MarshalJSON — is not described by
+	// what it is made of, and this is read FIRST because the rule is about the
+	// MARSHALER, not about being a struct. json.RawMessage is the case that
+	// mattered: a []byte whose MarshalJSON emits raw JSON. Below the slice rule
+	// it was published as an array of integers; under a struct-only check it
+	// would still be. A relay whose answer is frequently an array or null was
+	// asserted to be an object in openapi.yaml and in every SDK built from it.
+	if isMarshaler(t) {
+		if t == timeType {
+			// The one marshaler whose output shape is DOCUMENTED: RFC 3339,
+			// which OpenAPI spells `format: date-time`. Its fields are all
+			// unexported, so describing it by them published `{}` properties for
+			// every timestamp in the fleet — an object where a string goes.
+			return map[string]any{"type": "string", "format": "date-time"}
+		}
+		// Otherwise: any JSON. Unconstrained is not undocumented — the field's
+		// prose still lands on it — and it is the only true thing to say.
+		return map[string]any{}
+	}
 	switch t.Kind() {
 	case reflect.String:
 		return map[string]any{"type": "string"}
@@ -488,6 +551,13 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}
 	case reflect.Slice, reflect.Array:
+		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+			// encoding/json writes a byte SLICE as a base64 string, not as an
+			// array of numbers — and a byte ARRAY as the numbers, which is why
+			// this is not both kinds. A named []byte that means something else
+			// says so with MarshalJSON, and is caught above.
+			return map[string]any{"type": "string", "contentEncoding": "base64"}
+		}
 		return map[string]any{
 			"type":  "array",
 			"items": schemaOf(t.Elem(), reg, fields),
@@ -601,9 +671,6 @@ func exampleFields(ex json.RawMessage) map[string]json.RawMessage {
 	return m
 }
 
-// firstSentence is the summary when none was given explicitly: a doc comment's
-// opening sentence is already written to be one, which is why Go documents that
-// convention in the first place.
 // docFields is the field map when the generator ran, nil otherwise.
 func docFields(has bool, d Doc) map[string]string {
 	if !has {
@@ -612,14 +679,48 @@ func docFields(has bool, d Doc) map[string]string {
 	return d.Fields
 }
 
+// firstSentence is the summary when none was given explicitly: a doc comment's
+// opening sentence is already written to be one, which is why Go documents that
+// convention in the first place.
+//
+// A summary is ONE SENTENCE ON ONE LINE. Neither followed from reading the source
+// text verbatim up to ". ":
+//
+//   - a first sentence that WRAPS in Go source put its line break into the
+//     OpenAPI summary, the CLI's one-line listing and the first docstring line of
+//     every generated SDK — 215 of 387 published summaries carried one;
+//   - a sentence ending at a line break has no ". " to stop at, so the scan ran
+//     on and swallowed the paragraphs after it, newlines and all.
+//
+// So the boundary is a period followed by ANY whitespace (or the end), and the
+// result is whitespace-collapsed. The source's line breaks are facts about the
+// source; a summary is a fact about the operation.
 func firstSentence(s string) string {
-	if i := strings.Index(s, ". "); i >= 0 {
-		return s[:i+1]
+	if i := sentenceEnd(s); i >= 0 {
+		s = s[:i+1]
+	} else if i := strings.IndexByte(s, '\n'); i >= 0 {
+		// No sentence at all: the first line, as it has always been.
+		s = s[:i]
 	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// sentenceEnd is the index of the period that ends the first sentence, or -1.
+// "v1.2" and "hanzo.ai" are not sentence ends, because a sentence end is
+// followed by space; "e.g. x" reads as one, which is Go's own convention for
+// where a doc comment's summary stops and the reason to write "for example".
+func sentenceEnd(s string) int {
+	for i := strings.IndexByte(s, '.'); i >= 0; {
+		if i+1 == len(s) || s[i+1] == ' ' || s[i+1] == '\n' || s[i+1] == '\t' || s[i+1] == '\r' {
+			return i
+		}
+		next := strings.IndexByte(s[i+1:], '.')
+		if next < 0 {
+			return -1
+		}
+		i += 1 + next
 	}
-	return s
+	return -1
 }
 
 // jsonFieldName is the reflect view of the wire-name rule; cmd/zipdoc reads the
@@ -627,6 +728,41 @@ func firstSentence(s string) string {
 // under the name the decoder actually uses.
 func jsonFieldName(f reflect.StructField) string {
 	return jsontag.Name(f.Name, f.Tag.Get("json"))
+}
+
+// urlFieldName is the name a field is carried under in the URL — `url:` when the
+// field names one, else the name the body uses. "-" opts out, exactly as it does
+// for `json:`.
+//
+// The two tags are the two halves of a request, and they are separate because a
+// route may genuinely mean two different things by one word: PUT
+// /v1/workers/scripts/:script takes the worker's NAME in the path and its SOURCE
+// in the body, both spelled "script". With one name for both, bindURL bound the
+// path last — it is the addressing authority, which is right — and deployed a
+// worker whose code was its own name. So the route could not be typed at all.
+//
+//	Name   string `json:"-"      url:"script"` // the URL's, and only the URL's
+//	Script string `json:"script" url:"-"`      // the body's, and only the body's
+func urlFieldName(f reflect.StructField) string {
+	if tag, ok := f.Tag.Lookup("url"); ok {
+		return jsontag.Name(f.Name, tag)
+	}
+	return jsonFieldName(f)
+}
+
+// jsonMarshaler and timeType are the two types schemaOf consults about a value's
+// wire form: the interface that says "not my fields", and the one implementation
+// of it whose output shape is documented.
+var (
+	jsonMarshaler = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	timeType      = reflect.TypeOf(time.Time{})
+)
+
+// isMarshaler reports whether t writes its own JSON. The pointer is checked too
+// because that is where MarshalJSON is usually declared, and encoding/json finds
+// it there for any addressable value.
+func isMarshaler(t reflect.Type) bool {
+	return t.Implements(jsonMarshaler) || reflect.PointerTo(t).Implements(jsonMarshaler)
 }
 
 // swaggerHTML is the minimal Swagger UI shell. Loads the UI from a CDN

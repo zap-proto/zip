@@ -138,6 +138,10 @@ func WithStatus(code int) OpOption {
 // addresses one resource, and an input that nests its record declares its target
 // explicitly (see the authorizer's `owned` interface) rather than having it
 // guessed out of a sub-struct an attacker also controls.
+//
+// A field names itself for the URL with `url:` and opts out with `url:"-"` — see
+// [urlFieldName]. That is what makes a route typable when its path parameter and
+// one of its body fields are the same word for two different things.
 func bindURL(in any, values map[string]string) {
 	if len(values) == 0 {
 		return
@@ -159,7 +163,10 @@ func bindURL(in any, values map[string]string) {
 		if !fv.CanSet() {
 			continue
 		}
-		name := jsonFieldName(f)
+		name := urlFieldName(f)
+		if name == "-" {
+			continue
+		}
 		for k, val := range values {
 			if strings.EqualFold(k, name) {
 				setScalar(fv, val)

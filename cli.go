@@ -162,8 +162,13 @@ func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body 
 		return args, nil
 	}
 	var flags []Flag
-	add := func(name, kind string, required bool) {
-		if name == "-" || isParam(params, name) {
+	// url is the name the URL carries the field under, which is what decides
+	// whether a flag would be a SECOND way to say what the path already says. It
+	// is not always the field's JSON name: a body field tagged `url:"-"` shares
+	// its name with a path param on purpose (the worker's source vs its name), and
+	// offering no flag for it left the command unable to send the body at all.
+	add := func(name, url, kind string, required bool) {
+		if name == "-" || isParam(params, url) {
 			return
 		}
 		flags = append(flags, Flag{
@@ -180,12 +185,12 @@ func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body 
 			if !f.IsExported() {
 				continue
 			}
-			add(jsonFieldName(f), flagType(f.Type), strings.Contains(f.Tag.Get("validate"), "required"))
+			add(jsonFieldName(f), urlFieldName(f), flagType(f.Type), strings.Contains(f.Tag.Get("validate"), "required"))
 		}
 	} else {
 		for _, f := range urlFields(t) {
 			kind, _ := f.schema["type"].(string)
-			add(f.name, specType(kind), f.required)
+			add(f.name, f.name, specType(kind), f.required)
 		}
 	}
 	// The args' help lives under the field's own json name, which is what the
