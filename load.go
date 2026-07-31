@@ -166,6 +166,22 @@ type Plugin struct {
 	// MCPPath is where this plugin serves its own MCP door, when it is not zip's
 	// default. Set it only alongside a matching MCPConfig.Path in the plugin.
 	MCPPath string
+
+	// Open declares this plugin's catalogue INCOMPLETE BY CONSTRUCTION: it also
+	// serves tools that exist because of WHO is asking — a tenant's own rows,
+	// which no build-time projection can hold. Tools stays what it is (the part
+	// that IS build-time); Open is how the rest gets onto the host's door.
+	//
+	// Given it, the host asks this plugin — and only this plugin — for the
+	// caller's own tools on a tools/list that NAMES a caller, and hands it a
+	// tools/call no catalogue claimed. An anonymous list still costs a memcpy and
+	// starts nothing: a per-caller answer needs a caller, so there is nothing to
+	// ask when nobody is asking.
+	//
+	// At most ONE plugin may be open, for the reason two may not own one tool
+	// name: an unclaimed name has to resolve somewhere, and two candidates make
+	// it ambiguous. Load refuses the second, naming the first.
+	Open bool
 }
 
 // mcpPath is where a tools/call is forwarded: the plugin's own door.
