@@ -29,8 +29,42 @@ type Crashing struct {
 // Nothing is an operation that takes no input.
 type Nothing struct{}
 
+// tenant is a per-caller tool source: the half of a door that cannot be
+// projected, because the answer depends on WHO is asking. A host that declares
+// this plugin Open asks it per caller, and this is what answers.
+type tenant struct{}
+
+func (tenant) Tools(ctx context.Context) []map[string]any {
+	org := orgOf(ctx)
+	if org == "" {
+		return nil
+	}
+	return []map[string]any{{
+		"name": org + "_own", "description": "a tool only " + org + " has",
+		"inputSchema": map[string]any{"type": "object"},
+	}}
+}
+
+func (tenant) Call(ctx context.Context, name string, _ json.RawMessage) (any, error) {
+	if org := orgOf(ctx); org != "" && name == org+"_own" {
+		return map[string]any{"ran": name, "org": org}, nil
+	}
+	return nil, zip.Errorf(404, "unknown tool: %s", name)
+}
+
+// orgKey carries the caller the door is serving, parked by the middleware below
+// the way a host's identity boundary does.
+type orgKey struct{}
+
+func orgOf(ctx context.Context) string { org, _ := ctx.Value(orgKey{}).(string); return org }
+
 func main() {
-	app := zip.New(zip.Config{AppName: "testplugin", DisableStartupMessage: true})
+	app := zip.New(zip.Config{AppName: "testplugin", DisableStartupMessage: true,
+		MCP: zip.MCPConfig{Source: tenant{}}})
+	app.Use(func(c *zip.Ctx) error {
+		c.SetContext(context.WithValue(c.Context(), orgKey{}, c.Org()))
+		return c.Continue()
+	})
 
 	// Typed, like any other route worth having: a plugin is an ordinary zip
 	// app, so its ops project into the host's document, tools and call plane
