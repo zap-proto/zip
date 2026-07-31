@@ -3,9 +3,12 @@ package zip
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	fiber "github.com/zap-proto/fiber/v3"
@@ -19,12 +22,15 @@ import (
 // orgSource is a Source whose answer depends on the caller, which is the whole
 // point of the seam: it reads the org off the context the request is served on.
 type orgSource struct {
-	calls int
+	// calls is atomic because TestConcurrentListsDoNotRace drives this fixture
+	// from 64 goroutines: a plain counter here would report a race in the TEST and
+	// hide whether the library has one.
+	calls atomic.Int64
 	args  json.RawMessage
 }
 
 func (s *orgSource) Tools(ctx context.Context) []map[string]any {
-	s.calls++
+	s.calls.Add(1)
 	org, _ := ctx.Value(orgKey{}).(string)
 	if org == "" {
 		return nil
@@ -82,8 +88,8 @@ func TestSourceToolsJoinTheList(t *testing.T) {
 	if !names["acme_search"] {
 		t.Fatalf("the caller's own tool is missing: %v", keys(names))
 	}
-	if src.calls != 1 {
-		t.Fatalf("Source.Tools called %d times, want 1", src.calls)
+	if n := src.calls.Load(); n != 1 {
+		t.Fatalf("Source.Tools called %d times, want 1", n)
 	}
 }
 
@@ -115,8 +121,8 @@ func TestNoCallerNoAsk(t *testing.T) {
 	if len(names) != 1 {
 		t.Fatalf("anonymous list must be the build-time half alone, got %v", keys(names))
 	}
-	if src.calls != 0 {
-		t.Fatalf("Source was asked %d times with no caller, want 0", src.calls)
+	if n := src.calls.Load(); n != 0 {
+		t.Fatalf("Source was asked %d times with no caller, want 0", n)
 	}
 }
 
@@ -212,4 +218,52 @@ func keys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestCallerToolsDoNotLeakBetweenCallers is the regression for the sharpest bug
+// this seam can have: the per-caller dedup writing into the FLEET's name set.
+//
+// It failed twice over, and silently both times. One tenant's tool name became
+// "already claimed" for every tenant that asked afterwards, so the second org
+// lost a capability it had — and could infer, from the absence, that someone else
+// had a tool by that name. And two lists in flight at once were two writes to one
+// map, which is a runtime FATAL that no recover() catches, on the one method an
+// MCP client calls constantly.
+func TestCallerToolsDoNotLeakBetweenCallers(t *testing.T) {
+	app := sourceApp(t, &orgSource{})
+
+	first := toolNamesFor(t, app, "acme")
+	if !first["acme_search"] {
+		t.Fatalf("acme's own tool is missing: %v", keys(first))
+	}
+	// The SAME org again, and then a different one: each must get its own tools,
+	// every time. A name consumed by the first pass is a name the second loses.
+	for i := 0; i < 3; i++ {
+		if again := toolNamesFor(t, app, "acme"); !again["acme_search"] {
+			t.Fatalf("pass %d lost the caller's own tool: %v", i, keys(again))
+		}
+	}
+	if other := toolNamesFor(t, app, "rival"); !other["rival_search"] {
+		t.Fatalf("a second tenant lost its tool to the first: %v", keys(other))
+	}
+	if other := toolNamesFor(t, app, "rival"); other["acme_search"] {
+		t.Fatalf("one tenant's tool reached another's list: %v", keys(other))
+	}
+}
+
+// TestConcurrentListsDoNotRace: run under -race, and fatal without the fix.
+func TestConcurrentListsDoNotRace(t *testing.T) {
+	app := sourceApp(t, &orgSource{})
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			org := fmt.Sprintf("org%d", i%8)
+			if names := toolNamesFor(t, app, org); !names[org+"_search"] {
+				t.Errorf("concurrent list lost %s's own tool", org)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

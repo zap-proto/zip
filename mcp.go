@@ -315,16 +315,23 @@ func (a *App) listTools(fc fiber.Ctx, req mcpRequest) json.RawMessage {
 // build-time catalogue already claims is dropped — one name is one dispatch, and
 // the projected op is the one the whole fleet agreed on.
 func (a *App) callerTools(fc fiber.Ctx) []mcpTool {
-	claimed := map[string]bool{}
+	// fleet is READ-ONLY and shared by every request; mine is this request's own.
+	// Writing the caller's names into the fleet set would be two bugs at once, and
+	// both are silent: one tenant's tool name would be "already claimed" for every
+	// tenant after it, and two concurrent lists would be concurrent writes to one
+	// map — a runtime FATAL that no recover() can catch, because tools/list is
+	// exactly the method that arrives in parallel.
+	var fleet map[string]bool
 	if cur := a.mcpNames.Load(); cur != nil {
-		claimed = *cur
+		fleet = *cur
 	}
+	mine := map[string]bool{}
 	var out []mcpTool
 	keep := func(name string, raw json.RawMessage) {
-		if name == "" || claimed[name] {
+		if name == "" || fleet[name] || mine[name] {
 			return
 		}
-		claimed[name] = true
+		mine[name] = true
 		out = append(out, mcpTool{name: name, raw: raw})
 	}
 	if src := a.cfg.MCP.Source; src != nil {
