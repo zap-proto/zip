@@ -49,7 +49,10 @@ func TestExtract_Fixture(t *testing.T) {
 	}
 
 	list := opByKey(t, p, "POST /v1/billing/invoices")
-	if !strings.HasPrefix(list.Description, "ListInvoices returns every invoice") {
+	// The doc comment reads "ListInvoices returns …" in the source, as Go
+	// requires; the projected prose drops the identifier, which belongs to
+	// Go's namespace and not the document's.
+	if !strings.HasPrefix(list.Description, "Returns every invoice") {
 		t.Errorf("description = %q", list.Description)
 	}
 	if list.Example != `{"org":"hanzo","limit":25}` {
@@ -79,6 +82,8 @@ func TestExtract_Fixture(t *testing.T) {
 	}
 
 	// An inline handler is documented by the comment above the registration.
+	// It names no function, so there is no identifier to strip — the comment
+	// is carried exactly as written.
 	void := opByKey(t, p, "DELETE /v1/billing/invoices/:id")
 	if !strings.HasPrefix(void.Description, "VoidInvoice voids an invoice") {
 		t.Errorf("inline description = %q", void.Description)
@@ -99,7 +104,7 @@ func TestExtract_Fixture(t *testing.T) {
 // an agent reads to decide whether to call it.
 func TestExtract_FieldDocsCrossPackageBoundaries(t *testing.T) {
 	op := opByKey(t, load(t, "crosspkg"), "POST /v1/workers")
-	if !strings.HasPrefix(op.Description, "ListWorkers returns every worker") {
+	if !strings.HasPrefix(op.Description, "Returns every worker") {
 		t.Errorf("description = %q", op.Description)
 	}
 	for key, want := range map[string]string{
@@ -112,6 +117,25 @@ func TestExtract_FieldDocsCrossPackageBoundaries(t *testing.T) {
 	} {
 		if got := op.Fields[key]; got != want {
 			t.Errorf("Fields[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// The identifier is dropped only when it is exactly the handler's own name —
+// stripSelf is a projection rule, not a guess about prose.
+func TestStripSelf(t *testing.T) {
+	for _, tc := range []struct{ text, name, want string }{
+		{"RevokeKey revokes the caller's key.\n", "RevokeKey", "Revokes the caller's key.\n"},
+		{"GetSQL returns one database.\n", "GetSQL", "Returns one database.\n"},
+		// A different leading word — even a camel-case one — is prose, not the name.
+		{"OAuth flows start here.\n", "Authorize", "OAuth flows start here.\n"},
+		// The name with no following space (a one-word comment) is left alone.
+		{"RevokeKey", "RevokeKey", "RevokeKey"},
+		// A possessive is not the bare identifier.
+		{"RevokeKey's twin lives elsewhere.\n", "RevokeKey", "RevokeKey's twin lives elsewhere.\n"},
+	} {
+		if got := stripSelf(tc.text, tc.name); got != tc.want {
+			t.Errorf("stripSelf(%q, %q) = %q, want %q", tc.text, tc.name, got, tc.want)
 		}
 	}
 }

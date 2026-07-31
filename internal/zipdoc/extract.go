@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/tools/go/packages"
 
@@ -363,7 +365,7 @@ func (e *extractor) handlerDoc(info *types.Info, arg ast.Expr) string {
 		}
 		if fn, ok := info.Uses[id].(*types.Func); ok {
 			if d := e.funcDecl(fn.Pos()); d != nil {
-				return d.Doc.Text()
+				return stripSelf(d.Doc.Text(), fn.Name())
 			}
 		}
 	case *ast.FuncLit:
@@ -546,6 +548,25 @@ func (e *extractor) commentAbove(pos token.Pos) string {
 		}
 	}
 	return ""
+}
+
+// stripSelf drops the leading identifier Go's doc convention requires — "RevokeKey
+// revokes …" — when the comment is projected OUT of Go's namespace, where the
+// function name is noise: an OpenAPI description, its derived summary, an MCP tool
+// description, a CLI help line. Only an exact leading match of the handler's own
+// name is dropped, so prose that merely opens with a camel-case word keeps it.
+// The source stays idiomatic Go; the document reads as prose. One transform, here,
+// because every projection downstream inherits this text.
+func stripSelf(text, name string) string {
+	rest, ok := strings.CutPrefix(text, name+" ")
+	if !ok {
+		return text
+	}
+	r, size := utf8.DecodeRuneInString(rest)
+	if r == utf8.RuneError {
+		return text
+	}
+	return string(unicode.ToUpper(r)) + rest[size:]
 }
 
 // splitDoc separates the prose from the Example:/Response: bodies.
