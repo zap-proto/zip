@@ -176,7 +176,11 @@ type App struct {
 	// running any of them — see [Plugin.Tools].
 	pluginTools []mcpTool
 	toolOwners  map[string]*plugin
-	plugMu      sync.Mutex
+	// open is the one plugin whose catalogue is INCOMPLETE by construction — the
+	// tenant half of the door, asked per caller instead of embedded. See
+	// [Plugin.Open]. At most one, so a name no catalogue claims has one owner.
+	open   *plugin
+	plugMu sync.Mutex
 
 	// mcpList is the whole tools/list array, rendered by installMCP and re-rendered
 	// by any later load: own ops ++ every plugin catalogue, sorted by name. Serving
@@ -184,6 +188,11 @@ type App struct {
 	// after Listen re-renders it while requests are reading it — nil until the door
 	// is installed, which is also how installTools knows whether to re-render.
 	mcpList atomic.Pointer[json.RawMessage]
+
+	// mcpNames is the set of names inside mcpList, stored with it so the
+	// per-caller half can tell whether a tenant tool would shadow a projected one
+	// without re-parsing the array on every request.
+	mcpNames atomic.Pointer[map[string]bool]
 
 	// The ops sibling (/healthz, /readyz, /metrics) and the listener count its
 	// readiness reports. born is the process's own clock for zip_uptime_seconds.

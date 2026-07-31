@@ -1,10 +1,12 @@
 package zip
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
 
+	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
@@ -28,6 +30,36 @@ type MCPConfig struct {
 	Path string
 	// Name is the server name reported to MCP clients (default AppName, else "zip").
 	Name string
+	// Source is the door's PER-CALLER half: the tools that exist because of who
+	// is asking, which no build-time projection can hold. Nil — the default —
+	// leaves the door exactly the typed-op projection, answered as bytes.
+	Source Source
+}
+
+// Source is the half of an MCP door that depends on the CALLER.
+//
+// A typed op is a value known at build time, so zip projects it into a tool once
+// and serves the array as bytes. A tenant's own capabilities are rows: they exist
+// because of who is asking, so they cannot be projected and cannot be cached
+// across callers. Both are tools on ONE door — this is how the second kind gets
+// there, without a second registry in front of it.
+//
+// Tools is called on every tools/list that carries a caller, so an implementation
+// answers from data it already has and never fans out. Call runs a name the
+// build-time catalogue did not claim; returning an error is reported to the model
+// as MCP isError content, exactly like a typed op's error, so a refusal is
+// something it can read and react to.
+//
+// The context is the one the request is being served on — the same value a typed
+// op receives — so an implementation reads its caller from there and never from
+// the arguments, which the caller wrote.
+type Source interface {
+	// Tools are the caller's own tool descriptors: {name, description, inputSchema},
+	// the same shape [App.MCPTools] projects.
+	Tools(ctx context.Context) []map[string]any
+	// Call runs one of them with the raw JSON arguments object and returns its
+	// JSON-encodable result.
+	Call(ctx context.Context, name string, args json.RawMessage) (any, error)
 }
 
 // mcpProtocolVersion is the MCP spec revision zip implements.
@@ -64,12 +96,23 @@ func (a *App) mcpName() string {
 // must answer it without touching a single child. A pluginTools entry is a
 // build-time catalogue, so the answer is a memcpy and the process count is zero.
 func (a *App) installMCP() {
-	if a.cfg.MCP.Disabled || (len(a.registry) == 0 && len(a.pluginTools) == 0) {
+	if a.cfg.MCP.Disabled || (len(a.registry) == 0 && len(a.pluginTools) == 0 && !a.hasCaller()) {
 		return
 	}
 	a.renderTools()
 	a.control(fiber.MethodPost, a.mcpPath(), a.handleMCP)
-	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.registry), "plugin tools", len(a.pluginTools))
+	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.registry),
+		"plugin tools", len(a.pluginTools), "per-caller", a.hasCaller())
+}
+
+// hasCaller reports that this door has a per-caller half at all — a Source of its
+// own, or an OPEN plugin to ask. When it has none, tools/list stays the memcpy it
+// was and nothing below this line runs.
+func (a *App) hasCaller() bool {
+	if a.cfg.MCP.Source != nil {
+		return true
+	}
+	return a.openPlugin() != nil
 }
 
 // renderTools re-renders the served list from the current ops + catalogues. Called
@@ -77,8 +120,9 @@ func (a *App) installMCP() {
 // plugin at run time must not serve a list frozen at boot, and the alternative
 // (rendering per request) would give back the memcpy that makes tools/list free.
 func (a *App) renderTools() {
-	list := a.composeTools()
+	list, names := a.composeTools()
 	a.mcpList.Store(&list)
+	a.mcpNames.Store(&names)
 }
 
 // mcpTool is one tool descriptor with its name lifted out, so the composed list
@@ -89,10 +133,14 @@ type mcpTool struct {
 	raw  json.RawMessage
 }
 
-// composeTools renders the whole tool array: this app's own ops plus every
-// plugin catalogue, sorted by name. One order, so a client's list is stable and
-// a committed catalogue does not churn on registration order.
-func (a *App) composeTools() json.RawMessage {
+// composeTools renders the whole build-time tool array: this app's own ops plus
+// every plugin catalogue, sorted by name. One order, so a client's list is stable
+// and a committed catalogue does not churn on registration order.
+//
+// It returns the rendered bytes AND the set of names in them, because the
+// per-caller half has to know what the build-time half already claims and reading
+// that back out of the bytes would re-parse hundreds of schemas per request.
+func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 	all := make([]mcpTool, 0, len(a.registry)+len(a.pluginTools))
 	for _, op := range a.registry {
 		b, err := json.Marshal(mcpToolOf(op))
@@ -106,14 +154,16 @@ func (a *App) composeTools() json.RawMessage {
 	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
 
 	raws := make([]json.RawMessage, len(all))
+	names := make(map[string]bool, len(all))
 	for i, t := range all {
 		raws[i] = t.raw
+		names[t.name] = true
 	}
 	b, err := json.Marshal(raws)
 	if err != nil {
-		return json.RawMessage("[]")
+		return json.RawMessage("[]"), names
 	}
-	return b
+	return b, names
 }
 
 // installTools adds one plugin's catalogue to the composed surface, refusing a
@@ -124,26 +174,34 @@ func (a *App) composeTools() json.RawMessage {
 // composition that would serve one name from two places fails at boot with both
 // names, rather than silently forwarding every call to whichever loaded first.
 func (a *App) installTools(p *plugin, tools []mcpTool) error {
-	if len(tools) == 0 {
-		return nil
+	// Refused BEFORE anything is recorded, so a rejected Load leaves the door
+	// exactly as it found it.
+	if p.spec.Open && a.open != nil {
+		return fmt.Errorf("plugin %q is already the open one — a name no catalogue claims has one owner, and two would make it ambiguous", a.open.name)
 	}
-	if a.toolOwners == nil {
-		a.toolOwners = map[string]*plugin{}
-	}
-	for i, t := range tools {
-		if held, dup := a.toolOwners[t.name]; dup {
-			for _, undo := range tools[:i] {
-				delete(a.toolOwners, undo.name)
-			}
-			return fmt.Errorf("tool %q is already served by plugin %q", t.name, held.name)
+	if len(tools) > 0 {
+		if a.toolOwners == nil {
+			a.toolOwners = map[string]*plugin{}
 		}
-		a.toolOwners[t.name] = p
+		for i, t := range tools {
+			if held, dup := a.toolOwners[t.name]; dup {
+				for _, undo := range tools[:i] {
+					delete(a.toolOwners, undo.name)
+				}
+				return fmt.Errorf("tool %q is already served by plugin %q", t.name, held.name)
+			}
+			a.toolOwners[t.name] = p
+		}
+		a.pluginTools = append(a.pluginTools, tools...)
+		// The door is already up (this Load came after Listen): re-render, so a
+		// plugin composed at run time is on the list rather than invisible until a
+		// restart.
+		if a.mcpList.Load() != nil {
+			a.renderTools()
+		}
 	}
-	a.pluginTools = append(a.pluginTools, tools...)
-	// The door is already up (this Load came after Listen): re-render, so a plugin
-	// composed at run time is on the list rather than invisible until a restart.
-	if a.mcpList.Load() != nil {
-		a.renderTools()
+	if p.spec.Open {
+		a.open = p
 	}
 	return nil
 }
@@ -192,13 +250,7 @@ func (a *App) handleMCP(fc fiber.Ctx) error {
 			"serverInfo":      map[string]any{"name": a.mcpName(), "version": a.cfg.OpenAPI.Version},
 		}))
 	case "tools/list":
-		// The pre-rendered array, verbatim: no marshal of 451 schemas per call and
-		// — the load-bearing half — no plugin touched to produce it.
-		tools := json.RawMessage("[]")
-		if cur := a.mcpList.Load(); cur != nil {
-			tools = *cur
-		}
-		return fc.JSON(mcpResult(req.ID, map[string]any{"tools": tools}))
+		return fc.JSON(mcpResult(req.ID, map[string]any{"tools": a.listTools(fc, req)}))
 	case "tools/call":
 		return a.mcpCall(fc, req)
 	case "ping":
@@ -210,6 +262,134 @@ func (a *App) handleMCP(fc fiber.Ctx) error {
 		}
 		return fc.JSON(mcpErr(req.ID, -32601, "method not found: "+req.Method))
 	}
+}
+
+// listTools answers one tools/list: the build-time array, plus the tools that
+// exist only for THIS caller.
+//
+// The build-time half stays what it was — the pre-rendered bytes, verbatim, no
+// marshal of 451 schemas and no plugin touched to produce it. A door with no
+// per-caller half returns exactly those bytes, so the memcpy that makes the
+// most-called MCP method free is untouched by this file.
+//
+// The per-caller half runs only when the request NAMES a caller, which is the
+// whole of why it can be afforded: a tenant's own tools cannot be known without
+// asking, and there is nothing to ask about when nobody is asking. An anonymous
+// probe therefore still costs a memcpy and starts no child.
+func (a *App) listTools(fc fiber.Ctx, req mcpRequest) json.RawMessage {
+	fleet := json.RawMessage("[]")
+	if cur := a.mcpList.Load(); cur != nil {
+		fleet = *cur
+	}
+	if !a.hasCaller() || fc.Get(HeaderOrg) == "" {
+		return fleet
+	}
+	mine := a.callerTools(fc)
+	if len(mine) == 0 {
+		return fleet
+	}
+	// Appended, not merged: the fleet's half is byte-identical to the artifact
+	// every projection agrees on, and re-sorting the union would re-encode it.
+	// Each half is sorted, so the answer is stable either way.
+	sort.Slice(mine, func(i, j int) bool { return mine[i].name < mine[j].name })
+	raws := make([]json.RawMessage, 0, len(mine))
+	for _, t := range mine {
+		raws = append(raws, t.raw)
+	}
+	tail, err := json.Marshal(raws)
+	if err != nil || len(fleet) < 2 || len(tail) < 2 {
+		return fleet
+	}
+	if string(fleet) == "[]" {
+		return tail
+	}
+	out := make([]byte, 0, len(fleet)+len(tail))
+	out = append(out, fleet[:len(fleet)-1]...) // drop the closing ]
+	out = append(out, ',')
+	out = append(out, tail[1:]...) // drop the opening [
+	return out
+}
+
+// callerTools is every tool that exists because of WHO is asking: this app's own
+// Source, and every OPEN plugin's answer to the same question. A name the
+// build-time catalogue already claims is dropped — one name is one dispatch, and
+// the projected op is the one the whole fleet agreed on.
+func (a *App) callerTools(fc fiber.Ctx) []mcpTool {
+	claimed := map[string]bool{}
+	if cur := a.mcpNames.Load(); cur != nil {
+		claimed = *cur
+	}
+	var out []mcpTool
+	keep := func(name string, raw json.RawMessage) {
+		if name == "" || claimed[name] {
+			return
+		}
+		claimed[name] = true
+		out = append(out, mcpTool{name: name, raw: raw})
+	}
+	if src := a.cfg.MCP.Source; src != nil {
+		for _, t := range src.Tools(fc.Context()) {
+			name, _ := t["name"].(string)
+			raw, err := json.Marshal(t)
+			if err != nil {
+				a.logger.Warn("zip mcp: caller tool has no renderable schema", "tool", name, "err", err)
+				continue
+			}
+			keep(name, raw)
+		}
+	}
+	if p := a.openPlugin(); p != nil {
+		for _, t := range a.askOpen(fc, p) {
+			keep(t.name, t.raw)
+		}
+	}
+	return out
+}
+
+// openPlugin is the plugin that declared an OPEN catalogue, or nil. At most one:
+// see installTools.
+func (a *App) openPlugin() *plugin {
+	a.plugMu.Lock()
+	defer a.plugMu.Unlock()
+	return a.open
+}
+
+// askOpen forwards this very request — fc's own tools/list message — to one open plugin and lifts the tools out
+// of its reply. The child answers as itself — its own registry, its own Source,
+// its own view of the caller the request names — so the host learns the tenant's
+// tools without holding the tenant's data.
+//
+// A child that fails contributes nothing. A tools/list is a question with a
+// partial answer available, and blanking the fleet's whole surface because one
+// plugin is down would be a far worse answer than a shorter list.
+func (a *App) askOpen(fc fiber.Ctx, p *plugin) []mcpTool {
+	client, host := p.target()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+	if err := forward(fc.Request(), resp, client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
+		a.logger.Warn("zip mcp: open plugin did not answer tools/list", "plugin", p.name, "err", err)
+		return nil
+	}
+	var env struct {
+		Result struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body(), &env); err != nil {
+		a.logger.Warn("zip mcp: open plugin sent an unreadable tools/list", "plugin", p.name, "err", err)
+		return nil
+	}
+	out := make([]mcpTool, 0, len(env.Result.Tools))
+	for _, raw := range env.Result.Tools {
+		var named struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &named); err != nil || named.Name == "" {
+			continue
+		}
+		out = append(out, mcpTool{name: named.Name, raw: raw})
+	}
+	return out
 }
 
 // MCPTools is the app's full MCP tool surface, projected from the typed-op
@@ -280,12 +460,30 @@ func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
 		if p := a.toolOwner(params.Name); p != nil {
 			return a.mcpForward(fc, req, p)
 		}
+		// Still nobody's: the name may be one that exists only for this caller,
+		// which no catalogue could have claimed. It goes to whoever offered the
+		// per-caller half of the list — this app's own Source, or the open plugin.
+		// Neither can be wrong about it: the same code that named the tool runs it.
+		if src := a.cfg.MCP.Source; src != nil {
+			out, err := src.Call(fc.Context(), params.Name, params.Arguments)
+			return a.mcpAnswer(fc, req, out, err)
+		}
+		if p := a.openPlugin(); p != nil {
+			return a.mcpForward(fc, req, p)
+		}
 		return fc.JSON(mcpErr(req.ID, -32602, "unknown tool: "+params.Name))
 	}
 
 	// No URL over MCP: a tools/call carries every argument in its JSON arguments
 	// object, so the body IS the whole input — neither query nor path binds.
 	out, err := op.invoke(fc.Context(), jsonenc.Unmarshal, params.Arguments, nil, nil)
+	return a.mcpAnswer(fc, req, out, err)
+}
+
+// mcpAnswer renders one tool result. A handler error is MCP isError content and
+// not a JSON-RPC transport error, per the spec — the model sees the failure and
+// can react. ONE renderer, so a typed op and a Source answer the same shape.
+func (a *App) mcpAnswer(fc fiber.Ctx, req mcpRequest, out any, err error) error {
 	if err != nil {
 		return fc.JSON(mcpResult(req.ID, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},
