@@ -154,6 +154,9 @@ func (e *extractor) pkg(p *packages.Package) ([]Op, error) {
 				err = cerr
 				return false
 			}
+			if !found {
+				op, found = e.raw(p.TypesInfo, call, prefixes)
+			}
 			if found {
 				ops = append(ops, op)
 			}
@@ -221,6 +224,81 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 	e.fields(args.At(0), op.Fields, seen)
 	e.fields(args.At(1), op.Fields, seen)
 	return op, true, nil
+}
+
+// raw reads one router.Get("/path", handler) — a registration the wire keeps
+// UNTYPED — into a prose-only Op.
+//
+// Some routes cannot become typed ops and it is the wire, not the author, that
+// says so: an OIDC redirect, a JWKS document, a SCIM body governed by RFC 7643, a
+// multipart form, an SSE stream. They are real operations that a paying caller
+// reaches, and until now they had nowhere at all to state what they do, so every
+// one of them published an address and silence.
+//
+// What is lifted is only the DESCRIPTION. There is no In and no Out to walk, so
+// no schemas and no field prose — which is exactly right: this pass must never
+// let an untyped route look typed. It also registers no route and invents no
+// operation; zip.Describe is keyed by "METHOD /path" and renders only where a
+// router already carries that address, so the router stays the sole authority on
+// what exists and this adds only what it MEANS.
+//
+// A registration whose path is not a constant is skipped rather than refused,
+// unlike the typed case. A typed op with a computed path is a hole in the schema
+// surface and must stop the build; an untyped one is prose that cannot be filed,
+// and refusing there would make every raw handler in the fleet a build error the
+// day this shipped.
+func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types.Object]string) (Op, bool) {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || len(call.Args) < 2 {
+		return Op{}, false
+	}
+	method, ok := verbs[sel.Sel.Name]
+	if !ok {
+		return Op{}, false
+	}
+	// The RECEIVER decides: a *zip.App or anything satisfying zip.Router is a
+	// route table. Matching on the method name alone would claim every Get in
+	// every package in the fleet.
+	if !isZipRouter(info.Types[sel.X].Type) {
+		return Op{}, false
+	}
+	lit := info.Types[call.Args[0]].Value
+	if lit == nil || lit.Kind() != constant.String {
+		return Op{}, false
+	}
+	prefix, err := routerPrefix(info, prefixes, sel.X)
+	if err != nil {
+		return Op{}, false
+	}
+	doc := e.handlerDoc(info, call, call.Args[1])
+	prose, example, response, derr := splitDoc(doc)
+	if derr != nil || strings.TrimSpace(prose) == "" {
+		return Op{}, false
+	}
+	return Op{
+		Method:      method,
+		Path:        joinPath(prefix, constant.StringVal(lit)),
+		Description: prose,
+		Example:     example,
+		Response:    response,
+		Fields:      map[string]string{},
+	}, true
+}
+
+// isZipRouter reports whether t is a route table this pass may read: *zip.App,
+// or any type zip.Router names (a group, an app, whatever a host hands down).
+func isZipRouter(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if isZipApp(t) {
+		return true
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == ZipPkg && named.Obj().Name() == "Router"
 }
 
 // groupPrefixes maps each variable that holds a router to the path prefix it was

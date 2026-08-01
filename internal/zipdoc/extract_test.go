@@ -45,8 +45,8 @@ func opByKey(t *testing.T, p Package, key string) Op {
 // the assertion.
 func TestExtract_Fixture(t *testing.T) {
 	p := load(t, "fixture")
-	if len(p.Ops) != 5 {
-		t.Fatalf("ops = %d, want 5", len(p.Ops))
+	if len(p.Ops) != 6 {
+		t.Fatalf("ops = %d, want 6", len(p.Ops))
 	}
 
 	list := opByKey(t, p, "POST /v1/billing/invoices")
@@ -126,6 +126,19 @@ func TestExtract_Fixture(t *testing.T) {
 	}
 	if refund.Response != `{"ok":true}` {
 		t.Errorf("multi-line inline response = %s", refund.Response)
+	}
+
+	// An UNTYPED route is an operation too. The wire keeps some routes raw — a
+	// file download, an OIDC redirect, a SCIM body a standard governs — and before
+	// this they had nowhere at all to say what they do, so each published an
+	// address and silence. Prose only: there is no In and no Out to walk, and this
+	// pass must never make a raw route look typed.
+	pdf := opByKey(t, p, "GET /v1/billing/invoices/:id/pdf")
+	if !strings.HasPrefix(pdf.Description, "Downloads an invoice") {
+		t.Errorf("raw description = %q", pdf.Description)
+	}
+	if len(pdf.Fields) != 0 {
+		t.Errorf("raw op carries %d field descriptions, want none", len(pdf.Fields))
 	}
 }
 
