@@ -45,8 +45,8 @@ func opByKey(t *testing.T, p Package, key string) Op {
 // the assertion.
 func TestExtract_Fixture(t *testing.T) {
 	p := load(t, "fixture")
-	if len(p.Ops) != 6 {
-		t.Fatalf("ops = %d, want 6", len(p.Ops))
+	if len(p.Ops) != 8 {
+		t.Fatalf("ops = %d, want 8", len(p.Ops))
 	}
 
 	list := opByKey(t, p, "POST /v1/billing/invoices")
@@ -139,6 +139,20 @@ func TestExtract_Fixture(t *testing.T) {
 	}
 	if len(pdf.Fields) != 0 {
 		t.Errorf("raw op carries %d field descriptions, want none", len(pdf.Fields))
+	}
+
+	// One handler at two addresses means two operations that mean the same thing,
+	// and BOTH have to say it: a consumer reading the document is as likely to
+	// arrive at the legacy spelling as at the canonical one. A service that rolled
+	// its own alias helper lost the prose for both, because the registration
+	// happens inside the helper where no pass over `router.Get(…)` can see it.
+	for _, key := range []string{
+		"POST /v1/billing/invoices/:id/reminders",
+		"POST /v1/billing/send-invoice-reminder",
+	} {
+		if got := opByKey(t, p, key).Description; !strings.HasPrefix(got, "Emails the invoice's contact") {
+			t.Errorf("alias %s description = %q", key, got)
+		}
 	}
 }
 

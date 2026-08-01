@@ -85,7 +85,16 @@ func Register(app *zip.App, store Store) {
 	})
 
 	app.Get("/v1/billing/invoices/:id/pdf", invoicePDF)
+
+	zip.Alias(app.Post, "/v1/billing/invoices/:id/reminders", "/v1/billing/send-invoice-reminder", remind)
 }
+
+// remind emails the invoice's contact a reminder that it is due.
+//
+// Registered at two addresses: the noun the document leads with, and the older
+// verb-noun spelling kept working for anything already calling it. Both are the
+// same handler, so both say this.
+func remind(c *zip.Ctx) error { return c.String(200, "sent") }
 
 // invoicePDF downloads an invoice as a printable PDF.
 //

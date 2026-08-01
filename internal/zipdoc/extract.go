@@ -159,6 +159,8 @@ func (e *extractor) pkg(p *packages.Package) ([]Op, error) {
 			}
 			if found {
 				ops = append(ops, op)
+			} else {
+				ops = append(ops, e.alias(p.TypesInfo, call, prefixes)...)
 			}
 			return true
 		})
@@ -298,6 +300,67 @@ func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types
 		Response:    response,
 		Fields:      map[string]string{},
 	}, true
+}
+
+// alias reads one zip.Alias(router.Get, canonical, legacy, handler) into TWO
+// prose-only Ops carrying the same sentence.
+//
+// Both addresses serve one handler, so both mean the same thing and both must say
+// so — a consumer that reads the document is as likely to arrive at the legacy
+// spelling as the canonical one, and finding silence there is exactly the defect
+// a legacy alias exists to avoid.
+//
+// A registration made inside a helper is invisible to a pass that reads
+// router.Get(path, handler) calls, which is why zip owns Alias: this matcher can
+// only recognise a function whose identity it knows.
+func (e *extractor) alias(info *types.Info, call *ast.CallExpr, prefixes map[types.Object]string) []Op {
+	id := calleeIdent(call.Fun)
+	if id == nil || len(call.Args) < 4 {
+		return nil
+	}
+	fn, _ := info.Uses[id].(*types.Func)
+	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != ZipPkg || fn.Name() != "Alias" {
+		return nil
+	}
+	// The registrar is a METHOD VALUE — `r.Get` — so it names both the verb and
+	// the router the paths hang off.
+	sel, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	method, ok := verbs[sel.Sel.Name]
+	if !ok || !isZipRouter(info.Types[sel.X].Type) {
+		return nil
+	}
+	prefix, err := routerPrefix(info, prefixes, sel.X)
+	if err != nil {
+		prefix = ""
+	}
+	doc := e.handlerDoc(info, call, call.Args[3])
+	prose, example, response, derr := splitDoc(doc)
+	if derr != nil || strings.TrimSpace(prose) == "" {
+		return nil
+	}
+	var out []Op
+	for _, arg := range call.Args[1:3] {
+		lit := info.Types[arg].Value
+		if lit == nil || lit.Kind() != constant.String {
+			continue
+		}
+		p := constant.StringVal(lit)
+		if prefix == "" && !strings.HasPrefix(p, "/") {
+			continue
+		}
+		out = append(out, Op{
+			Method:      method,
+			Path:        joinPath(prefix, p),
+			Description: prose,
+			Example:     example,
+			Response:    response,
+			Fields:      map[string]string{},
+		})
+	}
+	return out
 }
 
 // isZipRouter reports whether t is a route table this pass may read: *zip.App,
