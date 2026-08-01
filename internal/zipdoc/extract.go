@@ -351,23 +351,32 @@ func calleeIdent(fun ast.Expr) *ast.Ident {
 	return nil
 }
 
-// handlerDoc is the comment that documents the operation: the doc comment of the
-// named handler, or — when the handler is written inline — the comment directly
-// above the registration, which is the only place there is to write one.
+// handlerDoc is the comment that documents the operation. A handler reaches a
+// registration in exactly three shapes, and each has one place its prose can be
+// written:
+//
+//	zip.Get(app, p, ListUsers)      // named    → the function's doc comment
+//	zip.Get(app, p, listUsers(db))  // built    → the BUILDER's doc comment
+//	zip.Get(app, p, func(…) {…})    // inline   → the comment above the call
+//
+// The middle shape is the one a service reaches for the moment a handler needs a
+// dependency: a function that closes over db and returns the handler. The value
+// it returns is a closure with no declaration of its own, so the builder is not
+// merely where the prose is CONVENIENT — it is the only declaration there is.
+// Reading the callee is therefore the same rule as the named case, applied one
+// call deep, and not a second convention: in all three the sentence sits
+// immediately above the code that does the work.
+//
+// Nothing about this was a style preference. Before it, `// listProviders returns
+// every provider in the owner scope, newest first.` — already written, already
+// reviewed, sitting on the builder — reached no document at all, and the
+// operation published an operationId and silence.
 func (e *extractor) handlerDoc(info *types.Info, arg ast.Expr) string {
 	switch h := ast.Unparen(arg).(type) {
 	case *ast.Ident, *ast.SelectorExpr:
-		var id *ast.Ident
-		if s, ok := h.(*ast.SelectorExpr); ok {
-			id = s.Sel
-		} else {
-			id = h.(*ast.Ident)
-		}
-		if fn, ok := info.Uses[id].(*types.Func); ok {
-			if d := e.funcDecl(fn.Pos()); d != nil {
-				return stripSelf(d.Doc.Text(), fn.Name())
-			}
-		}
+		return e.funcDoc(info, calleeIdent(h))
+	case *ast.CallExpr:
+		return e.funcDoc(info, calleeIdent(h.Fun))
 	case *ast.FuncLit:
 		// An inline handler names no function, so only the sentence-shape
 		// evidence can apply — and it must, because the comment above the
@@ -375,6 +384,24 @@ func (e *extractor) handlerDoc(info *types.Info, arg ast.Expr) string {
 		return stripSelf(e.commentAbove(arg.Pos()), "")
 	}
 	return ""
+}
+
+// funcDoc is the doc comment of the function id names, with the leading symbol
+// stripped: godoc wants "ListUsers returns …" and a consumer reading the help
+// for this operation wants "Returns …".
+func (e *extractor) funcDoc(info *types.Info, id *ast.Ident) string {
+	if id == nil {
+		return ""
+	}
+	fn, ok := info.Uses[id].(*types.Func)
+	if !ok {
+		return ""
+	}
+	d := e.funcDecl(fn.Pos())
+	if d == nil {
+		return ""
+	}
+	return stripSelf(d.Doc.Text(), fn.Name())
 }
 
 // fields records the doc comment of every exported field of t, keyed exactly as

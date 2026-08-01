@@ -40,12 +40,13 @@ func opByKey(t *testing.T, p Package, key string) Op {
 }
 
 // The fixture is every shape of registration zipdoc has to understand at once:
-// a named handler, an inline one, a group-less app, explicit type arguments and
-// inferred ones. Its prose is the assertion.
+// a named handler, one built by a function closing over a dependency, an inline
+// one, a group-less app, explicit type arguments and inferred ones. Its prose is
+// the assertion.
 func TestExtract_Fixture(t *testing.T) {
 	p := load(t, "fixture")
-	if len(p.Ops) != 3 {
-		t.Fatalf("ops = %d, want 3", len(p.Ops))
+	if len(p.Ops) != 4 {
+		t.Fatalf("ops = %d, want 4", len(p.Ops))
 	}
 
 	list := opByKey(t, p, "POST /v1/billing/invoices")
@@ -94,6 +95,25 @@ func TestExtract_Fixture(t *testing.T) {
 	}
 	if got := void.Fields["VoidOut.ok"]; got != "OK is true once the invoice is voided." {
 		t.Errorf("Fields[VoidOut.ok] = %q", got)
+	}
+
+	// A handler BUILT by a function that closes over a dependency is documented
+	// by that function: the closure it returns has no declaration of its own, so
+	// the builder is the only place the sentence can be written. Missing this
+	// shape is not a corner case — it is how a service reaches for a handler the
+	// moment the handler needs a store, and every one of those ops published an
+	// operationId and nothing else while the sentence sat in the source.
+	pay := opByKey(t, p, "POST /v1/billing/invoices/:id/pay")
+	if !strings.HasPrefix(pay.Description, "Settles an open invoice") {
+		t.Errorf("built description = %q", pay.Description)
+	}
+	if pay.Response != `{"ok":true}` {
+		t.Errorf("built response = %s", pay.Response)
+	}
+	// The builder's In and Out are read off the INSTANTIATION, so a built handler
+	// carries field prose exactly as a named one does.
+	if got := pay.Fields["PayIn.id"]; got != "ID of the invoice to settle." {
+		t.Errorf("Fields[PayIn.id] = %q", got)
 	}
 }
 
