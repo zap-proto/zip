@@ -36,7 +36,14 @@ type registeredOp struct {
 	Tags        []string
 	InType      reflect.Type
 	OutType     reflect.Type
-	invoke      func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error)
+	// Origin names the app this op was DECLARED in when it arrived here through
+	// [App.Graft] — empty for an op this app registered itself. It qualifies the
+	// op's named types in the composed document (see schemaRegistry.origin), so
+	// two children may both call a type Application without one overwriting the
+	// other. It is the child's own AppName, never a prefix or a deployment
+	// choice: it says WHO declared the type, which is a property of the code.
+	Origin string
+	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error)
 }
 
 // decoder reads a request body into an op's In. It is a PARAMETER rather than a

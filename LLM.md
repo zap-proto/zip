@@ -58,6 +58,7 @@ any of them.
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
 | `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
+| `app.Graft(children...)` | **compose an APP in process** — the parent's router learns the child's shape, the child keeps its behaviour (v1.18.16) |
 | `zip.Call[In,Out](ctx, conn, op, in)` | invoke an op on another app; `zip.Dial`/`DialApp` gets the conn |
 | `app.Get/Post/...` | the ESCAPE HATCH: an untyped route. No op, no schema, invisible to every projection |
 
@@ -135,6 +136,102 @@ which is what the typing migration is for: converting a route to
 cannot register an op; `module.go`'s doc comment states both structural reasons
 and the one thing that would close it (an extension declaring its contract on
 `zip.Module`).
+
+## Composing an app in process — `Graft` (v1.18.16)
+
+`graft.go`. `app.Graft(child)` puts a live `*App` behind a host's router **and
+keeps its registry**. It is the fifth verb, and the one that was missing:
+`Listen` serves here, `Mount` delegates there, `Add` composes a registrar,
+`Load` composes a binary, **`Graft` composes an app**.
+
+**What it replaces, and why that was a hole.** The only prior way was
+`app.All(prefix, zip.AdaptNetHTTP(childHandler))`. `AdaptNetHTTP` takes an
+`http.Handler` and returns a closure (`adapt.go`, three lines) — so the App went
+in and a bare function came out, and the child's `registry` went with it. All
+five projections die at that closure: the document, the MCP tools, the CLI
+commands, the call plane and the `Declaration`. The host could publish only the
+wildcard it hung the closure on. hanzoai/cloud published **five path keys** for
+an identity provider holding **94 typed ops**; the other 89 existed, were typed,
+carried schema and prose, and reached no consumer.
+
+`AdaptNetHTTP` is NOT dead — it is still the right tool for a genuinely foreign
+handler (a mux, a gin engine, a reverse proxy). What died is `AdaptNetHTTP`
+applied to a `*zip.App`.
+
+**Delegation, not route-copying.** For each pattern the child declares, the
+parent registers that pattern pointing at ONE handler that runs the child's own
+router on the same fasthttp request. This is the load-bearing call:
+
+- copying the child's route handlers drops its middleware — `Declaration`
+  projects `GetRoutes(true)`, which filters `Use` entries out — and a service
+  whose whole authentication seam is `app.Use(guard)` would arrive with the
+  guard gone;
+- copying its `Use` entries too is worse: a pathless `Use` grafted onto the
+  parent gates **every route in the host binary**.
+
+Delegation has neither failure, because middleware stays inside the app that
+declared it. `graft_test.go`'s `TestGraft_MiddlewareStaysInsideTheChild` is
+that proof, both directions.
+
+It is also cheaper than what it replaces (no net/http round trip, so the
+adapter's ~5% and its dropped fasthttp user-context both go) and it **narrows**
+the surface: a wildcard swallows every unknown path under its prefix, while
+Graft registers only what the child declares, so an undeclared path falls
+through to the parent.
+
+**Six decisions, each a consequence of that one.**
+
+| | rule | why |
+|---|---|---|
+| paths | untouched | `op.Path` is already the whole absolute path; rewriting it names a route that does not exist |
+| operationIds | untouched | an id is a published SDK method name; rewriting it at compose time makes an SDK method a function of where the app is deployed |
+| registry | **copy**, with `Origin` | the parent's registry is its own value, so composing never edits what the child says about itself |
+| authorizer | the CHILD's | `op.invoke` closes over `child.authorizer`; the parent never silently re-authorizes a child's op under its own rules |
+| tags | the op's own, else `Origin` | a grafted product is a named group, not an untagged blob. Derived, never invented |
+| schema names | `<origin>.<Type>`, **always** | see below |
+
+**Schema names are qualified unconditionally, not on collision.** Qualifying only
+on collision makes a published type name a function of *who else is in the
+room*: add a schema to one app and another app's type silently renames, which
+renames an argument type in every generated SDK. It is one extra input to
+`schemaRegistry.nameFor`, which already qualified by package — not a second
+naming scheme. Qualifiers compose outermost-first: origin, then package, then an
+ordinal. An app with nothing grafted is byte-identical to before
+(`TestGraft_UngraftedDocumentIsUnchanged`).
+
+The collision is real, not hypothetical: iam and the cloud fleet each own an
+`Application` (an OAuth client, 83 props / a hiring application, 16 props) and a
+`Role` (14 props / 2 props). Unqualified, the weave refuses with
+`Conflict{Kind:"schema"}` and the fleet document does not build.
+
+**The refusal is all-or-nothing and reads the ROUTER, not the document.** Before
+registering anything, Graft checks every `METHOD pattern` each child declares
+against the parent and against its siblings; any overlap returns one error
+naming both claimants, in `claim()`'s vocabulary, and registers nothing. It
+reads `Declaration()` because the addresses that actually collide are liveness
+paths no document publishes — `GET /healthz` is the one that already caused a
+production outage when a co-mingled child answered it.
+
+**No prefix argument.** A child's paths are its own — a real identity provider
+owns three disjoint prefixes (`/v1/iam`, `/login/oauth`, `/.well-known`) and one
+prefix string cannot say that. A host that wants a child elsewhere builds it on
+a `Group` of that prefix; that is the prefixing mechanism that already exists.
+
+**Lifecycle.** Graft must run before `Listen`: the document, the tool list and
+the call plane are rendered once, from the registry, at `prepare()`. An op
+grafted after that would serve and never describe — the exact defect Graft
+exists to remove — so it refuses (`App.prepared`). It prepares the child
+(idempotent), does **not** adopt the child's control plane (`Declaration`
+excludes it, so the parent keeps its own `/docs`, MCP door and op plane), and
+adopts the child's teardown so a graft cannot leak the child's store.
+
+**When NOT to reach for it.** Graft is in-process composition of a `*zip.App`.
+A child that is a separate service over the wire (a reverse proxy, an HTTP
+client to another pod) has no `*App` here to graft; forcing one would mean
+linking that service's whole dependency graph into the host, which is the cost
+`Mount` exists to avoid. That case needs the mirror primitive — the host reads
+the child's `/.well-known/openapi.json` + `/.well-known/zip/plugin.json` across
+the wire at compose time, with the same all-or-nothing refusal. Not built.
 
 ## Calling another service — `call.go`
 
@@ -394,7 +491,11 @@ walking `properties` without resolving `$ref`.
 
 Two packages may both call a type `Config`. The registry qualifies the second
 with its package (`pkg.Config`) instead of letting it overwrite the first; before
-that both ops' `$ref`s pointed at whichever arrived last.
+that both ops' `$ref`s pointed at whichever arrived last. Since v1.18.16 the
+same rule takes one more input — the app that DECLARED the op, when the op came
+in on a `Graft` — and applies it unconditionally rather than on collision. See
+the Graft section for why on-collision is the wrong trigger for a published
+name.
 
 `flagType` (`cli.go`) reads `schemaOf` and maps the answer with `specType` — the
 SAME schema-type → flag-kind rule the spec-derived CLI uses — rather than
