@@ -1,6 +1,7 @@
 // Package fixture is a real zip service, registered every way zipdoc has to
-// understand: a named handler, an inline one, explicit type arguments and
-// inferred ones. Its committed zipdoc_gen.go is the assertion.
+// understand: a named handler, one built by a function that closes over a
+// dependency, an inline one, explicit type arguments and inferred ones. Its
+// committed zipdoc_gen.go is the assertion.
 package fixture
 
 import (
@@ -54,9 +55,10 @@ type VoidIn struct {
 }
 
 // Register wires the service. Paths are written once, here.
-func Register(app *zip.App) {
+func Register(app *zip.App, store Store) {
 	zip.Post(app, "/v1/billing/invoices", ListInvoices)
 	zip.Get(app, "/v1/billing/invoices/:id", GetInvoice)
+	zip.Post(app, "/v1/billing/invoices/:id/pay", payInvoice(store))
 
 	// VoidInvoice voids an invoice that has not been paid.
 	//
@@ -94,4 +96,28 @@ func ListInvoices(_ context.Context, in *ListIn) (*ListOut, error) {
 // Response: {"id": "inv_1", "cents": 1200, "paid": true}
 func GetInvoice(_ context.Context, in *GetIn) (*Invoice, error) {
 	return &Invoice{ID: in.ID, Cents: 1200, Paid: true}, nil
+}
+
+// Store is the dependency a handler needs and a package-level function cannot
+// close over, which is why payInvoice exists at all.
+type Store interface{ Pay(id string) bool }
+
+// PayIn addresses the invoice to pay.
+type PayIn struct {
+	// ID of the invoice to settle.
+	ID string `json:"id"`
+}
+
+// payInvoice settles an open invoice against the org's payment method and
+// answers whether the balance is now clear.
+//
+// It is built rather than declared because it needs the store, and the returned
+// closure has no declaration to carry this sentence — so the builder is where
+// the sentence lives, and where zipdoc reads it.
+//
+// Response: {"ok": true}
+func payInvoice(store Store) zip.TypedHandler[PayIn, VoidOut] {
+	return func(_ context.Context, in *PayIn) (*VoidOut, error) {
+		return &VoidOut{OK: store.Pay(in.ID)}, nil
+	}
 }
