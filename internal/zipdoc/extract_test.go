@@ -45,8 +45,8 @@ func opByKey(t *testing.T, p Package, key string) Op {
 // the assertion.
 func TestExtract_Fixture(t *testing.T) {
 	p := load(t, "fixture")
-	if len(p.Ops) != 4 {
-		t.Fatalf("ops = %d, want 4", len(p.Ops))
+	if len(p.Ops) != 5 {
+		t.Fatalf("ops = %d, want 5", len(p.Ops))
 	}
 
 	list := opByKey(t, p, "POST /v1/billing/invoices")
@@ -114,6 +114,18 @@ func TestExtract_Fixture(t *testing.T) {
 	// carries field prose exactly as a named one does.
 	if got := pay.Fields["PayIn.id"]; got != "ID of the invoice to settle." {
 		t.Errorf("Fields[PayIn.id] = %q", got)
+	}
+
+	// The comment belongs to the REGISTRATION, not to the closure literal. They
+	// are the same line only while the call fits on one — and a call carrying
+	// WithSummary/WithTags never does, which is every registration a service
+	// writes once it has anything to say about the op.
+	refund := opByKey(t, p, "POST /v1/billing/invoices/:id/refund")
+	if !strings.HasPrefix(refund.Description, "Returns a settled invoice's amount") {
+		t.Errorf("multi-line inline description = %q", refund.Description)
+	}
+	if refund.Response != `{"ok":true}` {
+		t.Errorf("multi-line inline response = %s", refund.Response)
 	}
 }
 

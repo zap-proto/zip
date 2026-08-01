@@ -204,7 +204,7 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 	}
 	path = joinPath(prefix, path)
 
-	doc := e.handlerDoc(info, call.Args[2])
+	doc := e.handlerDoc(info, call, call.Args[2])
 	prose, example, response, err := splitDoc(doc)
 	if err != nil {
 		return Op{}, false, fmt.Errorf("%s: %s %s: %w", e.load.Position(call.Pos()), method, path, err)
@@ -371,7 +371,7 @@ func calleeIdent(fun ast.Expr) *ast.Ident {
 // every provider in the owner scope, newest first.` — already written, already
 // reviewed, sitting on the builder — reached no document at all, and the
 // operation published an operationId and silence.
-func (e *extractor) handlerDoc(info *types.Info, arg ast.Expr) string {
+func (e *extractor) handlerDoc(info *types.Info, call *ast.CallExpr, arg ast.Expr) string {
 	switch h := ast.Unparen(arg).(type) {
 	case *ast.Ident, *ast.SelectorExpr:
 		return e.funcDoc(info, calleeIdent(h))
@@ -381,7 +381,14 @@ func (e *extractor) handlerDoc(info *types.Info, arg ast.Expr) string {
 		// An inline handler names no function, so only the sentence-shape
 		// evidence can apply — and it must, because the comment above the
 		// registration is written to the same convention.
-		return stripSelf(e.commentAbove(arg.Pos()), "")
+		//
+		// The comment is looked for above the REGISTRATION, not above the
+		// closure. The two are the same line only while the whole call fits on
+		// one; the moment options push the handler onto its own line — which is
+		// what any registration carrying WithSummary/WithTags looks like — the
+		// line above the closure is the `zip.Post(app, path,` line, and every
+		// sentence written above such a call was silently dropped.
+		return stripSelf(e.commentAbove(call.Pos()), "")
 	}
 	return ""
 }

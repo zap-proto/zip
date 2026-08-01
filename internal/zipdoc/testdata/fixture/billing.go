@@ -60,6 +60,20 @@ func Register(app *zip.App, store Store) {
 	zip.Get(app, "/v1/billing/invoices/:id", GetInvoice)
 	zip.Post(app, "/v1/billing/invoices/:id/pay", payInvoice(store))
 
+	// RefundInvoice returns a settled invoice's amount to the org's balance.
+	//
+	// The options push the handler onto its own line, so the comment above the
+	// REGISTRATION is the only one a human would write — and the only one there
+	// is.
+	//
+	// Response: {"ok": true}
+	zip.Post(app, "/v1/billing/invoices/:id/refund",
+		func(_ context.Context, in *PayIn) (*VoidOut, error) {
+			return &VoidOut{OK: store.Pay(in.ID)}, nil
+		},
+		zip.WithSummary("Refund a settled invoice"),
+	)
+
 	// VoidInvoice voids an invoice that has not been paid.
 	//
 	// The comment above an inline handler documents it, because there is
