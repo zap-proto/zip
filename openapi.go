@@ -87,6 +87,11 @@ func (a *App) buildOpenAPI() map[string]any {
 	})
 
 	for _, op := range ops {
+		// Whose types these are. Empty for this app's own ops, so a document
+		// with nothing grafted into it is byte-identical to the one before
+		// Graft existed.
+		reg.origin = op.Origin
+
 		path := op.Path
 		// OpenAPI uses {name} for path params; fiber uses :name. Translate.
 		path = strings.ReplaceAll(path, "/:", "/{")
@@ -449,6 +454,15 @@ type schemaRegistry struct {
 	defs   map[string]any          // name → definition
 	names  map[reflect.Type]string // type → the name it is defined under
 	refs   map[string]int          // name → how many $refs point at it
+
+	// origin is the app that DECLARED the op currently being described, when
+	// that op arrived through [App.Graft] — empty for the host's own. It
+	// qualifies the names of the types that op reaches, so a composed document
+	// can carry two apps' Application without one overwriting the other. See
+	// nameFor. Set by buildOpenAPI, once per op; a type is qualified by
+	// whichever origin reached it FIRST and keeps that name everywhere, which
+	// is what makes one type one schema across the whole document.
+	origin string
 }
 
 func newSchemaRegistry(prefix string) *schemaRegistry {
@@ -475,18 +489,32 @@ func (r *schemaRegistry) define(t reflect.Type, fields map[string]string) string
 	return name
 }
 
-// nameFor is the name t is described under: its Go name, qualified by its
-// package when a DIFFERENT type already holds that name. Two packages may both
-// call a type Config, and a registry that let the second overwrite the first
-// would publish one type's fields under the other's name — with both ops'
+// nameFor is the name t is described under: its Go name, qualified by the app
+// that declared it when it came in on a graft, and qualified by its package
+// when a DIFFERENT type already holds the name it would take. Two packages may
+// both call a type Config, and a registry that let the second overwrite the
+// first would publish one type's fields under the other's name — with both ops'
 // $refs pointing at whichever arrived last.
+//
+// The origin qualification is UNCONDITIONAL, not on collision. Qualifying only
+// on collision makes a published type name a function of who else is in the
+// room: add a schema to one app and another app's type silently renames, which
+// renames a method's argument type in every generated SDK. One rule, one extra
+// input — not a second naming scheme.
 func (r *schemaRegistry) nameFor(t reflect.Type) string {
-	base := t.Name()
+	// Qualifiers, outermost first: the app that DECLARED the type — always,
+	// when it came in on a graft — then its package, only when a different type
+	// already holds the name, then an ordinal, only when even that collides.
+	qual := ""
+	if r.origin != "" {
+		qual = r.origin + "."
+	}
+	base := qual + t.Name()
 	if _, taken := r.defs[base]; !taken {
 		return base
 	}
 	if p := t.PkgPath(); p != "" {
-		base = p[strings.LastIndexByte(p, '/')+1:] + "." + base
+		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + t.Name()
 	}
 	for name, n := base, 2; ; n++ {
 		if _, taken := r.defs[name]; !taken {

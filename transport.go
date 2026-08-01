@@ -151,6 +151,7 @@ func (a *App) prepare() {
 		a.installMCP()
 		a.installCallPlane()
 		a.installPluginRoute()
+		a.prepared.Store(true)
 	})
 }
 

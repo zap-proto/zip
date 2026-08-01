@@ -213,6 +213,11 @@ type App struct {
 	controls map[string]bool
 
 	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
+	// prepared reports whether that has happened, which sync.Once cannot be
+	// asked. [App.Graft] needs the answer: the document, the tool list and the
+	// call plane are rendered ONCE from the registry, so an op that arrives
+	// afterwards would serve and never describe.
+	prepared atomic.Bool
 }
 
 // New constructs an App with the given config. Defaults are applied
