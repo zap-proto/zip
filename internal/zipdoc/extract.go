@@ -266,9 +266,24 @@ func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types
 	if lit == nil || lit.Kind() != constant.String {
 		return Op{}, false
 	}
+	// A group assigned in this file resolves exactly. A router that ARRIVED as a
+	// parameter — `func routeFrontDoor(r zip.Router, …)`, the shape a subsystem
+	// uses to be mounted by its host — cannot: only the caller knows the prefix,
+	// and that call is usually in another file or another package.
+	//
+	// So an unresolvable router is read as mounted at the root, and ONLY for a
+	// path already written absolute. Getting that wrong costs nothing a reader can
+	// see: zip.Describe renders only where the router carries the key, so prose
+	// filed under a path nothing serves renders nowhere — the same silence as not
+	// lifting it, never a sentence attached to the wrong operation. The upside is
+	// the whole pre-auth surface of every subsystem written this way, which is
+	// otherwise the single largest undescribed set in the fleet.
 	prefix, err := routerPrefix(info, prefixes, sel.X)
 	if err != nil {
-		return Op{}, false
+		if !strings.HasPrefix(constant.StringVal(lit), "/") {
+			return Op{}, false
+		}
+		prefix = ""
 	}
 	doc := e.handlerDoc(info, call, call.Args[1])
 	prose, example, response, derr := splitDoc(doc)
