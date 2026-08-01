@@ -81,11 +81,12 @@ func TestExtract_Fixture(t *testing.T) {
 		}
 	}
 
-	// An inline handler is documented by the comment above the registration.
-	// It names no function, so there is no identifier to strip — the comment
-	// is carried exactly as written.
+	// An inline handler is documented by the comment above the registration. It
+	// names no function, so the exact-name evidence cannot apply — but the comment
+	// is written to the same convention and opens with the same kind of symbol, so
+	// the sentence shape speaks for it and the reader gets prose either way.
 	void := opByKey(t, p, "DELETE /v1/billing/invoices/:id")
-	if !strings.HasPrefix(void.Description, "VoidInvoice voids an invoice") {
+	if !strings.HasPrefix(void.Description, "Voids an invoice") {
 		t.Errorf("inline description = %q", void.Description)
 	}
 	if void.Response != `{"ok":true}` {
@@ -121,18 +122,47 @@ func TestExtract_FieldDocsCrossPackageBoundaries(t *testing.T) {
 	}
 }
 
-// The identifier is dropped only when it is exactly the handler's own name —
-// stripSelf is a projection rule, not a guess about prose.
+// The symbol is dropped on two evidences and no others: the handler's own name,
+// exactly; failing that, Go's own sentence shape. stripSelf is a projection rule,
+// not a guess about prose, so the cases that matter are the ones it must NOT
+// touch — a wrong strip damages a sentence somebody wrote, a missed one leaves it
+// as it was.
 func TestStripSelf(t *testing.T) {
 	for _, tc := range []struct{ text, name, want string }{
+		// The name, exactly — the strongest evidence, and it needs no shape.
 		{"RevokeKey revokes the caller's key.\n", "RevokeKey", "Revokes the caller's key.\n"},
 		{"GetSQL returns one database.\n", "GetSQL", "Returns one database.\n"},
+		{"Ping answers while the service is up.\n", "Ping", "Answers while the service is up.\n"},
+
+		// The convention followed against a CONCEPTUAL name: `deleteLB` carrying
+		// "DeleteLoadBalancer removes …". The majority case in a real fleet, and
+		// an exact-match rule leaves every one of them in the document.
+		{"DeleteLoadBalancer removes one of your org's load balancers.\n", "deleteLB",
+			"Removes one of your org's load balancers.\n"},
+		{"D1DatabaseList lists the databases on the account.\n", "list",
+			"Lists the databases on the account.\n"},
+		// An inline handler names no function; only the shape can speak for it.
+		{"ListAgents returns every agent in your org.\n", "", "Returns every agent in your org.\n"},
+
+		// A run of capitals is not a hump, so an acronym opening a sentence is an
+		// ordinary word: "GPUs bill …" must not become "Bill …".
+		{"GPUs bill per second while a machine runs.\n", "launch",
+			"GPUs bill per second while a machine runs.\n"},
+		{"HTTPHandler serves the raw request.\n", "raw", "HTTPHandler serves the raw request.\n"},
 		// A different leading word — even a camel-case one — is prose, not the name.
 		{"OAuth flows start here.\n", "Authorize", "OAuth flows start here.\n"},
+		// The name is the SUBJECT here; dropping it leaves "Is the CI hook".
+		{"CompleteDeployment is the CI hook for a queued release.\n", "complete",
+			"CompleteDeployment is the CI hook for a queued release.\n"},
+		// Punctuation after the second word means it is not the verb of "X does Y".
+		{"ListAgents, the paged read, answers newest first.\n", "list",
+			"ListAgents, the paged read, answers newest first.\n"},
 		// The name with no following space (a one-word comment) is left alone.
 		{"RevokeKey", "RevokeKey", "RevokeKey"},
 		// A possessive is not the bare identifier.
 		{"RevokeKey's twin lives elsewhere.\n", "RevokeKey", "RevokeKey's twin lives elsewhere.\n"},
+		// No handler name and no symbol shape: nothing to drop.
+		{"Returns every worker script, newest first.\n", "", "Returns every worker script, newest first.\n"},
 	} {
 		if got := stripSelf(tc.text, tc.name); got != tc.want {
 			t.Errorf("stripSelf(%q, %q) = %q, want %q", tc.text, tc.name, got, tc.want)

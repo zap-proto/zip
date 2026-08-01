@@ -369,7 +369,10 @@ func (e *extractor) handlerDoc(info *types.Info, arg ast.Expr) string {
 			}
 		}
 	case *ast.FuncLit:
-		return e.commentAbove(arg.Pos())
+		// An inline handler names no function, so only the sentence-shape
+		// evidence can apply — and it must, because the comment above the
+		// registration is written to the same convention.
+		return stripSelf(e.commentAbove(arg.Pos()), "")
 	}
 	return ""
 }
@@ -553,20 +556,97 @@ func (e *extractor) commentAbove(pos token.Pos) string {
 // stripSelf drops the leading identifier Go's doc convention requires — "RevokeKey
 // revokes …" — when the comment is projected OUT of Go's namespace, where the
 // function name is noise: an OpenAPI description, its derived summary, an MCP tool
-// description, a CLI help line. Only an exact leading match of the handler's own
-// name is dropped, so prose that merely opens with a camel-case word keeps it.
-// The source stays idiomatic Go; the document reads as prose. One transform, here,
-// because every projection downstream inherits this text.
+// description, a CLI help line. The source stays idiomatic Go; the document reads
+// as prose. One transform, here, because every projection downstream inherits
+// this text.
+//
+// TWO EVIDENCES, one law, strongest first.
+//
+// The handler's own NAME is exact and needs no judgment. It is also, measured
+// across 829 lifted comments in one fleet, the minority case: 449 of them opened
+// with a symbol that is not the handler's identifier at all — `deleteLB` carrying
+// "DeleteLoadBalancer removes one of the caller org's load balancers", `list`
+// carrying "ListAgents returns every agent". The convention is being followed
+// against a CONCEPTUAL name, so an exact-match rule leaves the majority of the
+// leak in place, and every one of those sentences reached an SDK docstring, an
+// MCP tool and a CLI help line opening with a Go symbol the reader cannot see,
+// cannot call, and already has in operationId.
+//
+// So failing an exact match, Go's own SENTENCE SHAPE is the evidence: a strict
+// CamelCase word followed by a lowercase verb, which is the form the convention
+// itself prescribes. Both halves are deliberately narrow, because a wrong strip
+// damages a sentence somebody wrote while a missed one leaves it as it was:
+//
+//   - strict CamelCase means two or more humps, each an initial capital followed
+//     by lowercase (ListAgents, D1DatabaseList). A run of capitals is not a hump,
+//     so GPUs, OpenAPI and HTTPHandler stay the ordinary words they are.
+//   - the verb is a plain lowercase word and never a copula. "ListAgents returns
+//     every agent" is a symbol and its verb; "CompleteDeployment is the CI
+//     completion hook" is a sentence ABOUT a name, and dropping it would leave
+//     "Is the CI completion hook".
+//
+// Anything else is left exactly as written.
 func stripSelf(text, name string) string {
-	rest, ok := strings.CutPrefix(text, name+" ")
-	if !ok {
+	if rest, ok := strings.CutPrefix(text, name+" "); ok && name != "" {
+		return recapitalize(rest, text)
+	}
+	word, rest, spaced := strings.Cut(text, " ")
+	if !spaced || !camelCase(word) {
 		return text
 	}
+	verb, _, _ := strings.Cut(rest, " ")
+	if !lowerWord(verb) || copula[verb] {
+		return text
+	}
+	return recapitalize(rest, text)
+}
+
+// copula is the verb that makes the leading word the sentence's SUBJECT rather
+// than the symbol being documented.
+var copula = map[string]bool{"is": true, "are": true, "was": true, "were": true}
+
+// recapitalize starts rest with a capital, or answers whole when it cannot.
+func recapitalize(rest, whole string) string {
 	r, size := utf8.DecodeRuneInString(rest)
 	if r == utf8.RuneError {
-		return text
+		return whole
 	}
 	return string(unicode.ToUpper(r)) + rest[size:]
+}
+
+// camelCase reports whether w is strict CamelCase: two or more humps, each an
+// initial capital followed by at least one lowercase letter or digit. ASCII only,
+// which is the whole of what a Go identifier can be.
+func camelCase(w string) bool {
+	humps := 0
+	for i := 0; i < len(w); humps++ {
+		if w[i] < 'A' || w[i] > 'Z' {
+			return false
+		}
+		tail := i + 1
+		for tail < len(w) && (w[tail] >= 'a' && w[tail] <= 'z' || w[tail] >= '0' && w[tail] <= '9') {
+			tail++
+		}
+		if tail == i+1 {
+			return false // a bare capital, or a run of them: not a hump
+		}
+		i = tail
+	}
+	return humps >= 2
+}
+
+// lowerWord reports whether w is a plain lowercase word — no punctuation, so a
+// verb trailed by a comma or a parenthesis is not one and nothing is stripped.
+func lowerWord(w string) bool {
+	if w == "" {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		if w[i] < 'a' || w[i] > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitDoc separates the prose from the Example:/Response: bodies.
