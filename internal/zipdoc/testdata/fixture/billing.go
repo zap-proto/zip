@@ -83,7 +83,16 @@ func Register(app *zip.App, store Store) {
 	zip.Delete[VoidIn, VoidOut](app, "/v1/billing/invoices/:id", func(_ context.Context, in *VoidIn) (*VoidOut, error) {
 		return &VoidOut{OK: in.ID != ""}, nil
 	})
+
+	app.Get("/v1/billing/invoices/:id/pdf", invoicePDF)
 }
+
+// invoicePDF downloads an invoice as a printable PDF.
+//
+// Untyped because the response is a file rather than JSON — the wire decides
+// that, not the author. It is still an operation somebody calls, so it still
+// says what it does.
+func invoicePDF(c *zip.Ctx) error { return c.String(200, "%PDF") }
 
 // VoidOut reports the void.
 type VoidOut struct {

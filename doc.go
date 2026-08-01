@@ -58,3 +58,25 @@ func docFor(method, path string) (Doc, bool) {
 	d, ok := docs[method+" "+path]
 	return d, ok
 }
+
+// Prose is what an operation says about itself: the sentence for a one-line
+// summary, and the whole doc comment for the long form. Absent when cmd/zipdoc
+// found no comment for that address.
+//
+// It is exported because the typed-op registry is NOT the only reader of this.
+// A host that composes several apps into one document projects its LIVE ROUTER —
+// every route, typed or not — and the untyped half has prose here and nowhere
+// else. Without this the host would have to keep its own table of strings for
+// routes it does not own, which is the duplication the whole package exists to
+// remove: the sentence belongs to the service that serves the route, and this is
+// how it travels.
+//
+// The summary is derived here, not by the caller, so every projection of one
+// operation shortens it identically.
+func Prose(method, path string) (summary, description string, ok bool) {
+	d, ok := docFor(method, path)
+	if !ok || d.Description == "" {
+		return "", "", false
+	}
+	return firstSentence(d.Description), d.Description, true
+}
