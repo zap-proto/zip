@@ -41,6 +41,23 @@ type OpTarget interface {
 // Router is the path-mounting surface shared by *App and Group.
 // All concrete routes flow through toFiberHandler — fiber.Ctx is
 // the underlying type the framework's users never see directly.
+//
+// That last sentence is why nothing here names fiber. This interface used to
+// carry `Fiber() *fiber.App` "for one-off escape", and it cost far more than it
+// bought: a Router is the type a DECORATOR implements — the whole point of
+// [OpTarget]'s note above — and a decorator wraps something, so it has no
+// *fiber.App of its own to return. Requiring one made the interface
+// unimplementable outside this package. Every real decorator either delegated
+// the method blindly (zip's own wrapRouter did exactly that) or could not
+// satisfy it at all, which is what stalled the v1.19 adoption in hanzoai/cloud
+// and hanzoai/commerce.
+//
+// The escape hatch itself was never the problem; putting it on the ABSTRACTION
+// was. It lives on the concrete [App] — see [App.Fiber] — where a caller that
+// genuinely needs the underlying router still reaches it, and where wanting it
+// forces you to hold an *App rather than quietly widening every Router in the
+// estate. Prefer [App.Routes] and [App.Test], which serve the two things
+// callers actually reached through Fiber() for.
 type Router interface {
 	// Every Router is somewhere a typed op can be declared, so `zip.Get(v1, …)`
 	// takes a Group as readily as it takes the App.
@@ -68,9 +85,6 @@ type Router interface {
 	// One mechanism covers "a scope" and "a sub-application"; frameworks that
 	// grew them separately have two.
 	Group(prefix string, handlers ...Handler) *App
-
-	// Fiber returns the underlying router for one-off escape.
-	Fiber() *fiber.App
 }
 
 // joinPath composes a group's prefix with a leaf path the way the router does,
