@@ -3,9 +3,11 @@ package zip
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	fiber "github.com/zap-proto/fiber/v3"
@@ -171,6 +173,69 @@ func (*App) component()    {}
 //	app.Get("/x", func(c *zip.Ctx) error {…})  // route method, still ...Handler
 //	app.Use(zip.H(func(c *zip.Ctx) error {…})) // bare closure at Use
 func H(h Handler) Component { return h }
+
+// Terminal marks h as a handler that ANSWERS an address, and returns it.
+//
+// A [Handler] may never terminate a request — that is the rule the three node
+// kinds encode, and the reason Use takes handlers that WRAP while an address is
+// something only a route method can say. Enforcing it needs terminality to be a
+// property the walk can READ, and a func value carries nothing a walk can read:
+// two closures are the same type, and matching on the name of the constructor
+// that built one would bless zip's own leaves and condemn nobody else's.
+//
+// So the constructor declares it, once, at the only place that knows what it
+// built. Every leaf constructor in this module goes through here —
+//
+//	func Static(fsys fs.FS, opts ...StaticOption) Handler {
+//	    return Terminal("zip.Static", func(c *Ctx) error { … })
+//	}
+//
+// — and so can a leaf constructor anywhere else, which is why this is exported.
+// The [structural] check then refuses any of them in Use position, naming what
+// and where. The handler comes back UNCHANGED and unwrapped: marking costs a
+// leaf nothing on the served path, and `app.Get("/assets/*", zip.Static(assets))`
+// is the same registration it always was.
+//
+// what names the constructor for the diagnostic ("zip.Static"), because a
+// refusal that says only "a terminal handler" leaves the reader to guess which
+// argument on the line it means.
+func Terminal(what string, h Handler) Handler {
+	if h == nil {
+		// A nil func has code pointer 0, and recording THAT would make every
+		// nil Handler in the process terminal. Nothing to mark, so mark nothing.
+		return nil
+	}
+	terminals.Store(codeOf(h), what)
+	return h
+}
+
+// terminalOf reports whether h was declared terminal, and by which constructor.
+func terminalOf(h Handler) (string, bool) {
+	what, ok := terminals.Load(codeOf(h))
+	if !ok {
+		return "", false
+	}
+	return what.(string), true
+}
+
+// terminals maps a terminal handler's CODE to the constructor that declared it.
+//
+// The identity is the closure's code pointer, because a func value is the only
+// thing there is to key on and every Handler a given constructor returns runs
+// that constructor's one closure body. Go emits a distinct function symbol per
+// closure literal and folds no two of them together, so this is an identity and
+// not a heuristic — zip.AdaptNetHTTP and zip.AdaptNetHTTPMiddleware return
+// closures with the SAME body from the same file and are distinguished
+// correctly, which is what TestUse_TerminalityIsADeclaredPropertyNotAName pins.
+// One entry covers every instance a constructor will ever hand out, including
+// ones built long after this map was last read.
+//
+// A sync.Map because a constructor runs wherever a program is assembled while a
+// build may be reducing a walk on another goroutine. It is read once per
+// middleware occurrence at build time and never on the served path.
+var terminals sync.Map // uintptr -> string
+
+func codeOf(h Handler) uintptr { return reflect.ValueOf(h).Pointer() }
 
 // Use appends components to this app's program, in order.
 //

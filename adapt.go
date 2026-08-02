@@ -40,7 +40,11 @@ import (
 // zip handlers when feasible.
 func AdaptNetHTTP(h http.Handler) Handler {
 	wrapped := adaptor.HTTPHandler(h)
-	return func(c *Ctx) error { return wrapped(c.fc) }
+	// TERMINAL: an http.Handler writes the response, so this answers whatever
+	// address it is registered at. In Use position it would answer every one of
+	// them, which is why the wildcard route above is THE spelling and this is
+	// refused at build time — see [Terminal].
+	return Terminal("zip.AdaptNetHTTP", func(c *Ctx) error { return wrapped(c.fc) })
 }
 
 // AdaptNetHTTPMiddleware wraps a stdlib middleware (func(http.Handler) http.Handler)
