@@ -255,33 +255,65 @@ func conflicts(occ []occurrence) error {
 		site callsite
 		via  string
 	}
-	held := make(map[string]claim, len(occ))
+	// Keyed by PATH, then method, because two definitions can collide without
+	// their method strings matching. App.All registers the sentinel ALL, which
+	// the router expands to every method — so "ALL /x" and "GET /x" are two keys
+	// here and ONE address out there. And fiber upper-cases a method inside
+	// register(), so a hand-written Declaration saying "get" collides at runtime
+	// with a host's Get while looking distinct to a naive key.
+	//
+	// Both mattered the moment App.claim was deleted: the prefix ledger it
+	// replaced covered exactly the mount-and-plugin case, which registers as
+	// ALL. A weaker check here would have made "the walk answers it better"
+	// false in the one place the ledger was strongest.
+	held := make(map[string]map[string]claim, len(occ))
 	var errs []error
 	for _, o := range occ {
 		r, ok := o.route()
 		if !ok {
 			continue
 		}
-		key := addrKey(r.method, o.abs(r.path))
+		method := strings.ToUpper(r.method)
+		path := addrKey(o.abs(r.path))
 		mine := claim{by: o.in.label(), site: o.site, via: o.ctx.trail.String()}
-		if prev, dup := held[key]; dup {
-			errs = append(errs, fmt.Errorf("zip: %s: declared by %q at %s (via %s) and by %q at %s (via %s)",
-				key, prev.by, prev.site, prev.via, mine.by, mine.site, mine.via))
+
+		at := held[path]
+		if at == nil {
+			at = map[string]claim{}
+			held[path] = at
+		}
+		// A concrete method collides with itself or with ALL; ALL collides with
+		// anything already at this path.
+		var prev claim
+		var dup bool
+		if method == methodAll {
+			for _, c := range at {
+				prev, dup = c, true
+				break
+			}
+		} else if c, ok := at[method]; ok {
+			prev, dup = c, true
+		} else if c, ok := at[methodAll]; ok {
+			prev, dup = c, true
+		}
+		if dup {
+			errs = append(errs, fmt.Errorf("zip: %s %s: declared by %q at %s (via %s) and by %q at %s (via %s)",
+				method, path, prev.by, prev.site, prev.via, mine.by, mine.site, mine.via))
 			continue
 		}
-		held[key] = mine
+		at[method] = mine
 	}
 	return errors.Join(errs...)
 }
 
-// addrKey is one address as the conflict check sees it: METHOD + the router's
-// own spelling of the pattern, with "/x/" and "/x" one address and not two.
-func addrKey(method, pattern string) string {
+// addrKey is one path as the conflict check sees it: the router's own spelling,
+// with "/x/" and "/x" one address and not two.
+func addrKey(pattern string) string {
 	p := normPath(pattern)
 	if len(p) > 1 {
 		p = strings.TrimSuffix(p, "/")
 	}
-	return method + " " + p
+	return p
 }
 
 // nameOr is an app's name, or fallback when it has none.

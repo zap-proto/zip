@@ -1,6 +1,10 @@
 package zip
 
-import "github.com/zap-proto/fiber/v3"
+import (
+	"fmt"
+
+	"github.com/zap-proto/fiber/v3"
+)
 
 // Middleware is a composable request transformer in the classic wrapping form:
 // given the next Handler it returns a Handler that runs around it. This is a
@@ -57,7 +61,23 @@ type wrapRouter struct {
 	wrap  Middleware
 }
 
-func (w *wrapRouter) Use(cs ...Component) Router { w.inner.Use(cs...); return w }
+// Use accepts middleware, which it wraps like any other leaf. It REFUSES a
+// definition: With composes a chain around leaves registered THROUGH it, and a
+// definition's leaves belong to the definition — wrapping them would mean
+// editing an App that other hosts may also compose. Silently composing it
+// ungated is the one thing that must not happen, since the chain people reach
+// for With to install is usually the gate.
+func (w *wrapRouter) Use(cs ...Component) Router {
+	for _, c := range cs {
+		if def, isApp := c.(*App); isApp {
+			panic(fmt.Sprintf("zip: With(...).Use(%s): a scoped chain cannot wrap a definition's "+
+				"own leaves — put the definition in a Group and scope the chain there: "+
+				"app.With(mw).Group(prefix).Use(def)", def.who()))
+		}
+	}
+	w.inner.Use(cs...)
+	return w
+}
 
 func (w *wrapRouter) Get(p string, hs ...Handler) Router {
 	w.inner.Get(p, w.wrapChain(hs)...)

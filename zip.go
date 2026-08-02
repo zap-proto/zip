@@ -26,6 +26,7 @@ package zip
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -165,13 +166,17 @@ type App struct {
 	// swapped whole and read without a lock; draft is the throwaway build that
 	// answers inspection before anything is live. buildMu serialises building —
 	// never reading. See generation.go.
-	live    atomic.Pointer[generation]
-	draft   *generation
-	draftAt uint64
+	live     atomic.Pointer[generation]
+	draft    *generation
+	draftAt  uint64
+	draftErr error
 	buildMu sync.Mutex
 	// building is set while a transaction holds a private copy of the entry list,
-	// which is the one moment a frozen App legitimately grows.
-	building bool
+	// which is the one moment a frozen App legitimately grows. ATOMIC: Include is
+	// by design called against a running system, so a second goroutine reaching
+	// Use is exactly the case the freeze exists to catch — and the check that
+	// catches it must not itself be a race.
+	building atomic.Bool
 	// control is zip's own projection routes. They belong to the BUILD, not to
 	// the program — see [App.control].
 	ctl []route
@@ -370,6 +375,14 @@ func (a *App) method(method, path string, handlers []Handler) Router {
 	// handed out. A decorator could only wrap what passed through it.
 	if len(handlers) == 0 {
 		panic("zip: route registered with no handler")
+	}
+	for i, h := range handlers {
+		// toFiberHandler wraps a nil Handler into a NON-nil closure, so fiber's
+		// own nil check passes and the nil surfaces as a segfault on a serve
+		// goroutine no recover middleware can reach. Boot, not request time.
+		if h == nil {
+			panic(fmt.Sprintf("zip: %s %s: handler %d is nil", method, normPath(path), i))
+		}
 	}
 	if a.wrap != nil {
 		handlers = append([]Handler(nil), handlers...)

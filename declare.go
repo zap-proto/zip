@@ -222,6 +222,13 @@ func (a *App) Described() (bool, error) {
 // project renders one projection to dest, atomically: a reader that finds the
 // file finds a whole document, and a failed render leaves the previous one.
 func (a *App) project(mode Projection, dest string) error {
+	// Ask whether the program is a program BEFORE writing a file that claims to
+	// describe it. An invalid build renders as an EMPTY one — 0 ops, 0 routes —
+	// so without this, `app declare` writes {"routes":[]} and exits 0, and a
+	// release pipeline ships an empty API document for a broken service.
+	if err := a.Build(); err != nil {
+		return fmt.Errorf("zip: %s: refusing to write a document for a program that does not build: %w", mode, err)
+	}
 	var v any
 	switch mode {
 	case OpenAPI:

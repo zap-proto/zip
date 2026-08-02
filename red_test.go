@@ -173,59 +173,39 @@ func TestRed_RefusedIncludeStillAdoptsTheChildsTeardown(t *testing.T) {
 // "A plugin whose patterns collide with the live set fails the build, with
 // breadcrumbs, and the old generation keeps serving" holds for collisions and
 // not for this.
-func TestRed_APanicInMaterialiseBricksTheProgram(t *testing.T) {
+func TestRed_AnUnknownMethodIsRefusedAtTheBoundary(t *testing.T) {
+	// FIXED. PURGE is a real method (Varnish, Fastly, nginx cache invalidation),
+	// so are PROPFIND and MKCOL, and a Declaration is a BUILD INPUT — JSON from
+	// another team. Any of them used to reach fiber's register() as a PANIC,
+	// which unwound past transact's rollback and left the poison in a.entries,
+	// so the next entirely valid Include panicked too.
+	//
+	// Two fixes, both needed: the rollback is deferred (so a panic anywhere in
+	// the build still restores the program), and the method is validated where
+	// the input crosses the boundary (so it is an error, like every other bad
+	// declaration, instead of a panic).
 	host := quiet("host")
-	host.Get("/ok", redOK)
-	if err := build(host); err != nil {
-		t.Fatalf("generation 0: %v", err)
-	}
-
-	// A Declaration is a BUILD INPUT — JSON handed over by another team. Nothing
-	// validates the method it names, and fiber knows only its nine. PURGE is a
-	// real method (Varnish, Fastly, nginx cache invalidation); so are PROPFIND
-	// and MKCOL. Any of them, or a typo, reaches fiber's register() as a panic.
-	bad, err := remoteApp(host, "/v1/cdn", "http://127.0.0.1:9", Declaration{
+	_, err := remoteApp(host, "/v1/cdn", "http://127.0.0.1:9", Declaration{
 		Name:   "cdn",
 		Routes: []Route{{Method: "PURGE", Pattern: "/v1/cdn/object"}},
 	})
-	if err != nil {
-		t.Fatalf("remoteApp: %v", err)
+	if err == nil {
+		t.Fatal("an unroutable method was accepted from a Declaration")
 	}
-
-	var first any
-	func() {
-		defer func() { first = recover() }()
-		if err := host.Include(bad); err != nil {
-			t.Logf("Include refused cleanly: %v", err)
+	for _, want := range []string{"PURGE", "/v1/cdn/object"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
 		}
-	}()
-	if first != nil {
-		t.Errorf("a Declaration's method panicked the build instead of failing it: %v", first)
 	}
-
-	// Whatever happened above, the host must still be composable.
-	good := quiet("good")
-	good.Get("/v1/good", redOK)
-	var second any
-	func() {
-		defer func() { second = recover() }()
-		_ = host.Include(good)
-	}()
-	if second != nil {
-		t.Errorf("the host is BRICKED: a later, valid Include panics too (%v) — "+
-			"the panic skipped generation.go:182, so a.entries still holds the poison", second)
+	// And the host is not poisoned: a later valid composition still builds.
+	ok := quiet("ok")
+	ok.Get("/fine", redOK)
+	host.Use(ok)
+	if err := build(host); err != nil {
+		t.Fatalf("the host was bricked by a refused declaration: %v", err)
 	}
 }
 
-// TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck.
-//
-// fiber upper-cases a method inside register(); zip stores route.method exactly
-// as written and conflicts() keys on that raw string. So "get /v1/thing" and
-// "GET /v1/thing" are two keys to the walk and ONE address to the router: the
-// build passes, and one of the two definitions is dead.
-//
-// Same root cause as the All/GET hole — addrKey normalises the PATH and not the
-// METHOD — and it arrives through the same door, a hand-written Declaration.
 func TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck(t *testing.T) {
 	host := quiet("host")
 	host.Get("/v1/thing", func(c *Ctx) error { return c.String(200, "host") })
@@ -273,7 +253,7 @@ func TestRed_ABuildErrorSilentlyEmptiesEveryProjection(t *testing.T) {
 	}
 
 	if got := len(a.Registry()); got == 0 {
-		t.Errorf("Registry() reports 0 ops for a program that declares 1, and returns no error — "+
+		t.Errorf("Registry() reports 0 ops for a program that declares 1, and returns no error — " +
 			"generation.go:266 discards the build error and substitutes an empty generation")
 	}
 	if d := a.Declaration(); len(d.Routes) == 0 {
@@ -399,6 +379,38 @@ func TestRed_IncludeOnAFrozenChildIsASilentNoOp(t *testing.T) {
 	}
 }
 
+// TestRed_ANilHandlerIsAcceptedAtBoot.
+//
+// App.Use filters nil Handlers (compose.go:218). The route methods do not: they
+// copy the slice, hand each element to toFiberHandler, and the resulting closure
+// is non-nil, so fiber's own nil-handler check passes too. The registration is
+// accepted and the FIRST request nil-derefs.
+//
+// router.go:95 promises the opposite in as many words: "Registering a route with
+// no handler is a programmer error and panics at boot, never at request time."
+//
+// The deref happens on a fasthttp serve goroutine, so it is not an error a
+// handler returns and not something a recover middleware can reach — it takes
+// the process down. (Deliberately not driven here; doing so kills the test
+// binary. The boot-time contract is the assertion.)
+func TestRed_ANilHandlerIsAcceptedAtBoot(t *testing.T) {
+	app := quiet("host")
+	var uninitialised Handler // e.g. a package-level middleware var, never set
+
+	accepted := false
+	func() {
+		defer func() { _ = recover() }()
+		app.Get("/x", uninitialised)
+		accepted = true
+	}()
+
+	if accepted {
+		t.Errorf(`app.Get("/x", nil) was accepted at registration — router.go:95 promises a ` +
+			`boot panic, but toFiberHandler wraps the nil into a non-nil closure and the ` +
+			`first request segfaults on a fasthttp goroutine no recover middleware can reach`)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 4. SCOPED MIDDLEWARE IS LOST (auth bypass)
 // ---------------------------------------------------------------------------
@@ -437,30 +449,31 @@ func TestRed_AScopedWithIsLostByANestedGroup(t *testing.T) {
 // wrapRouter.Use delegates straight to the inner App. Group propagates the
 // chain and OpScope propagates the chain — with the comment that dropping it
 // "is a hole, not an inconvenience" — and Use silently drops it.
-func TestRed_WithUseDropsTheGateForTheWholeSubtree(t *testing.T) {
+func TestRed_WithUseRefusesToComposeADefinitionUngated(t *testing.T) {
+	// FIXED. wrapRouter.Group propagates the chain and OpScope propagates the
+	// chain — with a comment saying dropping it "is a hole, not an
+	// inconvenience" — while Use silently dropped it. Now that Use is THE
+	// composition verb, that was the widest of the three doors.
+	//
+	// It cannot wrap the definition's leaves (they belong to the definition, and
+	// other hosts may compose the same one), so it refuses and says what to do
+	// instead. Silence was the only unacceptable answer.
 	child := quiet("child")
 	child.Get("/child/x", redOK)
 
 	app := quiet("host")
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("With(...).Use(definition) composed it ungated")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "Group") {
+			t.Errorf("refusal does not say how to scope the chain: %v", r)
+		}
+	}()
 	app.With(redGuard).Use(child)
-
-	if err := build(app); err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	if code, _ := wireGET(t, app, "/child/x"); code != 401 {
-		t.Errorf("With(...).Use(def) composed the definition UNGATED: GET /child/x = %d "+
-			"(middleware.go:60 wrapRouter.Use ignores w.wrap)", code)
-	}
 }
 
-// ---------------------------------------------------------------------------
-// 5. CONTROL PROBES — categories I claim are CLEAN. These must PASS.
-// ---------------------------------------------------------------------------
-
-// TestRed_CleanDescendAncestorAliasing: descend appends to a shared `ancestors`
-// backing array across siblings. It is safe, because every frame only ever
-// reads the prefix it was handed. A diamond (one definition reached by two
-// paths) and repeated siblings must not be mistaken for a cycle.
 func TestRed_CleanDescendAncestorAliasing(t *testing.T) {
 	shared := quiet("shared")
 	shared.Get("/shared", redOK)
