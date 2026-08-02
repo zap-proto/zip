@@ -122,6 +122,19 @@ type Config struct {
 	// budget caveat as ReadBufferSize.
 	WriteBufferSize int
 
+	// OpsAddr is where this app's ops listener binds — /healthz, /readyz and
+	// /metrics on a socket of their own, so a liveness probe never queues behind
+	// public traffic and a metrics endpoint is never on a public port. Empty
+	// means this process owns no ops listener, which is what a child composed
+	// into a host wants: the ops port belongs to the deployment, and a child's
+	// private socket is not one of the deployment's listeners (HIP-0106 §1.3(f)).
+	//
+	// It is an address like every other address zip takes, and the address names
+	// its own transport — so an ops listener a kubelet probes and Prometheus
+	// scrapes is [DefaultOpsAddr], an HTTP one. A bare ":9090" would be ZAP
+	// (DefaultScheme), which those two clients cannot speak.
+	OpsAddr string
+
 	// OpenAPI configures the auto-generated /.well-known/openapi.json
 	// served when typed handlers are registered.
 	OpenAPI OpenAPIConfig

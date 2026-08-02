@@ -1,7 +1,6 @@
 package zip
 
 import (
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,18 +14,23 @@ import (
 // listener, never on the public one: a liveness probe must not queue behind
 // public traffic, and a metrics endpoint on a public port is an information
 // leak. Before this, the paths were named by HIP-0119 and implemented by
-// nobody — OPS_PORT appeared in no Go file in the fleet — so conformance meant
-// 116 repositories about to hand-roll three routes and a listener each.
+// nobody, so conformance meant 116 repositories about to hand-roll three routes
+// and a listener each.
 //
-// It is not a separate verb. [App.Listen] brings the ops listener up when the
-// environment names one, which means:
+// It is not a separate verb. [App.Listen] brings the ops listener up when
+// [Config.OpsAddr] names one, which means:
 //
-//	standalone   the deployment sets OPS_PORT → the ops listener runs
-//	under a host the host sets no OPS_PORT    → it does not
+//	standalone   the deployment names an ops address → the ops listener runs
+//	under a host the host names none for the child   → it does not
 //
 // and that is exactly the split HIP-0106 §1.3(f) states: a child does not own
 // the ops listener, because the ops port belongs to the deployment and a
 // child's private socket is not one of the deployment's listeners.
+//
+// The address is an address, on the same footing and in the same grammar as the
+// ones [App.Listen] takes, so a binary states all of its listeners one way:
+//
+//	svc serve --zap :9653 --http http://:8000 --ops http://:9090
 
 // The ops paths, per HIP-0119 §3. They are zip's control plane on the ops app,
 // so they never appear in a [Declaration].
@@ -36,44 +40,23 @@ const (
 	MetricsPath = "/metrics"
 )
 
-// OpsPortEnv names the ops listener's port. HIP-0119 §5 spells it OPS_PORT;
-// OpsAddr also accepts a full address in ZIP_OPS_ADDR for a deployment that
-// needs to bind one interface.
-const (
-	OpsPortEnv = "OPS_PORT"
-	OpsAddrEnv = "ZIP_OPS_ADDR"
-)
-
-// DefaultOpsPort is the port HIP-0119 §1 names, stated once so a deployment's
-// manifest and a local run agree. It is NOT a fallback: see [OpsAddr].
-const DefaultOpsPort = "9090"
-
-// OpsAddr is the address this process's ops listener binds, or "" when this
-// process does not own one:
+// DefaultOpsAddr is the address HIP-0119 §1 names, stated once so a
+// deployment's manifest, a binary's flag default and a local run agree. It is
+// the value, not a fallback: [Config.OpsAddr] left empty binds nothing.
 //
-//	$ZIP_OPS_ADDR   a full address, always wins
-//	$OPS_PORT       a port, per HIP-0119 §5
-//	otherwise       "" — this process owns no ops listener
+// A default that applied itself would mean every process calling Listen tries
+// to bind this one port, and a plugin has more than one app in it (its edge app
+// and its peer app) while a test process has many — so the SECOND listener in
+// any of them dies on "address already in use", which is exactly the failure
+// HIP-0106 §2 names. The ops address is deployment configuration (HIP-0119 §5)
+// and a deployment states it; a host states none for a child, so a child
+// correctly owns none.
 //
-// There is deliberately NO fallback. A default would mean every process that
-// calls Listen tries to bind one port, and a plugin has more than one app in it
-// (its edge app and its peer app) while a test process has many — so the
-// SECOND listener in any of them dies on "address already in use", which is
-// exactly the failure HIP-0106 §2 names. The ops port is deployment
-// configuration (HIP-0119 §5) and a deployment states it; a host does not set
-// it on a child, so a child correctly owns none.
-func OpsAddr() string {
-	if a := strings.TrimSpace(os.Getenv(OpsAddrEnv)); a != "" {
-		return a
-	}
-	if p := strings.TrimSpace(os.Getenv(OpsPortEnv)); p != "" {
-		if _, err := strconv.Atoi(p); err == nil {
-			return ":" + p
-		}
-		return p
-	}
-	return ""
-}
+// It carries the http:// scheme because the two clients this surface exists for
+// — a kubelet httpGet probe and a Prometheus scrape — speak HTTP and nothing
+// else. A bare ":9090" is ZAP ([DefaultScheme]), and a probe against a ZAP
+// socket is read as a frame: "GET " arrives as frame size 1195725856.
+const DefaultOpsAddr = "http://:9090"
 
 // Ops is this app's ops sibling: a second [App] serving /healthz, /readyz and
 // /metrics and nothing else, so the public listener carries no ops surface and
@@ -156,8 +139,9 @@ func (a *App) metrics() string {
 }
 
 // serveOps brings the ops listener up alongside the public one when this
-// process owns an ops port. Called from Listen, so a plugin main ends with one
-// verb and the environment decides whether there is a second listener.
+// process owns an ops address. Called from Listen, so a plugin main ends with
+// one verb and the app's own declaration decides whether there is a second
+// listener.
 //
 // Only the PRIMARY app does this. An app's siblings (its ops app, its peer app)
 // are the same process and report through the primary's surface.
@@ -165,7 +149,7 @@ func (a *App) serveOps() {
 	if a.sibling || a.ops != nil {
 		return // a sibling serves no siblings; and Listen may be called twice
 	}
-	addr := OpsAddr()
+	addr := strings.TrimSpace(a.cfg.OpsAddr)
 	if addr == "" {
 		return
 	}
