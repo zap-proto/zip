@@ -456,7 +456,7 @@ type schemaRegistry struct {
 	refs   map[string]int          // name → how many $refs point at it
 
 	// origin is the app that DECLARED the op currently being described, when
-	// that op arrived through [App.Graft] — empty for the host's own. It
+	// that op arrived through Graft — empty for the host's own. It
 	// qualifies the names of the types that op reaches, so a composed document
 	// can carry two apps' Application without one overwriting the other. See
 	// nameFor. Set by buildOpenAPI, once per op; a type is qualified by

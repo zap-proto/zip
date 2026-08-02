@@ -774,131 +774,317 @@ this; copy that shape, not `-check ./...`.
 
 ---
 
-# Zip Composition Spec
+# The Zip specification
 
-> Status: draft, pending empirical validation (Appendix A). Binding on all
-> projections once accepted. **Working-tree only — not committed.**
+Canonical. Three documents, one dependency rule: runtime may cite language,
+deployment may cite both, never backward. The code implements this, so it is no
+longer a draft.
 
-## 1. Canonical model
+# Zip: the language
 
-A zip application is an **ordered immutable program**: a DAG of nodes in which
-each `*App` holds an ordered slice of child nodes, appended by `Use`, `Group`,
-and route-registration calls. Order is semantic. The same `*App` value may occur
-under multiple parents (a *definition* with multiple *occurrences*); each
-occurrence has its own path context. There is no mutable registry: the registry,
-the router, and every generated artifact are projections computed from the
-program. The semantic core is the occurrence stream defined by the walk contract
-(§3); the AST (§2) exists to define that stream.
+Zip is a language for describing an HTTP application. An App is the
+program. The walk is the interpreter. Everything else — serving, OpenAPI,
+SDKs, CLI, MCP, llms.txt, loaders — is a backend.
 
-**Vocabulary.** Local composition is *inclusion by reference*: nothing is
-mounted, proxied, or delegated — one interpreter walks one program, and plugin
-boundaries do not exist at interpretation time. An `*App` is a reusable
-application definition, not a server. Deployment words are reserved for actual
-deployment boundaries: `Mount` names remote delegation (Appendix B) and nothing
-else, because that is the one operation where another runtime genuinely exists.
+One principle above the rest: **the process that composed the program is
+the only authority on it.** Every backend is a reducer over the same tree.
+There is no second tool because there is no second authority.
 
-## 2. Node kinds
+This document is complete without the runtime (zip-runtime.md) or any
+loader (zip-deployment.md). If those change, this file does not.
 
-One envelope, three payload kinds: `entry{n node, site callsite}` where `node` is
-`Handler | route | *App`.
+## The program
 
-- `Handler` — appended by `Use(Handler)`. No wrapper struct: the envelope carries
-  the call site, which was the only thing a wrapper ever held.
-- `route{method, path, op}` — appended by `Get`/`Post`/etc.
-- `*App` — appended by `Use(*App)`. The entry is the **reference**; the `*App` is
-  the shared, immutable definition. `App` carries its own `prefix` (set by
-  `Group`, which creates and returns a child `*App`). One shared definition at
-  two prefixes is two `Group(...).Use(shared)` calls.
+    app := zip.New()
+    app.Use(logging)                   // middleware: wraps what follows
+    app.Get("/health", health)         // operation: answers an address
 
-`node` is an internal sealed marker; it is distinct from the public `Component`
-(route entries come from route methods, not `Use`). Every entry records its
-registration call site on the envelope, uniformly by construction — conflict
-breadcrumbs, post-freeze panics, and the lint all resolve to `file:line` pairs.
+    v1 := app.Group("/v1")             // a child App with a prefix
+    v1.Use(auth)
+    v1.Use(users)                      // another App, composed in
 
-Public surface: `Component`, `Use`, `Group`, route methods, `Listen`, `H`.
+    // hand the finished tree to a runtime: see zip-runtime.md
 
-## 3. The fold
+Three kinds of thing, and only three:
 
-One function, one exhaustive type switch. Threads prefix stack, a persistent
-middleware stack, and an origin breadcrumb. Enumerates **occurrences**.
-Maintains an ancestor set and fails on cycles with the full breadcrumb.
+- **App** — an interior node. It has a prefix (possibly empty) and an
+  ordered list of entries. An App may appear in two places: one
+  definition, two occurrences.
+- **Handler** — middleware. Wraps requests. Never answers one.
+- **operation** — a leaf. Answers one address with one typed op.
+  Registered by `Get`, `Post`, etc. Schemas come from `Op[In, Out]`.
 
-**Walk contract.** `walk(app) ([]Occurrence, error)`; `Occurrence = (def, kind,
-ctx, callsite)`, flattened preorder, all three kinds. **Definition identity is
-pointer identity** (valid because freezing makes definitions immutable). The walk
-is **pure**, **eager** (materialised once per generation build, before the swap),
-**deterministic**, and **append-stable** (order guarantee only — appending can
-still change validity).
+Order is meaning. `Use(a); Use(b)` is a program, not a set.
 
-## 4. Middleware scope
+**Constructors are not structure.** Root, group, plugin, remote, feature —
+none of these is a node kind. Anything that returns an `*App` composes:
+`Group(p)` is `New` with a prefix plus `Use`; a loader is a constructor
+defined outside the language. The walk cannot tell a loaded App from a
+written one. That is the extension point, and it is the whole extension
+point.
 
-**Snapshot semantics.** A node's environment is (a) the stack inherited at its
-inclusion site, plus (b) the middleware preceding it at its own level. Staged
-composition is supported and means what it says.
+## Composition API
 
-**Lexical anchoring**, two clauses: (a) parent-level registrations after the
-inclusion site do not affect the subtree; (b) registrations inside the subtree,
-whenever they occur before freezing, inherit the environment anchored at the
-inclusion site. Contents may grow until freeze; environment may not. Documented
-divergence from Fiber. Migration note required.
+| Name | Does |
+|---|---|
+| `New() *App` | an empty program. |
+| `Use(...Component)` | appends middleware and Apps, in order. |
+| `Group(prefix) *App` | creates and appends a child App. |
+| `Get/Post/...(path, ...Handler)` | appends an operation. Closures work directly. |
+| `zip.H(func(Ctx) error) Handler` | adapter, needed only for bare closures passed to Use. |
+| `Component` | sealed: `Handler` and `*App`. Exported so `[]zip.Component` is writable; not implementable outside zip. |
 
-## 5. Generations
+## Representation
 
-A *generation* is a sealed, immutable program; the live system is an
-`atomic.Pointer` to the current one.
+    type entry struct {
+        n    node     // Handler | operation | *App
+        site callSite // runtime.Caller at registration
+    }
 
-- **Build-then-swap, never mutate.** Changes construct N+1, run the full walk and
-  §7 validation, and swap only on success. On failure the old generation keeps
-  serving — load and reload are transactional.
-- **Requests are generation-pinned.** One pointer load at arrival; in-flight
-  requests complete on their generation. Lock-free; no lock on the hot path.
-- **Definitions freeze at first inclusion in a built generation.** Mutating a
-  frozen `*App` panics, meaning precisely "go through a generation."
-- **Lifecycle.** `Listen` builds and swaps generation 0. `Include` produces N+1
-  with new refs; `Drop(*App)` produces N+1 without the identified entries.
-- **Plugin registration by exported symbol**, not `init`-time side effects.
+`node` is a sealed marker. One type switch exists, in the walk. Call sites
+are mandatory: every error and lint finding points at file:line, and you
+cannot add call sites to entries that never recorded them. App fields are
+unexported; the entries slice is not a public surface.
 
-**Hard constraints from Go's `plugin` package:** plugins never unload; `Drop` is
-routing-level only; reload leaks the prior version's code; each version needs a
-distinct path; identical toolchain/deps; Linux/macOS only. For true unload, run
-the subsystem out-of-process behind `Mount(prefix, addr)`.
+## The walk
 
-## 6. Projections
+    walk(app, visit func(n node, ctx Ctx, site callSite) error) error
 
-Router, OpenAPI/registry, SDK, CLI, MCP — all consume the same fold; none
-inspects another's output.
+One function. All composition semantics live in it; to change scoping,
+audit one switch. Depth-first, in entry order, carrying context: prefix
+path, middleware stack (copies share structure), origin trail
+(`root → billing → /v1`). The callback takes parameters; there is no
+payload type, and nothing retains the sequence.
 
-- **Router**: keys on occurrence.
-- **Registry/OpenAPI**: paths key on occurrence; operation IDs **deterministic
-  and prefix-derived** (`v1.billing.listInvoices`), never positional.
-- **SDK/CLI/MCP**: types key on definition; surface keys on occurrence.
+- **Occurrences, not definitions.** An App referenced twice is visited
+  twice, each visit with its own context. Definition identity is the
+  pointer, valid because frozen definitions never change.
+- **Pure.** No global state. Validation is its own first pass: cycles and
+  conflicts complete, with trails, before any backend sees a visit.
+- **Deterministic.** Same program, same visit order, every time. This is
+  why every generated artifact is reproducible, and why any two backends
+  agree.
+- **Append-stable.** Adding an entry never reorders visits inside
+  previously composed subtrees. Order only: a new entry can still create
+  a conflict that fails validation.
 
-## 7. Diagnostics
+## Semantics
 
-All are reducers over the occurrence stream. Three tiers:
+**Snapshot scope.** A thing sees the middleware written before it:
 
-1. **Build-time, accumulated** (`errors.Join`): pattern conflicts, cycles. Every
-   error carries the composition breadcrumb of all parties. Never fail-fast.
-2. **Call-site panic**: mutation after freeze.
-3. **Lint (vet-style), not semantics**: middleware registered after an `*App`
-   entry on the same receiver. Intentional when co-located, a latent bug when
-   cross-scope; no fold can distinguish them, so it cannot be a rule at any tier.
+    app.Use(a)
+    app.Use(pub)      // pub sees a
+    app.Use(b)
+    app.Use(priv)     // priv sees a, b
 
-## Appendix A — Measurement protocol
+**Anchoring.** A subtree's environment is fixed where it was composed, not
+where its contents were later written:
 
-Across the consumers: find every call site passing an `*App` to `Use` (or legacy
-`Graft`/`Mount`); find subsequent `Use` calls with `Handler` arguments on the same
-receiver; classify each pair as **co-located** (same function) or **cross-scope**;
-output counts per class with file:line for the cross-scope set. Co-located hits
-validate snapshot expressiveness; cross-scope hits are the lint's target
-population. If cross-scope is zero, keep the lint anyway.
+    v1 := app.Group("/v1")
+    app.Use(auth)      // after the Group: does not reach v1
+    v1.Get("/x", h)    // late is fine; sees v1's environment, without auth
 
-## Appendix B — Open questions for the prototype
+This differs from Fiber, where registration time decides. The migration
+note ships with the release.
 
-- zipdoc dependence on graft-time ordering (byte-for-byte on the iam 4→164 case).
-- Operation-ID scheme vs existing generated SDKs; compatibility alias table.
-- `Mount` as a leaf: declaration fetched vs declared inline.
-- Closure-adapter ergonomics: `zip.H` a footnote, not a headline.
-- Generation-scoped surfaces: how consumers learn of changes.
-- Drop semantics for shared definitions.
-- Reload memory budget.
+**Middleware wraps; operations answer.** Doctrine, enforced by validation:
+a Handler may not terminate a request. `Use(static)` is refused — register
+it at its address: `app.Get("/assets/*", h)`. Use cannot say *where* a
+handler answers; that is what operations are for. Middleware with nothing
+beneath it in the subtree is refused, naming its call site.
+
+**The diamond is legal.** One definition, two references, two occurrences,
+two prefixes, possibly two environments. No backend may veto a composition
+the language permits.
+
+**IDs.** An operation's ID is the dot-joined prefix path plus its name:
+`v1.billing.invoices.list`. Names default from method and path; the ID is
+a function of position, never of composition order. After derivation, a
+collision means two different definitions claiming one name — refused,
+with both trails. Before derivation, the diamond colliding with itself is
+expected and resolved by the rule. MCP tool names, SDK symbols, and CLI
+commands all use this rule; agents and humans see one name everywhere.
+
+**Descriptions.** Prose comes from the op declaration (a description
+field, as in OpenAPI's summary) and lands in every backend alike. One
+source. Prose written anywhere else about this API is the drift bug this
+language exists to kill.
+
+## Validation errors
+
+Accumulate, with trails: conflicts, cycles, inert middleware,
+post-derivation ID collisions — joined with `errors.Join`, each carrying
+call sites. Never fail on the first. Suspicion that cannot be a rule
+(middleware after an App on the same receiver: intentional co-located,
+latent bug cross-scope, structurally identical) lints in vet; semantics
+stay expressive.
+
+## Removed, and why
+
+Graft, Mount, Attach, and two more verbs: five verbs across four metaphor
+domains compensated for registry mutation at compose time; the walk made
+the registry a backend, and the verbs had nothing left to name.
+Per-kind wrappers and the ref type: every wrapper held only a call site,
+and every entry holds one, so one envelope replaced them all.
+The Occurrence type: the callback's parameters were already the payload.
+The word survives in English; the noun died as a type.
+
+The test behind every deletion: a concept may go if removing it loses no
+semantic distinction the system depends on. Everything above survived it.
+
+---
+
+# Zip: the runtime
+
+Depends on zip-language.md. The language does not depend on this.
+
+A program describes an application; a **host** runs one:
+
+    host := zip.Serve(app, ":8080")   // build, validate, freeze, serve
+
+    host.Include(payments)            // live change: next generation
+    host.Drop(users)
+    host.Reload(billingV2)
+    host.Close()
+
+`Include`, `Drop`, and `Reload` are host verbs, not App verbs. `Use`
+extends a program; `Include` publishes a new generation of a running one.
+Different worlds, different receivers.
+
+## Freeze
+
+Definitions freeze at first inclusion in a built generation. Mutating a
+frozen App panics at the call — the stack trace is the locality. `Use`
+against a served tree panics for the same reason: a silently recorded
+entry that activates on someone's later Include is the worst outcome, so
+the hole does not exist.
+
+**A shared definition is immutable everywhere.** Changing a shared
+subsystem means building a new version and `Reload`ing it at each host
+that wants it. There is no cross-host transaction, no process-level server
+registry, no lock ordering — those were machinery for reaching into shared
+subtrees from an App-anchored Include, and moving the verb to the host
+deleted the reach. Hosts on different versions mid-rollout is ordinary
+deployment reality, not a hazard this runtime papers over.
+
+## Generations
+
+The program is immutable per generation; a host is an atomic pointer to
+the current one. Change means: build the next generation, validate
+completely (the walk's first pass), swap only on success. A bad change
+cannot take down routing — the build fails with trails and the old
+generation keeps serving. Requests pin their generation on arrival; no
+locks on the hot path; drained generations are collected.
+
+## Inspection
+
+`host.Registry()` reflects the live generation. Before any host exists,
+`Registry(app)` recomputes per call and is not goroutine-safe — mutable
+phase, caller's problem. Registry and Declaration panic with the joined
+validation error when the program does not compose — validation runs
+before any rendering, so no tool can emit an empty document and exit 0.
+CLI entry points recover, print the errors, and exit 1. Panic is
+transport there, never presentation.
+
+## Removed, and why
+
+The `building` exemption: protected no reachable legitimate path; its only
+effect was admitting a Use that raced a build. Deleted; freeze is
+unconditional.
+The process-level live-server set and the multi-server transact clauses
+(reachability filtering, creation-order locks, all-or-nothing cross-host
+commitment): existed only because Include was anchored to Apps. Host
+anchoring made the question they answered unaskable. The old guarantee's
+own text conceded cutover was never simultaneous; explicit per-host
+reloads are the same reality without the machinery.
+
+---
+
+# Zip: deployment
+
+Depends on zip-language.md and zip-runtime.md. Neither depends on this.
+Replace everything here — Go plugins with WASM, remotes with anything —
+and those documents do not change. That is the test this file must keep
+passing.
+
+## Loaders are constructors
+
+One host binary. Each plugin is one `.so`. There are no other files.
+
+- **`zip.Plugin(path) *App`** resolves at the generation build that
+  composes it: `plugin.Open`, `Lookup("Plugin") → *App`, real App spliced
+  into the tree. The constructor never fails; the build does — an
+  unloadable or conflicting plugin fails with trails and the old
+  generation keeps serving. There is no composed-but-unloaded state: if a
+  plugin is in the live surface, its code is in memory. No sidecars, no
+  stubs, no binding, no verification — the loaded App is the only claim,
+  so there is nothing to check it against. Toolchain skew is a build
+  refusal, by construction.
+- **`zip.Remote(addr) *App`** is the one place a declaration exists,
+  because you cannot dlopen across a network. The remote serves its App
+  tree as JSON — `{"zip": 1, "app": {prefix, entries: […]}}`, middleware
+  as position and name, operations with method, path, id, description,
+  schemas — and the host builds a proxy App from the response at
+  generation build. Re-fetched per build; a remote's shape change does
+  nothing until the next generation. A network message, not a file.
+  (OpenAPI cannot be this message: it is a backend — flattened, no
+  middleware, no tree — one of this JSON's outputs, not its source.)
+- **Go plugin limits (not ours):** loaded code never unloads; Drop is
+  routing-level only; reload leaks the old version's code; each version
+  needs a distinct path; toolchain and deps must match exactly; Linux and
+  macOS only. True unload exists: run it as a process and compose
+  `Use(zip.Remote(addr))`.
+
+## Generate
+
+The host binary is the generator, because it is the only process that
+knows the composition:
+
+    go build ./cloud && go build -buildmode=plugin ./plugins/...
+    ./cloud generate -o dist/
+
+    dist/openapi.yaml  dist/mcp.json  dist/llms.txt  dist/sdk/  dist/cli/
+
+`generate` builds generation 0 exactly as Serve would — opens every
+composed plugin, splices, walks, validates — then writes the backends to
+disk and exits. Not composing → joined errors, exit 1, CI red. The walk's
+determinism makes generate's output byte-identical to what the same
+composition serves at runtime. SDKs are inherently compile-time. Published
+artifacts document a release (the pinned composition CI built); runtime
+endpoints (/openapi.json, the MCP list, /llms.txt) document the live
+generation. For a pinned deployment they are identical; after a runtime
+Include they answer different questions, both correctly.
+
+## Acceptance gates
+
+1. **Consumer scan.** Across the sixteen consumers: every Use of an App
+   followed by a Handler Use on the same receiver, classified co-located
+   vs cross-scope by enclosing function. Calibrates the lint; each
+   cross-scope hit is reviewed as a candidate bug.
+2. **Reproduction.** `./cloud generate` against the composition that
+   produces today's iam 164-path document, diffed against production
+   output. Empty diff retires the old path; any diff is the bug report.
+3. **Startup budget.** Measure generation-0 build time — every
+   plugin.Open and init across the consumers' plugins. If the number is
+   unacceptable, the fallback — specified here so it never becomes a
+   second file — is the declaration JSON embedded in the `.so` as an ELF
+   section, read with `debug/elf` without executing anything, deferring
+   the Open. That machinery returns only if the measurement demands it.
+   No number, no fallback.
+
+## Still empirical
+
+- The `"zip": 1` version field on the remote declaration is a
+  compatibility surface between services; bumping it is coordinated.
+- Resident-memory growth per reload cycle; the number that makes the
+  subprocess path mandatory.
+- Migration timing: the 102-site removal in cloud stays behind the parked
+  release train; nothing here ships before it moves.
+
+## Removed, and why
+
+The sidecar, stubs, binding, poisoning, and the bind switch: all served
+one requirement — a plugin composed but not loaded — and nothing needed
+that state. Dynamic loading is Include at build time; deferred loading of
+composed plugins was the invention. The declaration JSON survives only
+where physics forces it: over the wire, for remotes.

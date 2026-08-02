@@ -45,13 +45,13 @@ import (
 type generation struct {
 	// n counts generations from 0, so a diagnostic can say which one answered.
 	n uint64
-	// occ is the walk this generation was built from — the canonical form every
-	// projection below was reduced out of.
-	occ []occurrence
+	// No occurrence slice. The generation retains what was REDUCED — the router,
+	// the ops, the host set — never the traversal they were reduced from.
 	// The projections, computed once, read without a lock forever after.
 	router *fiber.App
 	serve  fasthttp.RequestHandler
 	ops    []*registeredOp
+	hosts  []*App
 	ctl    []route
 }
 
@@ -68,18 +68,20 @@ func (a *App) Generation() (uint64, bool) {
 // installing it. Nothing it does is observable, so a failed build costs the
 // live system nothing.
 func (a *App) build() (*generation, error) {
-	occ, err := walk(a)
-	if err != nil {
+	// Validation is its own first pass: cycles and conflicts complete, with
+	// trails, before any backend sees a visit.
+	if err := verify(a); err != nil {
 		return nil, err
 	}
 	var n uint64
 	if prev := a.live.Load(); prev != nil {
 		n = prev.n + 1
 	}
-	g := &generation{n: n, occ: occ, ctl: a.ctl}
-	g.router = a.materialise(occ, g.ctl)
+	g := &generation{n: n, ctl: a.ctl}
+	g.router = a.materialise(g.ctl)
 	g.serve = g.router.Handler()
-	g.ops = composeOps(occ)
+	g.ops = a.composeOps()
+	g.hosts = a.computeHosts()
 	return g, nil
 }
 
@@ -95,10 +97,8 @@ var serving sync.Map // *App -> struct{}
 
 func (a *App) install(g *generation) {
 	site := here(1)
-	for _, o := range g.occ {
-		if child, ok := o.app(); ok {
-			child.freeze(site)
-		}
+	for _, child := range g.hosts {
+		child.freeze(site)
 	}
 	a.freeze(site)
 	a.live.Store(g)
@@ -158,7 +158,7 @@ func (a *App) Include(cs ...Component) error {
 //
 // Routing-level only. Go's plugin package has no Close and never unloads a
 // .so — code and package state live for the process. To reclaim memory, run the
-// subsystem out of process behind [App.Mount] instead; that is what the one
+// subsystem out of process behind [Mount] instead; that is what the one
 // remaining deployment verb is for.
 func (a *App) Drop(defs ...*App) error {
 	site := here(1)
@@ -179,6 +179,38 @@ func (a *App) Drop(defs ...*App) error {
 	})
 }
 
+// LOCK DISCIPLINE, and what "transactional" actually guarantees.
+//
+// transact holds ONE lock — the receiver's buildMu — for the whole edit, build
+// and swap. It never acquires a second App's buildMu, and that is not luck; it
+// rests on two invariants that are load-bearing and would otherwise look
+// accidental:
+//
+//  1. liveOrBuild returns BEFORE taking the lock when a generation is already
+//     live. affected() calls plan() on other servers, and every server it
+//     considers is live by construction (it skips any whose live pointer is
+//     nil), so those calls never reach the lock.
+//  2. install stores the live pointer BEFORE re-rendering the MCP list. The
+//     render reads Registry(), which routes through liveOrBuild — so ordering
+//     the store first is what keeps a build from waiting on the lock it already
+//     holds.
+//
+// Reverse either and you get a self-deadlock on the receiver, or a lock-order
+// inversion between two servers sharing a definition.
+//
+// THE GUARANTEE, stated exactly:
+//
+//   - Every affected server is BUILT before any is INSTALLED, so a change that
+//     is invalid anywhere installs nowhere, and Drop guarantees exactly what
+//     Include does — one path, not two.
+//   - Each install is one atomic pointer store, and a request pins its
+//     generation on arrival.
+//   - It is NOT atomic ACROSS servers. Installs happen in sequence, so two
+//     servers sharing a definition switch microseconds apart and a request can
+//     be served by the old generation on one while the new one is live on the
+//     other. Commitment, not simultaneity — which is what a rolling deployment
+//     already is.
+//
 // transact is the ONE path a composition change takes once something is live:
 // edit, build, and install — or put the entry list back exactly as it was and
 // return why. There is no partial outcome, because the edit is only ever
@@ -249,8 +281,8 @@ func (a *App) affected() []*App {
 		if seen[root] || root.live.Load() == nil {
 			return true
 		}
-		for _, o := range root.plan() {
-			if def, ok := o.app(); ok && def == a {
+		for _, def := range root.hostSet() {
+			if def == a {
 				out, seen[root] = append(out, root), true
 				return true
 			}

@@ -49,8 +49,8 @@ func TestGeneration_RefusedIncludeLeavesTheOldOneServing(t *testing.T) {
 		t.Errorf("the live generation was disturbed by a refused Include: %d %q", code, body)
 	}
 	// And nothing of the refused plugin leaked into the program.
-	for _, o := range host.plan() {
-		if app, ok := o.app(); ok && app == bad {
+	for _, def := range host.hostSet() {
+		if def == bad {
 			t.Fatal("the refused plugin is in the program")
 		}
 	}

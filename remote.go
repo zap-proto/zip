@@ -13,7 +13,7 @@ import (
 
 // A remote service is a LEAF, not a verb.
 //
-// [App.Mount] used to be one of five composition verbs and the only one that
+// [Mount] used to be one of five composition verbs and the only one that
 // pointed at another process. Under one program it stops being special: it
 // appends an App like any other inclusion, whose routes proxy and whose ops
 // forward. Every projection then reads it through the same walk — a mounted

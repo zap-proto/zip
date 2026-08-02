@@ -36,18 +36,35 @@ func billingApp() *App {
 	return b
 }
 
-func kinds(occ []occurrence) []string {
-	out := make([]string, 0, len(occ))
-	for _, o := range occ {
-		switch n := o.n.(type) {
+// mwAt reduces a traversal to the size of the middleware stack in force at one
+// absolute path, or -1 when nothing answers there.
+func mwAt(a *App, path string) int {
+	got := -1
+	_ = walk(a, func(n node, sc scope, site callsite) error {
+		if r, ok := n.(route); ok && sc.abs(r.path) == path {
+			got = sc.mw.len()
+		}
+		return nil
+	})
+	return got
+}
+
+// kinds renders a traversal as a flat list, by REDUCING it — the walk hands the
+// callback parameters and retains nothing, so a test that wants a sequence
+// builds its own.
+func kinds(a *App) []string {
+	var out []string
+	_ = walk(a, func(n node, sc scope, site callsite) error {
+		switch v := n.(type) {
 		case Handler:
 			out = append(out, "mw")
 		case route:
-			out = append(out, n.method+" "+o.abs(n.path))
+			out = append(out, v.method+" "+sc.abs(v.path))
 		case *App:
-			out = append(out, "app:"+n.label()+"@"+o.ctx.prefix)
+			out = append(out, "app:"+v.label()+"@"+sc.prefix)
 		}
-	}
+		return nil
+	})
 	return out
 }
 
@@ -69,12 +86,8 @@ func TestWalk_OrderIsProgramOrder(t *testing.T) {
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // authz
 	root.Get("/late", func(c *Ctx) error { return nil })
 
-	occ, err := walk(root)
-	if err != nil {
-		t.Fatalf("walk: %v", err)
-	}
 	want := []string{"mw", "app:users@", "GET /users", "mw", "GET /late"}
-	got := kinds(occ)
+	got := kinds(root)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("walk order:\n got %v\nwant %v", got, want)
 	}
@@ -91,10 +104,10 @@ func TestWalk_AppendIsStable(t *testing.T) {
 
 	root := quiet("root")
 	root.Use(a)
-	before := kinds(mustWalk(t, root))
+	before := mustWalk(t, root)
 
 	root.Use(b)
-	after := kinds(mustWalk(t, root))
+	after := mustWalk(t, root)
 
 	if len(after) <= len(before) {
 		t.Fatalf("appending b did not add occurrences: %v -> %v", before, after)
@@ -115,9 +128,9 @@ func TestWalk_IsDeterministic(t *testing.T) {
 	root.Use(H(func(c *Ctx) error { return nil }))
 	root.Group("/v1").Use(billingApp())
 
-	first := kinds(mustWalk(t, root))
+	first := mustWalk(t, root)
 	for i := 0; i < 5; i++ {
-		if got := kinds(mustWalk(t, root)); strings.Join(got, ",") != strings.Join(first, ",") {
+		if got := mustWalk(t, root); strings.Join(got, ",") != strings.Join(first, ",") {
 			t.Fatalf("walk %d differs:\n %v\n %v", i, got, first)
 		}
 	}
@@ -137,13 +150,12 @@ func build(a *App) error {
 	return nil
 }
 
-func mustWalk(t *testing.T, a *App) []occurrence {
+func mustWalk(t *testing.T, a *App) []string {
 	t.Helper()
-	occ, err := walk(a)
-	if err != nil {
-		t.Fatalf("walk: %v", err)
+	if err := verify(a); err != nil {
+		t.Fatalf("verify: %v", err)
 	}
-	return occ
+	return kinds(a)
 }
 
 // ── snapshot semantics ──────────────────────────────────────────────────────
@@ -163,17 +175,13 @@ func TestSnapshot_ParentMiddlewareAfterInclusionDoesNotReachTheSubtree(t *testin
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // written AFTER v1 was included
 	v1.Get("/x", func(c *Ctx) error { return nil })         // written after that
 
-	for _, o := range mustWalk(t, root) {
-		r, ok := o.route()
-		if !ok || o.abs(r.path) != "/v1/x" {
-			continue
-		}
-		if n := o.ctx.mw.len(); n != 0 {
-			t.Fatalf("/v1/x sees %d middleware; the parent's later Use reached into the subtree", n)
-		}
-		return
+	switch n := mwAt(root, "/v1/x"); n {
+	case -1:
+		t.Fatal("/v1/x not found in the walk")
+	case 0: // correct: the parent's later Use did not reach in
+	default:
+		t.Fatalf("/v1/x sees %d middleware; the parent's later Use reached into the subtree", n)
 	}
-	t.Fatal("/v1/x not found in the walk")
 }
 
 // TestSnapshot_LateSubtreeRegistrationInheritsTheAnchoredStack is clause (b):
@@ -188,17 +196,9 @@ func TestSnapshot_LateSubtreeRegistrationInheritsTheAnchoredStack(t *testing.T) 
 	root.Get("/other", func(c *Ctx) error { return nil })
 	v1.Get("/late", func(c *Ctx) error { return nil }) // written last, still in v1
 
-	for _, o := range mustWalk(t, root) {
-		r, ok := o.route()
-		if !ok || o.abs(r.path) != "/v1/late" {
-			continue
-		}
-		if n := o.ctx.mw.len(); n != 2 {
-			t.Fatalf("/v1/late sees %d middleware, want 2 (root's, anchored, + the group's)", n)
-		}
-		return
+	if n := mwAt(root, "/v1/late"); n != 2 {
+		t.Fatalf("/v1/late sees %d middleware, want 2 (root's, anchored, + the group's)", n)
 	}
-	t.Fatal("/v1/late not found in the walk")
 }
 
 // TestLint_StagedCompositionIsReportedNotRefused. Middleware appended after an
