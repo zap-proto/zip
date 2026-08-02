@@ -20,88 +20,35 @@ import (
 // router expands it; [App.Declaration] reads the expansion back off the router.
 const methodAll = "ALL"
 
-// plan is the occurrence slice for this app, memoised once the app is sealed.
-//
-// Sealed: computed exactly once under sync.Once, so [App.Registry] is race-free
-// from serving goroutines — the OpenAPI endpoint and the MCP tool listing both
-// call it per request — with no mutex on the served path.
-//
-// Unsealed: recomputed every call, and deliberately does NOT seal. Sealing on
-// read would mean a codegen step, a test, or a `zipdoc` run turns the next
-// perfectly legitimate Use into a panic about a seal nobody asked for.
-func (a *App) plan() ([]occurrence, error) {
-	if a.sealed.Load() {
-		a.planOnce.Do(func() { a.planned, a.planErr = walk(a) })
-		return a.planned, a.planErr
-	}
-	return walk(a)
-}
-
-// seal ends composition and is the ONE primitive that does so.
-//
-// Any entry point that begins RUNTIME EXECUTION calls this — [App.Listen] does
-// today, and a future Serve, Run or Handler entry point calls this rather than
-// a copy of it, which is the whole reason it is factored out of Listen. It is
-// deliberately not exported and deliberately not called by any inspection path.
-//
-// Sealing PROPAGATES across the entire reachable graph, not just the app it was
-// called on. Sealing only the root would leave
-//
-//	root.Use(users); go root.Listen(); users.Use(admin)
-//
-// racing exactly as before: the child is reachable, so the child is frozen.
-// Sealed is MONOTONIC, so a definition already sealed under one parent and then
-// included under another is fine — mount-after-seal is allowed, mutate-after-seal
-// is not.
-func (a *App) seal(site callsite) error {
-	occ, err := walk(a)
-	if err != nil {
-		return err
-	}
-	for _, o := range occ {
-		if child, ok := o.app(); ok {
-			child.markSealed(site)
-		}
-	}
-	a.markSealed(site)
-	// The walk that validated IS the plan; sealing must not pay for a second one.
-	a.planOnce.Do(func() { a.planned, a.planErr = occ, nil })
-	return nil
-}
-
-func (a *App) markSealed(site callsite) {
-	if a.sealed.CompareAndSwap(false, true) {
-		a.sealSite = site
-	}
-}
-
-// Sealed reports whether composition has ended for this app.
-func (a *App) Sealed() bool { return a.sealed.Load() }
+// plan is the occurrence slice the live generation was built from, or a fresh
+// walk when nothing is live yet.
+func (a *App) plan() []occurrence { return a.liveOrBuild().occ }
 
 // Registry is the op registry as a PROJECTION: every typed op in the
 // composition, at the path and under the id its occurrence gives it.
 //
-// This is the value that replaced five verbs with one. It used to be a field
+// This is the value that replaced five verbs with one. It used to be a FIELD
 // that [App.Graft] appended to at compose time, which is why composing an app
 // needed a verb of its own and why type-erasing one into an http.Handler
 // destroyed the OpenAPI document, the MCP tool list, the CLI commands, the
 // by-name call plane and the [Declaration] all at once. A projection cannot be
 // destroyed by composition, because composition no longer writes it.
 //
+// Lock-free once a generation is live — it is read from serving goroutines by
+// the OpenAPI endpoint and the MCP tool listing, on every request.
+//
 // Keys on the OCCURRENCE for surface (path, operationId, tags) and on the
 // DEFINITION for types: the *registeredOp's InType/OutType are the definition's
 // own reflect.Types, so one Invoice struct included twice is one schema, not
 // two identical copies under two names.
-func (a *App) Registry() []*registeredOp {
-	if a.sealed.Load() {
-		a.regOnce.Do(func() { a.reg = a.composeOps() })
-		return a.reg
-	}
-	return a.composeOps()
-}
+func (a *App) Registry() []*registeredOp { return a.liveOrBuild().ops }
 
-func (a *App) composeOps() []*registeredOp {
-	occ, _ := a.plan() // a conflict does not stop enumeration; seal reports it
+// router returns the live generation's router, building a draft if nothing is
+// live yet. It never installs — see [App.liveOrBuild].
+func (a *App) router() *fiber.App { return a.liveOrBuild().router }
+
+// composeOps reduces a walk to the op registry.
+func composeOps(occ []occurrence) []*registeredOp {
 	out := make([]*registeredOp, 0, len(occ))
 	for _, o := range occ {
 		r, ok := o.route()
@@ -131,36 +78,10 @@ func (a *App) composeOps() []*registeredOp {
 	return out
 }
 
-// router returns the materialised fiber router, building it if the program has
-// moved since it was last built.
-//
-// Materialisation is a reducer like any other. It is rebuilt rather than
-// patched, because a program is an ordered whole: an entry appended in the
-// middle of a subtree has to land in the middle, and a router that could only
-// be appended to would put it at the end.
-//
-// Two things this has to get right, both found by -race rather than by reading:
-//
-//   - Building on a READ is a write, and reads are concurrent. Before, the
-//     router was constructed in New and never written again, so any number of
-//     goroutines could call Fiber(); now a stale build repairs itself and that
-//     repair needs the lock. It is not on the served path — Listen captures
-//     Handler() once — so the lock costs nothing that matters.
-//   - The version counter is PROCESS-wide, because an append to a child changes
-//     a parent's meaning and a child does not know its parents. So a sealed
-//     app must stop consulting it, or an unrelated App composing anything at
-//     all would rebuild this one's router for no reason.
-func (a *App) router() *fiber.App {
-	a.buildMu.Lock()
-	defer a.buildMu.Unlock()
-	if a.fiber != nil && (a.sealed.Load() || a.builtAt == version.Load()) {
-		return a.fiber
-	}
-	a.materialise(version.Load())
-	return a.fiber
-}
-
-// materialise replays the occurrence slice onto a fresh router, in order.
+// materialise replays an occurrence slice onto a fresh router, in order, and
+// RETURNS it. It is pure with respect to the App — the caller decides whether
+// the result becomes a generation — which is what lets a failed build be
+// discarded without the live system ever having seen it.
 //
 // The replay IS the semantics, because this fiber fork resolves same-run routes
 // by SPECIFICITY and treats every Use as a barrier between runs. Flattened
@@ -184,8 +105,7 @@ func (a *App) router() *fiber.App {
 //     the subtree's routes keeps it inside the definition that declared it, and
 //     costs the definition's middleware its coverage of unmatched paths — a
 //     definition does not answer for addresses it does not declare.
-func (a *App) materialise(v uint64) {
-	occ, _ := a.plan()
+func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
 	f := fiber.New(a.fiberConfig())
 	for _, o := range occ {
 		switch n := o.n.(type) {
@@ -194,52 +114,26 @@ func (a *App) materialise(v uint64) {
 				f.Use(toFiberHandler(a, n))
 			}
 		case route:
-			a.install(f, o.ctx.prefix, o.ctx.mw.included(), n)
+			a.installRoute(f, o.ctx.prefix, o.ctx.mw.included(), n)
 		}
 	}
-	// zip's OWN routes go on last, and are not entries at all — see
-	// [App.installControl].
-	for _, c := range a.control_ {
-		a.install(f, "", nil, c)
+	// zip's OWN projection routes go on last, and are not entries at all: a
+	// control route SERVES what the program computes, so putting it in the
+	// program would make rendering a projection a mutation, and would make it
+	// inheritable by any host that included this definition.
+	for _, c := range ctl {
+		a.installRoute(f, "", nil, c)
 	}
-	a.fiber = f
-	a.builtAt = v
+	return f
 }
 
-// installControl registers one of zip's own projection routes — the document,
-// the docs page, the MCP door, the op plane, the declaration.
-//
-// These are NOT entries, and that is the whole point. A control route is a
-// PROJECTION of the program (it serves what the program computes), so putting
-// it in the program made two things wrong at once:
-//
-//   - it made rendering a projection a MUTATION, so sealing the program and
-//     then asking it for its document panicked — [App.prepare] installs these,
-//     and a projection must be readable after the seal;
-//   - it made them inheritable. Inclusion reads a definition's whole program,
-//     so a definition that had ever rendered its own document would hand the
-//     host ITS document at the host's well-known path, and the composition
-//     would publish the part as if it were the whole. That needed a special
-//     case in the walk; belonging to the build instead, it needs none.
-//
-// They are replayed after the entries on every materialisation, which is the
-// same position they have always occupied — prepare() has always run last.
-func (a *App) installControl(r route) {
-	a.buildMu.Lock()
-	defer a.buildMu.Unlock()
-	a.control_ = append(a.control_, r)
-	if a.fiber != nil {
-		a.install(a.fiber, "", nil, r)
-	}
-}
-
-// install puts one route on one router: its absolute path, its subtree's
+// installRoute puts one route on one router: its absolute path, its subtree's
 // middleware composed in front of it, then the handler the definition wrote.
 //
 // fiber runs a route's handlers in ARGUMENT order and advances through them on
 // Next(), which is the same rule zip's own registration chain already uses — so
 // composed middleware is passed as leading arguments and needs no wrapper type.
-func (a *App) install(f *fiber.App, prefix string, mw []Handler, r route) {
+func (a *App) installRoute(f *fiber.App, prefix string, mw []Handler, r route) {
 	p := joinPath(prefix, r.path)
 	args := make([]any, 0, len(mw)+len(r.chain)+1)
 	for _, h := range mw {
@@ -259,6 +153,7 @@ func (a *App) install(f *fiber.App, prefix string, mw []Handler, r route) {
 	}
 	f.Add([]string{r.method}, p, args[0], args[1:]...)
 }
+
 
 // addRoute is the ONE place a route entry is appended, so every route method,
 // every typed registration and zip's own control plane record the same thing in
@@ -288,7 +183,7 @@ func (a *App) addRoute(site callsite, r route) {
 // Reported per receiver, naming the included app, the middleware, and both
 // sites.
 func (a *App) Lint() []string {
-	occ, _ := a.plan()
+	occ := a.plan()
 	seen := map[*App]bool{}
 	var out []string
 	for _, o := range occ {

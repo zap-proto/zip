@@ -123,6 +123,20 @@ func TestWalk_IsDeterministic(t *testing.T) {
 	}
 }
 
+// build is what every test that needs a live program calls: it is exactly what
+// Listen does, minus the listener — construct generation N+1, validate it, and
+// install it only if it is valid.
+func build(a *App) error {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	g, err := a.build()
+	if err != nil {
+		return err
+	}
+	a.install(g)
+	return nil
+}
+
 func mustWalk(t *testing.T, a *App) []occurrence {
 	t.Helper()
 	occ, err := walk(a)
@@ -208,7 +222,7 @@ func TestLint_StagedCompositionIsReportedNotRefused(t *testing.T) {
 		}
 	}
 	// And it is a lint, not a refusal: the program still builds.
-	if err := root.seal(here(0)); err != nil {
+	if err := build(root); err != nil {
 		t.Fatalf("staged composition was refused: %v", err)
 	}
 }
@@ -232,8 +246,8 @@ func TestDiamond_TwoOccurrencesTwoIdsOneType(t *testing.T) {
 	root.Group("/v1").Use(billing)
 	root.Group("/admin").Use(billing)
 
-	if err := root.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(root); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 
 	var ids, paths []string
@@ -319,9 +333,9 @@ func TestCycle_IsAnErrorWithABreadcrumbNotAHang(t *testing.T) {
 	a.Use(b)
 	b.Use(a)
 
-	err := a.seal(here(0))
+	err := build(a)
 	if err == nil {
-		t.Fatal("a cycle sealed successfully")
+		t.Fatal("a cycle built successfully")
 	}
 	if !strings.Contains(err.Error(), "cycle") || !strings.Contains(err.Error(), "a → b → a") {
 		t.Fatalf("cycle error has no breadcrumb: %v", err)
@@ -332,7 +346,7 @@ func TestCycle_IsAnErrorWithABreadcrumbNotAHang(t *testing.T) {
 func TestCycle_SelfInclusion(t *testing.T) {
 	a := quiet("a")
 	a.Use(a)
-	if err := a.seal(here(0)); err == nil || !strings.Contains(err.Error(), "cycle") {
+	if err := build(a); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("self-inclusion: %v", err)
 	}
 }
@@ -345,43 +359,43 @@ func TestDiamond_IsNotACycle(t *testing.T) {
 	root := quiet("root")
 	root.Group("/v1").Use(shared)
 	root.Group("/admin").Use(shared)
-	if err := root.seal(here(0)); err != nil {
+	if err := build(root); err != nil {
 		t.Fatalf("a diamond was refused as a cycle: %v", err)
 	}
 }
 
 // ── the seal ────────────────────────────────────────────────────────────────
 
-// TestSeal_PropagatesAcrossTheGraph. Sealing only the app Listen was called on
+// TestFreeze_PropagatesAcrossTheGraph. Sealing only the app Listen was called on
 // leaves exactly the race it was meant to close: the child is still writable
 // while the parent is already serving what it published.
-func TestSeal_PropagatesAcrossTheGraph(t *testing.T) {
+func TestFreeze_PropagatesAcrossTheGraph(t *testing.T) {
 	users := quiet("users")
 	admin := quiet("admin")
 	users.Use(admin)
 	root := quiet("root")
 	root.Use(users)
 
-	if err := root.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(root); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 	for _, a := range []*App{root, users, admin} {
-		if !a.Sealed() {
-			t.Errorf("%s is not sealed — the seal did not reach the whole graph", a.label())
+		if !a.Frozen() {
+			t.Errorf("%s is not frozen — the freeze did not reach the whole graph", a.label())
 		}
 	}
 }
 
-// TestSeal_MutateAfterSealPanics_MountAfterSealSucceeds. Sealed is MONOTONIC
+// TestFreeze_MutateAfterBuildPanics_IncludeAfterBuildSucceeds. Sealed is MONOTONIC
 // and it freezes CONTENT, not reachability: a definition already sealed under
 // one parent may still be included under another, because including it does not
 // write to it. Writing to it is what is refused.
-func TestSeal_MutateAfterSealPanics_MountAfterSealSucceeds(t *testing.T) {
+func TestFreeze_MutateAfterBuildPanics_IncludeAfterBuildSucceeds(t *testing.T) {
 	child := billingApp()
 	first := quiet("first")
 	first.Use(child)
-	if err := first.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(first); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 
 	// Mutate-after-seal: refused, and the message says who sealed and where.
@@ -389,10 +403,10 @@ func TestSeal_MutateAfterSealPanics_MountAfterSealSucceeds(t *testing.T) {
 		defer func() {
 			r := recover()
 			if r == nil {
-				t.Fatal("a sealed App accepted a new entry")
+				t.Fatal("a frozen App accepted a new entry")
 			}
 			msg, _ := r.(string)
-			for _, want := range []string{"sealed", "billing", "compose_test.go:"} {
+			for _, want := range []string{"frozen", "billing", "compose_test.go:"} {
 				if !strings.Contains(msg, want) {
 					t.Errorf("panic does not mention %q: %s", want, msg)
 				}
@@ -405,21 +419,21 @@ func TestSeal_MutateAfterSealPanics_MountAfterSealSucceeds(t *testing.T) {
 	// definition, and gets its own occurrence of it.
 	second := quiet("second")
 	second.Group("/v2").Use(child)
-	if err := second.seal(here(0)); err != nil {
-		t.Fatalf("including a sealed definition was refused: %v", err)
+	if err := build(second); err != nil {
+		t.Fatalf("including a frozen definition was refused: %v", err)
 	}
 	if n := len(second.Registry()); n != 1 {
-		t.Fatalf("the second host got %d ops from the sealed definition, want 1", n)
+		t.Fatalf("the second host got %d ops from the frozen definition, want 1", n)
 	}
 	if got := second.Registry()[0].Path; got != "/v2/invoices/:id" {
 		t.Errorf("second host path = %q, want /v2/invoices/:id", got)
 	}
 }
 
-// TestSeal_ReadingDoesNotSeal. A codegen step, a test or a doc generator that
+// TestFreeze_ReadingDoesNotFreeze. A codegen step, a test or a doc generator that
 // inspects the program must not turn the next legitimate Use into a panic about
 // a seal nobody asked for.
-func TestSeal_ReadingDoesNotSeal(t *testing.T) {
+func TestFreeze_ReadingDoesNotFreeze(t *testing.T) {
 	root := quiet("root")
 	root.Use(billingApp())
 
@@ -429,8 +443,8 @@ func TestSeal_ReadingDoesNotSeal(t *testing.T) {
 	_ = root.Fiber()
 	_ = root.Lint()
 
-	if root.Sealed() {
-		t.Fatal("inspecting the program sealed it")
+	if root.Frozen() {
+		t.Fatal("inspecting the program froze it")
 	}
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // must not panic
 }
@@ -455,7 +469,7 @@ func TestConflicts_AllOfThemAtOnceWithBothPartiesNamed(t *testing.T) {
 	root.Use(iam)
 	root.Use(billing)
 
-	err := root.seal(here(0))
+	err := build(root)
 	if err == nil {
 		t.Fatal("two apps claiming two addresses each were accepted")
 	}
@@ -484,7 +498,7 @@ func TestConflicts_NamesTheCompositionPath(t *testing.T) {
 	root.Group("/v1").Use(leaf)
 	root.Group("/v1").Use(leaf) // same prefix twice: the same address twice
 
-	err := root.seal(here(0))
+	err := build(root)
 	if err == nil {
 		t.Fatal("one address claimed twice was accepted")
 	}
@@ -495,17 +509,17 @@ func TestConflicts_NamesTheCompositionPath(t *testing.T) {
 
 // ── concurrency ─────────────────────────────────────────────────────────────
 
-// TestRegistry_RaceCleanAfterSeal. Registry is read from serving goroutines —
+// TestRegistry_RaceCleanOnALiveGeneration. Registry is read from serving goroutines —
 // the OpenAPI endpoint and the MCP tool listing both call it per request — so
 // it has to be safe without a mutex on the served path. Sealing is what buys
 // that: the program cannot change, so the projection is computed once under
 // sync.Once and shared.
-func TestRegistry_RaceCleanAfterSeal(t *testing.T) {
+func TestRegistry_RaceCleanOnALiveGeneration(t *testing.T) {
 	root := quiet("root")
 	root.Group("/v1").Use(billingApp())
 	root.Group("/admin").Use(billingApp())
-	if err := root.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(root); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 
 	var wg sync.WaitGroup
@@ -523,17 +537,17 @@ func TestRegistry_RaceCleanAfterSeal(t *testing.T) {
 	wg.Wait()
 }
 
-// TestRegistry_IsMemoisedOnceSealed: the same slice, not an equal one. If it
+// TestRegistry_IsComputedOncePerGeneration: the same slice, not an equal one. If it
 // were rebuilt per call, every OpenAPI request would re-walk the graph.
-func TestRegistry_IsMemoisedOnceSealed(t *testing.T) {
+func TestRegistry_IsComputedOncePerGeneration(t *testing.T) {
 	root := quiet("root")
 	root.Use(billingApp())
-	if err := root.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(root); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 	first := root.Registry()
 	if &first[0] != &root.Registry()[0] {
-		t.Fatal("Registry() rebuilt after seal; it must be computed once")
+		t.Fatal("Registry() rebuilt within a generation; it must be computed once")
 	}
 }
 
@@ -600,8 +614,8 @@ func TestCompose_DocumentIsTheUnion(t *testing.T) {
 	}
 
 	host.Use(child)
-	if err := host.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(host); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 	if n := len(host.OpenAPISpec()["paths"].(map[string]map[string]any)); n != own+childOps {
 		t.Fatalf("composed document has %d paths, want %d", n, own+childOps)
