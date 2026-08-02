@@ -220,6 +220,7 @@ func (c Caller) headers() map[string]string {
 //	    }
 //	    ...
 //	}
+//
 // A context with no request behind it reads back whatever [WithCaller] stated
 // on it, so what a background caller says it acts for is what the code running
 // under that context sees — one value, written and read the same way, rather

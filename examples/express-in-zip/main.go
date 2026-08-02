@@ -27,8 +27,8 @@ import (
 	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip"
-	"github.com/zap-proto/zip/middleware"
 	"github.com/zap-proto/zip/js"
+	"github.com/zap-proto/zip/middleware"
 )
 
 //go:embed app.ts

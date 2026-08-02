@@ -168,12 +168,12 @@ func TestExtract_FieldDocsCrossPackageBoundaries(t *testing.T) {
 		t.Errorf("description = %q", op.Description)
 	}
 	for key, want := range map[string]string{
-		"ListIn.org":       "Org whose workers to list.",
-		"ListIn.limit":     "Limit caps how many come back.",
-		"ListOut.workers":  "Workers, newest first.",
-		"ListOut.next":     "Next is the cursor for the following page.",
-		"Worker.name":      "Name is the worker's stable name, unique in the org.",
-		"Worker.live":      "Live reports whether it is serving traffic.",
+		"ListIn.org":      "Org whose workers to list.",
+		"ListIn.limit":    "Limit caps how many come back.",
+		"ListOut.workers": "Workers, newest first.",
+		"ListOut.next":    "Next is the cursor for the following page.",
+		"Worker.name":     "Name is the worker's stable name, unique in the org.",
+		"Worker.live":     "Live reports whether it is serving traffic.",
 	} {
 		if got := op.Fields[key]; got != want {
 			t.Errorf("Fields[%q] = %q, want %q", key, got, want)
