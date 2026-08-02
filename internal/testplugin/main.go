@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 
 	"github.com/zap-proto/zip"
@@ -106,5 +107,9 @@ func main() {
 	}
 
 	// Addr is the whole plugin side of the contract: serve where the host said.
-	_ = app.Listen(zip.Addr(":9999"))
+	// Report rather than swallow: a fixture that discards this error exits
+	// silently and the host reports only "exited before listening".
+	if err := app.Listen(zip.Addr(":9999")); err != nil {
+		log.Fatalf("testplugin: %v", err)
+	}
 }

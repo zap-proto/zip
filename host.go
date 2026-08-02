@@ -33,7 +33,8 @@ import (
 // hazard this runtime papers over — and the guarantee that machinery replaced
 // conceded in its own text that cutover was never simultaneous.
 type Host struct {
-	app *App
+	app  *App
+	errc chan error
 }
 
 // Serve builds the program, validates it completely, freezes every definition it
@@ -56,11 +57,11 @@ func Serve(app *App, addrs ...string) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	go func() {
-		if err := app.listenOn(addrs); err != nil {
-			app.logger.Error("zip host stopped", "err", err)
-		}
-	}()
+	// Buffered, so the serving goroutine can finish whether or not anyone ever
+	// calls Wait. A nil channel here would make Wait return nil immediately —
+	// which is exactly how App.Listen briefly stopped serving at all.
+	h.errc = make(chan error, 1)
+	go func() { h.errc <- app.listenOn(addrs) }()
 	return h, nil
 }
 
@@ -79,6 +80,19 @@ func host(app *App) (*Host, error) {
 		return nil, err
 	}
 	return &Host{app: app}, nil
+}
+
+// Wait blocks until the listeners stop, and returns why.
+//
+// [App.Listen] is exactly Serve followed by this, which is the whole of the
+// relationship between them: there is ONE way to start serving a program, and
+// Listen is the terminal spelling of it for a main that will never change the
+// program at run time.
+func (h *Host) Wait() error {
+	if h.errc == nil {
+		return nil // built but never given listeners
+	}
+	return <-h.errc
 }
 
 // App returns the program this host is running. It is frozen: compose before

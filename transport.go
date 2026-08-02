@@ -155,31 +155,26 @@ func (a *App) prepare() {
 	})
 }
 
-// Listen serves the app on one or more addresses and blocks until all
-// listeners stop or the first one errors. The address scheme selects the
-// transport; a bare address uses ZAP (DefaultScheme). This is the ONE and only
-// way to serve a zip app — no per-transport methods.
+// Listen is [Serve] followed by [Host.Wait]: it starts serving and blocks until
+// the listeners stop. The address scheme selects the transport; a bare address
+// uses ZAP (DefaultScheme).
+//
+// It is the TERMINAL spelling, and the difference from Serve is deliberate
+// rather than an oversight: Listen hands back no host, so a program started this
+// way cannot later be changed with [Host.Include] or [Host.Drop]. That is the
+// right shape for a main whose program is fixed —
+//
+//	log.Fatal(app.Listen(":8080"))
+//
+// — and the wrong one the moment anything loads at run time, which is why Serve
+// exists and why this is one line of sugar over it rather than a second way to
+// serve. There is one serving mechanism; this is its no-handle form.
 func (a *App) Listen(addrs ...string) error {
-	if len(addrs) == 0 {
-		return fmt.Errorf("zip: Listen needs at least one address")
-	}
-	a.prepare()
-	// Generation 0 is built HERE — at the one call that begins runtime
-	// execution, and nowhere else. A failed build never becomes live, and
-	// installing freezes every definition the walk reached, so a child cannot be
-	// edited out from under a server that has already published what it serves.
-	// Everything above this line was inspection; nothing before it froze
-	// anything.
-	a.buildMu.Lock()
-	g, err := a.build()
-	if err == nil {
-		a.install(g)
-	}
-	a.buildMu.Unlock()
+	h, err := Serve(a, addrs...)
 	if err != nil {
 		return err
 	}
-	return a.listenOn(addrs)
+	return h.Wait()
 }
 
 // listenOn serves an ALREADY BUILT program. [Serve] uses it after installing

@@ -1014,6 +1014,30 @@ before any rendering, so no tool can emit an empty document and exit 0.
 CLI entry points recover, print the errors, and exit 1. Panic is
 transport there, never presentation.
 
+## Listen
+
+`app.Listen(addr)` is `Serve` followed by `host.Wait()` — one line of sugar
+over the same mechanism, not a second way to serve. It blocks and hands
+back no host, so a program started that way cannot later be changed:
+
+    log.Fatal(app.Listen(":8080"))     // fixed program, no handle
+    host, _ := zip.Serve(app, ":8080") // changeable program, handle
+
+The difference is deliberate. A main whose program is fixed wants the
+terminal form; anything that loads at run time wants the handle, and
+there is nothing to migrate between them because both install generation
+0 through the same build.
+
+## Escaping to the router
+
+`app.Fiber()` returns the CURRENT generation's router. A generation is a
+projection, so the next build materializes a fresh one — anything
+registered on the value Fiber() handed out would be discarded. That is
+refused rather than dropped: a rebuild that finds routes it did not
+build panics, naming the count and pointing at `app.Use` / `app.Get`.
+A silently lost CORS policy is the failure this design exists to
+prevent, and Fiber() was the one door still open to it.
+
 ## Removed, and why
 
 The `building` exemption: protected no reachable legitimate path; its only
