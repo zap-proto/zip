@@ -127,9 +127,9 @@ func TestGroup(t *testing.T) {
 func TestOneCtxPerRequest(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	var seen []*zip.Ctx
-	app.Use(func(c *zip.Ctx) error { seen = append(seen, c); return c.Continue() })
+	app.Use(zip.H(func(c *zip.Ctx) error { seen = append(seen, c); return c.Continue() }))
 	v1 := app.Group("/v1")
-	v1.Use(func(c *zip.Ctx) error { seen = append(seen, c); return c.Continue() })
+	v1.Use(zip.H(func(c *zip.Ctx) error { seen = append(seen, c); return c.Continue() }))
 	v1.Get("/ping", func(c *zip.Ctx) error {
 		seen = append(seen, c)
 		return c.NoContent(204)
@@ -170,11 +170,11 @@ func TestOneCtxPerRequest(t *testing.T) {
 func TestSetLogReachesDownstream(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	var scoped, downstream luxlog.Logger
-	app.Use(func(c *zip.Ctx) error {
+	app.Use(zip.H(func(c *zip.Ctx) error {
 		scoped = c.Log().New("request_id", "rid-42")
 		c.SetLog(scoped)
 		return c.Continue()
-	})
+	}))
 	app.Get("/x", func(c *zip.Ctx) error {
 		downstream = c.Log()
 		return c.NoContent(204)
@@ -204,7 +204,7 @@ func TestServePathAllocsAreChainDepthInvariant(t *testing.T) {
 	for _, mw := range []int{0, 1, 5} {
 		app := zip.New(zip.Config{DisableStartupMessage: true, ServerHeader: "-"})
 		for i := 0; i < mw; i++ {
-			app.Use(func(c *zip.Ctx) error { return c.Continue() })
+			app.Use(zip.H(func(c *zip.Ctx) error { return c.Continue() }))
 		}
 		app.Get("/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })
 		h := app.Fiber().Handler()

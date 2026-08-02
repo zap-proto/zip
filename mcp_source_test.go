@@ -58,10 +58,10 @@ type orgKey struct{}
 func sourceApp(t *testing.T, src Source) *App {
 	t.Helper()
 	app := New(Config{AppName: "src", MCP: MCPConfig{Source: src}})
-	app.Use(func(c *Ctx) error {
+	app.Use(H(func(c *Ctx) error {
 		c.SetContext(context.WithValue(c.Context(), orgKey{}, c.Org()))
 		return c.Continue()
-	})
+	}))
 	Get(app, "/ping", ping)
 	app.Prepare()
 	return app

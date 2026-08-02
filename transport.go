@@ -164,7 +164,15 @@ func (a *App) Listen(addrs ...string) error {
 		return fmt.Errorf("zip: Listen needs at least one address")
 	}
 	a.prepare()
-	h := a.fiber.Handler()
+	// Composition ends HERE — at the one call that begins runtime execution, and
+	// nowhere else. Sealing propagates across the whole reachable graph, so a
+	// child cannot be edited out from under a server that has already published
+	// what it serves. Everything up to this line was inspection; nothing before
+	// it sealed anything.
+	if err := a.seal(here(1)); err != nil {
+		return err
+	}
+	h := a.router().Handler()
 
 	servers := make([]Server, 0, len(addrs))
 	for _, raw := range addrs {
@@ -238,12 +246,23 @@ func (a *App) Listen(addrs ...string) error {
 // link time does not grow when that service does, and the service redeploys
 // without relinking it. Moving a service between Mount and a linked-in route
 // tree is a deployment decision, not a code change.
-func (a *App) Mount(prefix, addr string) error {
+func (a *App) Mount(prefix, addr string, decl ...Declaration) error {
 	// A bare Mount is its own claimant, and the address is the only name it has.
 	if err := a.claim(prefix, addr); err != nil {
 		return err
 	}
-	return a.mount(prefix, addr)
+	var d Declaration
+	if len(decl) > 0 {
+		d = decl[0]
+	}
+	leaf, err := remoteApp(a, prefix, addr, d)
+	if err != nil {
+		return err
+	}
+	a.logger.Info("zip mounting", "prefix", prefix, "addr", addr,
+		"routes", len(d.Routes), "ops", len(leaf.Registry()))
+	a.appendEntry(entry{n: leaf, site: here(1)})
+	return nil
 }
 
 // mount registers prefix onto a dialled address. The prefix is already CLAIMED
@@ -279,8 +298,12 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 		return forward(c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
 	}
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
-	a.All(prefix, h)
-	a.All(prefix+"/*", h)
+	site := here(1)
+	// runtimeEntry, because a plugin may be loaded AFTER Listen: a runtime mount
+	// is a deployment event, not a program edit, so it goes onto the live router
+	// without reopening a sealed program.
+	a.runtimeEntry(entry{n: route{method: methodAll, path: prefix, chain: []Handler{h}}, site: site})
+	a.runtimeEntry(entry{n: route{method: methodAll, path: prefix + "/*", chain: []Handler{h}}, site: site})
 }
 
 // forward is THE proxy hop: the inbound fasthttp request object is handed to the

@@ -47,7 +47,7 @@ func (a *App) control(method, path string, h fiber.Handler) {
 		a.controls = map[string]bool{}
 	}
 	a.controls[method+" "+path] = true
-	a.fiber.Add([]string{method}, path, h)
+	a.installControl(route{method: method, path: path, serve: h})
 }
 
 // Declaration is what a plugin tells a host: who it is, whether it must be
@@ -70,6 +70,12 @@ type Declaration struct {
 type Route struct {
 	Method  string `json:"method"`
 	Pattern string `json:"pattern"`
+
+	// Op is the operation id this pattern answers under, empty when the route is
+	// untyped. It is what makes a remote [App.Mount] able to contribute OPS and
+	// not merely addresses: the mounting app is handed the declaration inline and
+	// reads the ids out of it, instead of asking the remote what it serves.
+	Op string `json:"op,omitempty"`
 }
 
 // Declaration projects the live router: every method+pattern the app will
@@ -85,7 +91,7 @@ func (a *App) Declaration() Declaration {
 	d := Declaration{Name: a.cfg.AppName, Eager: a.cfg.Eager, Routes: []Route{}}
 
 	seen := map[string]bool{}
-	for _, r := range a.fiber.GetRoutes(true) {
+	for _, r := range a.router().GetRoutes(true) {
 		if r.Method == "" || r.Path == "" {
 			continue
 		}
@@ -112,11 +118,24 @@ func (a *App) Declaration() Declaration {
 	})
 
 	ops := map[string]bool{}
-	for _, op := range a.registry {
-		if n := opName(op); n != "" && !ops[n] {
+	// byAddr is what lets a declaration say which op answers WHICH address, so a
+	// host that mounts this service can contribute its ops and not merely its
+	// addresses. Without it a remote is a set of paths with no names, and every
+	// projection but the router stops at the process boundary.
+	byAddr := map[string]string{}
+	for _, op := range a.Registry() {
+		n := opName(op)
+		if n == "" {
+			continue
+		}
+		byAddr[op.Method+" "+op.Path] = n
+		if !ops[n] {
 			ops[n] = true
 			d.Ops = append(d.Ops, n)
 		}
+	}
+	for i := range d.Routes {
+		d.Routes[i].Op = byAddr[d.Routes[i].Method+" "+d.Routes[i].Pattern]
 	}
 	sort.Strings(d.Ops)
 	return d

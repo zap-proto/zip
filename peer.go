@@ -47,7 +47,7 @@ func (a *App) Peer() *App {
 // plugin that answers no peer op should not create a socket other processes can
 // dial and get nothing from.
 func (a *App) servePeer() {
-	if a.sibling || a.peer == nil || len(a.peer.registry) == 0 {
+	if a.sibling || a.peer == nil || len(a.peer.Registry()) == 0 {
 		return
 	}
 	if a.cfg.AppName == "" {

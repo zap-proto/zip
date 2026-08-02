@@ -86,22 +86,36 @@ func TestSpecificity_DeeperStaticBeatsShallowWildcard(t *testing.T) {
 }
 
 // Two distinct, equally specific, unconstrained patterns are an ambiguous
-// overlap: registration must panic loudly, never silently shadow.
-func TestSpecificity_AmbiguousConflictPanics(t *testing.T) {
+// overlap: it must be refused loudly, never silently shadow.
+//
+// CHANGED BY THE LAZY MODEL, deliberately. This used to panic at the second
+// app.Get, because registration WAS insertion into the router. A route is now
+// an entry in a program and the router is a BUILD of that program, so the
+// refusal moves to the build — app.Fiber() here, App.Listen in a real one.
+//
+// The deferral is not an oversight and cannot be undone. An App may be included
+// in another App AFTER its routes are written, so at the moment of any single
+// registration the set of patterns it will have to coexist with is not yet
+// known; a check at registration time could only ever see part of the program.
+// Detecting it at build time is what makes the answer complete — and is the
+// same reason conflicting ADDRESSES are now reported all at once with both
+// claimants named, instead of one per build.
+func TestSpecificity_AmbiguousConflictRefusedAtBuild(t *testing.T) {
 	app := specApp()
 	app.Get("/x/:id", mark("id"))
+	app.Get("/x/:name", mark("name")) // no longer panics HERE
 
 	defer func() {
 		r := recover()
 		if r == nil {
-			t.Fatal("registering /x/:name after /x/:id did not panic")
+			t.Fatal("building a router with /x/:name over /x/:id did not panic")
 		}
 		msg, _ := r.(string)
 		if !strings.Contains(msg, "route conflict") {
 			t.Fatalf("panic %q, want it to name the route conflict", r)
 		}
 	}()
-	app.Get("/x/:name", mark("name"))
+	app.Fiber()
 }
 
 // Same pattern, different methods: no conflict — method stacks are independent.
@@ -120,8 +134,8 @@ func TestSpecificity_MethodsIndependent(t *testing.T) {
 func TestSpecificity_MiddlewareOrderPreserved(t *testing.T) {
 	app := specApp()
 	var order []string
-	app.Use(func(c *zip.Ctx) error { order = append(order, "mw1"); return c.Next() })
-	app.Use(func(c *zip.Ctx) error { order = append(order, "mw2"); return c.Next() })
+	app.Use(zip.H(func(c *zip.Ctx) error { order = append(order, "mw1"); return c.Next() }))
+	app.Use(zip.H(func(c *zip.Ctx) error { order = append(order, "mw2"); return c.Next() }))
 	app.Get("/z", func(c *zip.Ctx) error {
 		order = append(order, "handler")
 		return c.JSON(200, map[string]string{"via": "z"})

@@ -152,12 +152,44 @@ type App struct {
 	cfg    Config
 	logger luxlog.Logger
 	loader Loader
-	fiber  *fiber.App
-	// registry is THE op registry — the one entry a typed op makes, from which
-	// the OpenAPI document, the MCP tool, the CLI command and the plane op are
-	// all projected. Four documents, one registration.
-	registry []*registeredOp
-	servers  []Server // the running transport listeners, set by Listen
+
+	// The PROGRAM. entries is this app's ordered composition — middleware,
+	// routes and other Apps included by reference — and prefix is the path this
+	// app answers under when it is included somewhere ([App.Group] sets it).
+	// There is no op-registry field: the registry is a PROJECTION over a walk of
+	// this list (see [App.Registry]), which is what let one verb replace five.
+	prefix  string
+	entries []entry
+
+	// The BUILD. fiber is materialised from entries, lazily, and rebuilt when
+	// the program has moved since builtAt. buildMu guards both: materialising is
+	// a WRITE performed on a read path, and inspecting a router is something
+	// several goroutines legitimately do at once.
+	fiber   *fiber.App
+	builtAt uint64
+	buildMu sync.Mutex
+	// control_ is zip's own projection routes. They are part of the BUILD, not
+	// of the program — see [App.installControl].
+	control_ []route
+
+	// The SEAL. Mutable until execution begins, immutable forever after, across
+	// the whole reachable graph. planned/reg are the memoised projections, safe
+	// to read from serving goroutines precisely because the program can no
+	// longer change underneath them.
+	sealed   atomic.Bool
+	sealSite callsite
+	planOnce sync.Once
+	planned  []occurrence
+	planErr  error
+	regOnce  sync.Once
+	reg      []*registeredOp
+
+	// wrap is the Middleware a scoped [App.With] installed on this App (see
+	// wrapRouter.Group). nil for every ordinary App, and the common case pays
+	// nothing for it.
+	wrap Middleware
+
+	servers []Server // the running transport listeners, set by Listen
 
 	// authorizer, when set via Authorize, runs at every typed op's invoke seam
 	// on the decoded In — the one place REST and MCP both funnel the value the
@@ -236,6 +268,19 @@ type App struct {
 // New constructs an App with the given config. Defaults are applied
 // for any zero-valued field.
 func New(cfg Config) *App {
+	a := newApp(cfg)
+	a.logger.Info("zip new", "json_variant", jsonenc.Variant)
+	return a
+}
+
+// newApp is New without the line in the log. [App.Group] builds an App per
+// scope, and a group is a lexical construct rather than a deployment, so it
+// does not announce itself.
+//
+// No router is constructed here. A router is a BUILD of the program, and the
+// program is empty — materialising one now would mean materialising one per
+// group, and rebuilding every one of them the moment anything is appended.
+func newApp(cfg Config) *App {
 	if cfg.Logger == nil {
 		cfg.Logger = luxlog.New("module", "zip")
 	}
@@ -245,51 +290,31 @@ func New(cfg Config) *App {
 	if cfg.ServerHeader == "" {
 		cfg.ServerHeader = "zip"
 	}
-
-	fcfg := fiber.Config{
-		AppName:   cfg.AppName,
-		BodyLimit: cfg.BodyLimit,
-		// Route every Fiber JSON path through zip's jsonenc package: this
-		// covers c.JSON(), c.Bind().Body(), and the default error
-		// handler when it serializes HTTPError. With GOEXPERIMENT=jsonv2
-		// the underlying impl is encoding/json/v2; otherwise it falls
-		// back to encoding/json. Same call site, different bytes-out.
-		JSONEncoder: jsonenc.Marshal,
-		JSONDecoder: jsonenc.Unmarshal,
-		// Per-conn scale knobs from SCALE_STANDARD.md §6 — zero values
-		// fall through to fasthttp defaults (256k concurrent / 4 KiB
-		// read+write buffers).
-		Concurrency:     cfg.Concurrency,
-		ReadBufferSize:  cfg.ReadBufferSize,
-		WriteBufferSize: cfg.WriteBufferSize,
-	}
-	if cfg.ServerHeader != "-" {
-		fcfg.ServerHeader = cfg.ServerHeader
-	}
-	if cfg.ErrorHandler != nil {
-		fcfg.ErrorHandler = cfg.ErrorHandler
-	} else {
-		fcfg.ErrorHandler = errorHandler
-	}
-
-	cfg.Logger.Info("zip new", "json_variant", jsonenc.Variant)
-
 	return &App{
 		cfg:    cfg,
 		logger: cfg.Logger,
 		loader: cfg.Loader,
-		fiber:  fiber.New(fcfg),
 		born:   time.Now(),
 	}
 }
 
-// OpScope makes the App itself a place a typed op can be declared — the root,
-// with no prefix and no middleware wrapped around the handler.
-func (a *App) OpScope() OpScope { return OpScope{App: a} }
+// jsonMarshal / jsonUnmarshal route every fiber JSON path through zip's jsonenc
+// package: c.JSON(), c.Bind().Body(), and the default error handler when it
+// serialises an HTTPError. With GOEXPERIMENT=jsonv2 the underlying impl is
+// encoding/json/v2; otherwise encoding/json. Same call site, different
+// bytes-out. Named here so [App.fiberConfig] is the one place that says it.
+var (
+	jsonMarshal   = jsonenc.Marshal
+	jsonUnmarshal = jsonenc.Unmarshal
+)
 
-// Fiber returns the underlying *fiber.App. Use for one-off escape into
-// Fiber-only APIs (rare). Prefer staying on the zip surface.
-func (a *App) Fiber() *fiber.App { return a.fiber }
+// Fiber returns the underlying *fiber.App, materialising the program if it has
+// changed since the last build. Use for one-off escape into Fiber-only APIs
+// (rare). Prefer staying on the zip surface.
+//
+// It does NOT seal: inspecting the router is not executing it, and a test or a
+// codegen step that looks must not turn the next legitimate Use into a panic.
+func (a *App) Fiber() *fiber.App { return a.router() }
 
 // Logger returns the App's logger.
 func (a *App) Logger() luxlog.Logger { return a.logger }
@@ -309,15 +334,6 @@ func (a *App) ShutdownWithContext(ctx context.Context) error {
 	return a.shutdown(ctx)
 }
 
-// Use registers zip-style middleware. Each Handler runs in order; calling
-// c.Next() (via c.Continue) chains to the next handler.
-func (a *App) Use(handlers ...Handler) Router {
-	for _, h := range handlers {
-		a.fiber.Use(toFiberHandler(a, h))
-	}
-	return &routerAdapter{r: a.fiber, app: a}
-}
-
 // With returns a Router whose subsequent leaf registrations (Get/Post/…/All)
 // have mw wrapped around the handler at registration time — pure
 // composition (RateLimit(CSRF(handler))). It does NOT touch the global Use
@@ -327,14 +343,15 @@ func (a *App) Use(handlers ...Handler) Router {
 //
 //	app.With(RateLimit, CSRF).Post("/v1/keys", mintKey)
 func (a *App) With(mw ...Middleware) Router {
-	return &wrapRouter{
-		inner: &routerAdapter{r: a.fiber, app: a},
-		wrap:  Chain(mw...),
-	}
+	return &wrapRouter{inner: a, wrap: Chain(mw...)}
 }
 
 // Get / Post / Put / Patch / Delete / Head / Options / All register routes.
 // Chains are in wrapping order: middleware first, the final handler last.
+//
+// These still take ...Handler and always will. A bare closure written inline is
+// a *Handler by conversion, so nothing about route registration changes when
+// composition widens — [zip.H] is needed only at [App.Use].
 func (a *App) Get(path string, handlers ...Handler) Router  { return a.method("GET", path, handlers) }
 func (a *App) Post(path string, handlers ...Handler) Router { return a.method("POST", path, handlers) }
 func (a *App) Put(path string, handlers ...Handler) Router  { return a.method("PUT", path, handlers) }
@@ -351,28 +368,31 @@ func (a *App) Options(path string, handlers ...Handler) Router {
 
 // All registers a handler for any HTTP method.
 func (a *App) All(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a, handlers)
-	a.fiber.All(normPath(path), h, mw...)
-	return &routerAdapter{r: a.fiber, app: a}
+	return a.method(methodAll, path, handlers)
 }
 
 func (a *App) method(method, path string, handlers []Handler) Router {
-	h, mw := splitChain(a, handlers)
-	a.fiber.Add([]string{method}, normPath(path), h, mw...)
-	return &routerAdapter{r: a.fiber, app: a}
+	// A scoped [App.With] lives on the App itself, so a leaf registered on this
+	// scope at any time is wrapped — including one registered after the scope was
+	// handed out. A decorator could only wrap what passed through it.
+	if len(handlers) == 0 {
+		panic("zip: route registered with no handler")
+	}
+	if a.wrap != nil {
+		handlers = append([]Handler(nil), handlers...)
+		handlers[len(handlers)-1] = a.wrap(handlers[len(handlers)-1])
+	} else {
+		handlers = append([]Handler(nil), handlers...)
+	}
+	a.addRoute(here(2), route{method: method, path: normPath(path), chain: handlers})
+	return a
 }
 
-// Group creates a path-prefixed router group. The returned Router is the one
-// way to register nested routes under a prefix — register leaves and further
-// Groups directly on it; middleware scoped to the group goes on via its Use.
-func (a *App) Group(prefix string, handlers ...Handler) Router {
-	args := make([]any, 0, len(handlers))
-	for _, h := range handlers {
-		args = append(args, toFiberHandler(a, h))
-	}
-	g := a.fiber.Group(prefix, args...)
-	return &routerAdapter{r: g, app: a}
-}
+// OpScope makes the App itself a place a typed op can be declared. The prefix
+// is not reported here: a group's prefix is a property of WHERE the group is
+// included, and one definition may be included in two places, so the absolute
+// path is computed by the walk and never baked into the op.
+func (a *App) OpScope() OpScope { return OpScope{App: a, Middleware: a.wrap} }
 
 // errors.As helper for HTTPError unwrapping in tests / external callers.
 func asHTTPError(err error) (*HTTPError, bool) {

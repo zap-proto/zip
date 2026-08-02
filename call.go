@@ -140,7 +140,7 @@ func socketIn(dir, name string) string { return filepath.Join(dir, name+".sock")
 // installCallPlane mounts the by-name op plane when there are ops to call.
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.
 func (a *App) installCallPlane() {
-	if len(a.registry) == 0 {
+	if len(a.Registry()) == 0 {
 		return
 	}
 	a.control(fiber.MethodPost, CallPath+":op", func(fc fiber.Ctx) error {
@@ -172,7 +172,7 @@ func (a *App) installCallPlane() {
 		fc.Set(fiber.HeaderContentType, CallContentType)
 		return fc.Send(body)
 	})
-	a.logger.Info("zip call plane", "path", CallPath, "ops", len(a.registry))
+	a.logger.Info("zip call plane", "path", CallPath, "ops", len(a.Registry()))
 }
 
 // Conn is a handle to another zip app, dialed once and used concurrently. It

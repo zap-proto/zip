@@ -35,15 +35,15 @@ func TestTwoAppsNoStateBleed(t *testing.T) {
 	})
 
 	// Middleware only on A — sets a marker header on every A request.
-	a.Use(func(c *zip.Ctx) error {
+	a.Use(zip.H(func(c *zip.Ctx) error {
 		c.SetHeader("X-App", "a")
 		return c.Continue()
-	})
+	}))
 	// Middleware only on B — sets a different marker on B.
-	b.Use(func(c *zip.Ctx) error {
+	b.Use(zip.H(func(c *zip.Ctx) error {
 		c.SetHeader("X-App", "b")
 		return c.Continue()
-	})
+	}))
 
 	// A's route is reachable on A.
 	reqA, _ := http.NewRequest("GET", "/from-a", nil)

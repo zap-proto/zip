@@ -1,0 +1,655 @@
+package zip
+
+import (
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// These are internal tests on purpose. The walk, the seal and the occurrence
+// slice are the contract every projection is written against, and they are
+// unexported — the AST is not a compatibility surface. Testing them from
+// zip_test would mean exporting the AST to test it, which is the tail wagging
+// the dog.
+
+func quiet(name string) *App {
+	return New(Config{AppName: name, DisableStartupMessage: true})
+}
+
+type invoiceIn struct {
+	ID string `json:"id"`
+}
+type invoiceOut struct {
+	ID    string `json:"id"`
+	Total int    `json:"total"`
+}
+
+// billingApp is one DEFINITION, written once, included wherever a test needs it.
+func billingApp() *App {
+	b := quiet("billing")
+	Get(b, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+		return &invoiceOut{ID: in.ID, Total: 42}, nil
+	}, WithOperationID("listInvoices"))
+	return b
+}
+
+func kinds(occ []occurrence) []string {
+	out := make([]string, 0, len(occ))
+	for _, o := range occ {
+		switch n := o.n.(type) {
+		case Handler:
+			out = append(out, "mw")
+		case route:
+			out = append(out, n.method+" "+o.abs(n.path))
+		case *App:
+			out = append(out, "app:"+n.label()+"@"+o.ctx.prefix)
+		}
+	}
+	return out
+}
+
+// ── the walk ────────────────────────────────────────────────────────────────
+
+// TestWalk_OrderIsProgramOrder is the property everything else rests on: the
+// occurrence slice is the program read top to bottom, with each included
+// definition read IN PLACE at its inclusion site. Two typed slices — one of
+// middleware, one of children — cannot express this, and the interleaving is
+// semantic: "requestID came before users, authz came after" is a fact about
+// what runs, not about how the framework stored it.
+func TestWalk_OrderIsProgramOrder(t *testing.T) {
+	users := quiet("users")
+	users.Get("/users", func(c *Ctx) error { return nil })
+
+	root := quiet("root")
+	root.Use(H(func(c *Ctx) error { return c.Continue() })) // requestID
+	root.Use(users)
+	root.Use(H(func(c *Ctx) error { return c.Continue() })) // authz
+	root.Get("/late", func(c *Ctx) error { return nil })
+
+	occ, err := walk(root)
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	want := []string{"mw", "app:users@", "GET /users", "mw", "GET /late"}
+	got := kinds(occ)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("walk order:\n got %v\nwant %v", got, want)
+	}
+}
+
+// TestWalk_AppendIsStable pins the guarantee a generated SDK depends on:
+// composing one more thing cannot reorder what was already composed. Without
+// it, adding a plugin reshuffles operation order in the OpenAPI document and
+// every downstream artifact churns for no semantic reason.
+func TestWalk_AppendIsStable(t *testing.T) {
+	a, b := quiet("a"), quiet("b")
+	a.Get("/a", func(c *Ctx) error { return nil })
+	b.Get("/b", func(c *Ctx) error { return nil })
+
+	root := quiet("root")
+	root.Use(a)
+	before := kinds(mustWalk(t, root))
+
+	root.Use(b)
+	after := kinds(mustWalk(t, root))
+
+	if len(after) <= len(before) {
+		t.Fatalf("appending b did not add occurrences: %v -> %v", before, after)
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatalf("appending b reordered occurrence %d: %q -> %q\n%v\n%v",
+				i, before[i], after[i], before, after)
+		}
+	}
+}
+
+// TestWalk_IsDeterministic: same program, identical slice. A projection that is
+// not a pure function of the program is a projection whose output diffs for
+// reasons nobody can explain.
+func TestWalk_IsDeterministic(t *testing.T) {
+	root := quiet("root")
+	root.Use(H(func(c *Ctx) error { return nil }))
+	root.Group("/v1").Use(billingApp())
+
+	first := kinds(mustWalk(t, root))
+	for i := 0; i < 5; i++ {
+		if got := kinds(mustWalk(t, root)); strings.Join(got, ",") != strings.Join(first, ",") {
+			t.Fatalf("walk %d differs:\n %v\n %v", i, got, first)
+		}
+	}
+}
+
+func mustWalk(t *testing.T, a *App) []occurrence {
+	t.Helper()
+	occ, err := walk(a)
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	return occ
+}
+
+// ── snapshot semantics ──────────────────────────────────────────────────────
+
+// TestSnapshot_ParentMiddlewareAfterInclusionDoesNotReachTheSubtree is clause
+// (a), and it is where this model DIVERGES from Fiber. Under Fiber the stack is
+// whatever had been registered by the time a route was, so a Use written later
+// in the wiring file reaches a group created earlier. Here the subtree's
+// environment is anchored at its inclusion site, so it does not.
+//
+// The divergence is the point: it makes a subtree's auth seam a function of
+// where it was included, not of how many lines were added to the wiring file
+// afterwards.
+func TestSnapshot_ParentMiddlewareAfterInclusionDoesNotReachTheSubtree(t *testing.T) {
+	root := quiet("root")
+	v1 := root.Group("/v1")
+	root.Use(H(func(c *Ctx) error { return c.Continue() })) // written AFTER v1 was included
+	v1.Get("/x", func(c *Ctx) error { return nil })         // written after that
+
+	for _, o := range mustWalk(t, root) {
+		r, ok := o.route()
+		if !ok || o.abs(r.path) != "/v1/x" {
+			continue
+		}
+		if n := o.ctx.mw.len(); n != 0 {
+			t.Fatalf("/v1/x sees %d middleware; the parent's later Use reached into the subtree", n)
+		}
+		return
+	}
+	t.Fatal("/v1/x not found in the walk")
+}
+
+// TestSnapshot_LateSubtreeRegistrationInheritsTheAnchoredStack is clause (b):
+// the subtree's CONTENTS may grow until seal, its ENVIRONMENT may not. A route
+// written into a group long after the group was included still gets the group's
+// stack — WHERE it is written decides, not WHEN.
+func TestSnapshot_LateSubtreeRegistrationInheritsTheAnchoredStack(t *testing.T) {
+	root := quiet("root")
+	root.Use(H(func(c *Ctx) error { return c.Continue() })) // anchored before v1
+	v1 := root.Group("/v1")
+	v1.Use(H(func(c *Ctx) error { return c.Continue() })) // the group's own
+	root.Get("/other", func(c *Ctx) error { return nil })
+	v1.Get("/late", func(c *Ctx) error { return nil }) // written last, still in v1
+
+	for _, o := range mustWalk(t, root) {
+		r, ok := o.route()
+		if !ok || o.abs(r.path) != "/v1/late" {
+			continue
+		}
+		if n := o.ctx.mw.len(); n != 2 {
+			t.Fatalf("/v1/late sees %d middleware, want 2 (root's, anchored, + the group's)", n)
+		}
+		return
+	}
+	t.Fatal("/v1/late not found in the walk")
+}
+
+// TestLint_StagedCompositionIsReportedNotRefused. Middleware appended after an
+// inclusion is legal and means what it says. It is INTENTIONAL co-located and a
+// latent bug written far apart, and no walk can tell those apart — the
+// difference is authorial intent, evidenced only by co-location. So it is a
+// lint that names both sites and lets a human read them, rather than an error
+// that would break the legitimate case or a silence that would hide the other.
+func TestLint_StagedCompositionIsReportedNotRefused(t *testing.T) {
+	root := quiet("root")
+	root.Use(billingApp())
+	root.Use(H(func(c *Ctx) error { return c.Continue() }))
+
+	lints := root.Lint()
+	if len(lints) != 1 {
+		t.Fatalf("want 1 lint, got %d: %v", len(lints), lints)
+	}
+	for _, want := range []string{"staged composition", "billing", "compose_test.go:"} {
+		if !strings.Contains(lints[0], want) {
+			t.Errorf("lint does not mention %q: %s", want, lints[0])
+		}
+	}
+	// And it is a lint, not a refusal: the program still builds.
+	if err := root.seal(here(0)); err != nil {
+		t.Fatalf("staged composition was refused: %v", err)
+	}
+}
+
+// ── the diamond ─────────────────────────────────────────────────────────────
+
+// TestDiamond_TwoOccurrencesTwoIdsOneType is the case the eager registry could
+// not express at all, and the one that decides whether the lazy one is usable.
+//
+// One definition, included twice. The SURFACE doubles — two paths, two
+// operation ids — and the TYPES do not: one Invoice, not two identical copies
+// under two names. Surface keys on the occurrence, types key on the definition.
+//
+// The ids are derived from the PREFIX and never from position. "First
+// occurrence wins" and "append -2" both make generated output a function of
+// mount order, so swapping two lines in a wiring file becomes a breaking change
+// in every published SDK.
+func TestDiamond_TwoOccurrencesTwoIdsOneType(t *testing.T) {
+	billing := billingApp() // ONE definition
+	root := quiet("cloud")
+	root.Group("/v1").Use(billing)
+	root.Group("/admin").Use(billing)
+
+	if err := root.seal(here(0)); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+
+	var ids, paths []string
+	for _, op := range root.Registry() {
+		ids = append(ids, op.OperationID)
+		paths = append(paths, op.Path)
+	}
+	wantIDs := []string{"v1.listInvoices", "admin.listInvoices"}
+	wantPaths := []string{"/v1/invoices/:id", "/admin/invoices/:id"}
+	if strings.Join(ids, ",") != strings.Join(wantIDs, ",") {
+		t.Errorf("operation ids = %v, want %v", ids, wantIDs)
+	}
+	if strings.Join(paths, ",") != strings.Join(wantPaths, ",") {
+		t.Errorf("paths = %v, want %v", paths, wantPaths)
+	}
+
+	// ONE type. Both occurrences point at the SAME reflect.Type, because the
+	// definition is shared and only the surface was copied.
+	reg := root.Registry()
+	if reg[0].OutType != reg[1].OutType {
+		t.Errorf("two occurrences produced two types: %v vs %v", reg[0].OutType, reg[1].OutType)
+	}
+	schemas := root.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)
+	n := 0
+	for name := range schemas {
+		if strings.HasSuffix(name, "invoiceOut") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("invoiceOut published %d times, want 1: %v", n, keysOfSchemas(schemas))
+	}
+
+	// And the document is valid: two operations, two distinct ids.
+	if ids[0] == ids[1] {
+		t.Fatal("both occurrences want one operationId — the document is invalid")
+	}
+}
+
+// TestDiamond_IdsDoNotDependOnMountOrder: reversing the two inclusions must
+// produce the same two ids. If it did not, reordering a wiring file would be an
+// SDK break.
+func TestDiamond_IdsDoNotDependOnMountOrder(t *testing.T) {
+	idsFor := func(first, second string) map[string]bool {
+		billing := billingApp()
+		root := quiet("cloud")
+		root.Group(first).Use(billing)
+		root.Group(second).Use(billing)
+		out := map[string]bool{}
+		for _, op := range root.Registry() {
+			out[op.OperationID] = true
+		}
+		return out
+	}
+	a := idsFor("/v1", "/admin")
+	b := idsFor("/admin", "/v1")
+	if len(a) != 2 || len(b) != 2 {
+		t.Fatalf("want 2 ids each, got %v and %v", a, b)
+	}
+	for id := range a {
+		if !b[id] {
+			t.Fatalf("id %q appears in one order and not the other: %v vs %v", id, a, b)
+		}
+	}
+}
+
+func keysOfSchemas(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// ── cycles ──────────────────────────────────────────────────────────────────
+
+// TestCycle_IsAnErrorWithABreadcrumbNotAHang. The moment an App is a node, a
+// cycle is expressible, and without detection it is not a bad error message —
+// it is an infinite descent. The ancestor set is what makes it an error, and
+// the breadcrumb is what makes the error actionable.
+func TestCycle_IsAnErrorWithABreadcrumbNotAHang(t *testing.T) {
+	a, b := quiet("a"), quiet("b")
+	a.Use(b)
+	b.Use(a)
+
+	err := a.seal(here(0))
+	if err == nil {
+		t.Fatal("a cycle sealed successfully")
+	}
+	if !strings.Contains(err.Error(), "cycle") || !strings.Contains(err.Error(), "a → b → a") {
+		t.Fatalf("cycle error has no breadcrumb: %v", err)
+	}
+}
+
+// A definition that includes ITSELF is the one-node cycle.
+func TestCycle_SelfInclusion(t *testing.T) {
+	a := quiet("a")
+	a.Use(a)
+	if err := a.seal(here(0)); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("self-inclusion: %v", err)
+	}
+}
+
+// TestDiamond_IsNotACycle: the ancestor set, not a global visited set. A
+// definition included twice as SIBLINGS is the diamond, which is legal and is
+// the whole point; only a definition included under ITSELF is a cycle.
+func TestDiamond_IsNotACycle(t *testing.T) {
+	shared := billingApp()
+	root := quiet("root")
+	root.Group("/v1").Use(shared)
+	root.Group("/admin").Use(shared)
+	if err := root.seal(here(0)); err != nil {
+		t.Fatalf("a diamond was refused as a cycle: %v", err)
+	}
+}
+
+// ── the seal ────────────────────────────────────────────────────────────────
+
+// TestSeal_PropagatesAcrossTheGraph. Sealing only the app Listen was called on
+// leaves exactly the race it was meant to close: the child is still writable
+// while the parent is already serving what it published.
+func TestSeal_PropagatesAcrossTheGraph(t *testing.T) {
+	users := quiet("users")
+	admin := quiet("admin")
+	users.Use(admin)
+	root := quiet("root")
+	root.Use(users)
+
+	if err := root.seal(here(0)); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	for _, a := range []*App{root, users, admin} {
+		if !a.Sealed() {
+			t.Errorf("%s is not sealed — the seal did not reach the whole graph", a.label())
+		}
+	}
+}
+
+// TestSeal_MutateAfterSealPanics_MountAfterSealSucceeds. Sealed is MONOTONIC
+// and it freezes CONTENT, not reachability: a definition already sealed under
+// one parent may still be included under another, because including it does not
+// write to it. Writing to it is what is refused.
+func TestSeal_MutateAfterSealPanics_MountAfterSealSucceeds(t *testing.T) {
+	child := billingApp()
+	first := quiet("first")
+	first.Use(child)
+	if err := first.seal(here(0)); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+
+	// Mutate-after-seal: refused, and the message says who sealed and where.
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("a sealed App accepted a new entry")
+			}
+			msg, _ := r.(string)
+			for _, want := range []string{"sealed", "billing", "compose_test.go:"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("panic does not mention %q: %s", want, msg)
+				}
+			}
+		}()
+		child.Get("/sneak", func(c *Ctx) error { return nil })
+	}()
+
+	// Mount-after-seal: allowed. A second host includes the same sealed
+	// definition, and gets its own occurrence of it.
+	second := quiet("second")
+	second.Group("/v2").Use(child)
+	if err := second.seal(here(0)); err != nil {
+		t.Fatalf("including a sealed definition was refused: %v", err)
+	}
+	if n := len(second.Registry()); n != 1 {
+		t.Fatalf("the second host got %d ops from the sealed definition, want 1", n)
+	}
+	if got := second.Registry()[0].Path; got != "/v2/invoices/:id" {
+		t.Errorf("second host path = %q, want /v2/invoices/:id", got)
+	}
+}
+
+// TestSeal_ReadingDoesNotSeal. A codegen step, a test or a doc generator that
+// inspects the program must not turn the next legitimate Use into a panic about
+// a seal nobody asked for.
+func TestSeal_ReadingDoesNotSeal(t *testing.T) {
+	root := quiet("root")
+	root.Use(billingApp())
+
+	_ = root.Registry()
+	_ = root.OpenAPISpec()
+	_ = root.Declaration()
+	_ = root.Fiber()
+	_ = root.Lint()
+
+	if root.Sealed() {
+		t.Fatal("inspecting the program sealed it")
+	}
+	root.Use(H(func(c *Ctx) error { return c.Continue() })) // must not panic
+}
+
+// ── conflicts ───────────────────────────────────────────────────────────────
+
+// TestConflicts_AllOfThemAtOnceWithBothPartiesNamed. Failing fast reports one
+// collision per build, so three disagreements take three builds to learn. And
+// only a walk over the whole set can name BOTH parties: eager composition could
+// attribute a collision to whichever app composed second, which is wiring-file
+// line order and means nothing.
+func TestConflicts_AllOfThemAtOnceWithBothPartiesNamed(t *testing.T) {
+	iam := quiet("iam")
+	iam.Get("/users", func(c *Ctx) error { return nil })
+	iam.Get("/tokens", func(c *Ctx) error { return nil })
+
+	billing := quiet("billing")
+	billing.Get("/users", func(c *Ctx) error { return nil })  // collides
+	billing.Get("/tokens", func(c *Ctx) error { return nil }) // collides too
+
+	root := quiet("root")
+	root.Use(iam)
+	root.Use(billing)
+
+	err := root.seal(here(0))
+	if err == nil {
+		t.Fatal("two apps claiming two addresses each were accepted")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"GET /users", "GET /tokens", `"iam"`, `"billing"`, "compose_test.go:",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("conflict report does not mention %q:\n%s", want, msg)
+		}
+	}
+	// BOTH, in one report — not the first and then a second build.
+	if strings.Count(msg, "declared by") != 2 {
+		t.Errorf("want 2 conflicts reported together, got:\n%s", msg)
+	}
+}
+
+// TestConflicts_NamesTheCompositionPathNotJustTheApp. "declared by billing" is
+// not enough when billing is included twice; the breadcrumb is what says which
+// inclusion.
+func TestConflicts_NamesTheCompositionPath(t *testing.T) {
+	leaf := quiet("leaf")
+	leaf.Get("/x", func(c *Ctx) error { return nil })
+
+	root := quiet("root")
+	root.Group("/v1").Use(leaf)
+	root.Group("/v1").Use(leaf) // same prefix twice: the same address twice
+
+	err := root.seal(here(0))
+	if err == nil {
+		t.Fatal("one address claimed twice was accepted")
+	}
+	if !strings.Contains(err.Error(), "root → /v1 → leaf") {
+		t.Fatalf("conflict does not carry the composition path: %v", err)
+	}
+}
+
+// ── concurrency ─────────────────────────────────────────────────────────────
+
+// TestRegistry_RaceCleanAfterSeal. Registry is read from serving goroutines —
+// the OpenAPI endpoint and the MCP tool listing both call it per request — so
+// it has to be safe without a mutex on the served path. Sealing is what buys
+// that: the program cannot change, so the projection is computed once under
+// sync.Once and shared.
+func TestRegistry_RaceCleanAfterSeal(t *testing.T) {
+	root := quiet("root")
+	root.Group("/v1").Use(billingApp())
+	root.Group("/admin").Use(billingApp())
+	if err := root.seal(here(0)); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if n := len(root.Registry()); n != 2 {
+				t.Errorf("Registry() = %d ops, want 2", n)
+			}
+			_ = root.OpenAPISpec()
+			_ = root.Commands()
+		}()
+	}
+	wg.Wait()
+}
+
+// TestRegistry_IsMemoisedOnceSealed: the same slice, not an equal one. If it
+// were rebuilt per call, every OpenAPI request would re-walk the graph.
+func TestRegistry_IsMemoisedOnceSealed(t *testing.T) {
+	root := quiet("root")
+	root.Use(billingApp())
+	if err := root.seal(here(0)); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	first := root.Registry()
+	if &first[0] != &root.Registry()[0] {
+		t.Fatal("Registry() rebuilt after seal; it must be computed once")
+	}
+}
+
+// ── the H footnote ──────────────────────────────────────────────────────────
+
+// TestH_IsNeededOnlyForABareClosureAtUse pins the migration claim in the type
+// system rather than in prose. Everything already typed as a Handler composes
+// with no wrapper; every route method still takes ...Handler so an inline
+// closure there is untouched; the ONE construct that needs H is a bare closure
+// written at a Use call, and that is a compile-time fact, not a style note.
+func TestH_IsNeededOnlyForABareClosureAtUse(t *testing.T) {
+	app := quiet("app")
+
+	// 1. A value already typed Handler is a Component. No wrapper.
+	var typed Handler = func(c *Ctx) error { return c.Continue() }
+	app.Use(typed)
+
+	// 2. A constructor that returns Handler — every middleware in the package —
+	//    is a Component. No wrapper.
+	app.Use(recoverish())
+
+	// 3. Route methods still take ...Handler, so an inline closure is fine.
+	app.Get("/x", func(c *Ctx) error { return nil })
+	app.With(func(next Handler) Handler { return next }).Post("/y", func(c *Ctx) error { return nil })
+
+	// 4. Only the bare closure at Use needs it. The commented line below is the
+	//    compile error this test exists to describe:
+	//        app.Use(func(c *Ctx) error { return c.Continue() })
+	//        → func(*Ctx) error does not implement Component (missing method component)
+	app.Use(H(func(c *Ctx) error { return c.Continue() }))
+
+	if n := len(app.entries); n != 5 {
+		t.Fatalf("got %d entries, want 5", n)
+	}
+}
+
+func recoverish() Handler { return func(c *Ctx) error { return c.Continue() } }
+
+// ── the union ───────────────────────────────────────────────────────────────
+
+// TestCompose_DocumentIsTheUnion is the property behind "Graft took iam from 4
+// paths to 164": composing is what makes a host's document the whole surface
+// rather than the wildcard it hung a closure on. Under AdaptNetHTTP the child
+// went in as an http.Handler and the count stayed at the host's own.
+//
+// The number is arithmetic here, not a fixture, so it pins the RULE.
+func TestCompose_DocumentIsTheUnion(t *testing.T) {
+	const own, childOps = 4, 160
+
+	child := quiet("iam")
+	for i := 0; i < childOps; i++ {
+		Get(child, "/v1/iam/r"+itoa(i), func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+			return &invoiceOut{}, nil
+		}, WithOperationID("iam_r"+itoa(i)))
+	}
+	host := quiet("host")
+	for i := 0; i < own; i++ {
+		Get(host, "/v1/host/r"+itoa(i), func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+			return &invoiceOut{}, nil
+		}, WithOperationID("host_r"+itoa(i)))
+	}
+	if n := len(host.OpenAPISpec()["paths"].(map[string]map[string]any)); n != own {
+		t.Fatalf("the host alone has %d paths, want %d", n, own)
+	}
+
+	host.Use(child)
+	if err := host.seal(here(0)); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	if n := len(host.OpenAPISpec()["paths"].(map[string]map[string]any)); n != own+childOps {
+		t.Fatalf("composed document has %d paths, want %d", n, own+childOps)
+	}
+	// And every other projection agrees, from the same registry.
+	if n := len(host.Registry()); n != own+childOps {
+		t.Errorf("registry has %d ops, want %d", n, own+childOps)
+	}
+	if n := len(host.Commands()); n != own+childOps {
+		t.Errorf("CLI has %d commands, want %d", n, own+childOps)
+	}
+	if n := len(host.Declaration().Routes); n != own+childOps {
+		t.Errorf("declaration has %d routes, want %d", n, own+childOps)
+	}
+}
+
+// TestCompose_ADefinitionsOwnDocumentIsUnchanged. Being included must not edit
+// what a definition says about itself: a service served standalone describes
+// its types under their plain names and its ops under the ids it declared,
+// whether or not some host somewhere composed it.
+func TestCompose_ADefinitionsOwnDocumentIsUnchanged(t *testing.T) {
+	solo := billingApp()
+	before := jsonOf(t, solo.OpenAPISpec())
+
+	host := quiet("host")
+	host.Group("/v1").Use(solo)
+	_ = host.OpenAPISpec() // the composed document is rendered
+
+	if after := jsonOf(t, solo.OpenAPISpec()); after != before {
+		t.Fatalf("being composed edited the definition's own document:\n before %s\n after  %s", before, after)
+	}
+	// Concretely: its op is still listInvoices at /invoices/{id}, not the
+	// v1.listInvoices the HOST publishes for its occurrence.
+	if id := solo.Registry()[0].OperationID; id != "listInvoices" {
+		t.Errorf("the definition's own op id became %q", id)
+	}
+	if id := host.Registry()[0].OperationID; id != "v1.listInvoices" {
+		t.Errorf("the host's occurrence id = %q, want v1.listInvoices", id)
+	}
+}
+
+func jsonOf(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
