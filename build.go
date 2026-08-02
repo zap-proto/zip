@@ -22,7 +22,27 @@ const methodAll = "ALL"
 
 // plan is the occurrence slice the live generation was built from, or a fresh
 // walk when nothing is live yet.
-func (a *App) plan() []occurrence { return a.liveOrBuild().occ }
+func (a *App) plan() []occurrence { return a.mustBuild().occ }
+
+// mustBuild is liveOrBuild for the accessors that CANNOT report an error.
+//
+// Registry and Declaration return values, not (value, error), so a program that
+// does not compose has no honest answer for them — and the dishonest one is what
+// this replaced: an invalid build rendered as an EMPTY build, 0 ops and 0 routes,
+// which every downstream projection faithfully reproduced.
+//
+// So it panics, carrying the joined error. That is the same category as mutating
+// a frozen App, and for the same reason: you cannot obtain a projection of a
+// program that does not compose. A sentinel would lose here precisely because a
+// sentinel is something a caller can ignore, and a caller ignoring it is the
+// failure this exists to stop.
+func (a *App) mustBuild() *generation {
+	g := a.liveOrBuild()
+	if a.draftErr != nil && a.live.Load() == nil {
+		panic("zip: this program does not compose, so it has no projection:\n\t" + a.draftErr.Error())
+	}
+	return g
+}
 
 // Registry is the op registry as a PROJECTION: every typed op in the
 // composition, at the path and under the id its occurrence gives it.
@@ -41,11 +61,11 @@ func (a *App) plan() []occurrence { return a.liveOrBuild().occ }
 // DEFINITION for types: the *registeredOp's InType/OutType are the definition's
 // own reflect.Types, so one Invoice struct included twice is one schema, not
 // two identical copies under two names.
-func (a *App) Registry() []*registeredOp { return a.liveOrBuild().ops }
+func (a *App) Registry() []*registeredOp { return a.mustBuild().ops }
 
 // router returns the live generation's router, building a draft if nothing is
 // live yet. It never installs — see [App.liveOrBuild].
-func (a *App) router() *fiber.App { return a.liveOrBuild().router }
+func (a *App) router() *fiber.App { return a.mustBuild().router }
 
 // composeOps reduces a walk to the op registry.
 func composeOps(occ []occurrence) []*registeredOp {

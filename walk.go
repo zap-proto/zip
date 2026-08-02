@@ -185,7 +185,62 @@ func walk(root *App) ([]occurrence, error) {
 	if err := descend(root, sc, nil, &out); err != nil {
 		return out, err
 	}
-	return out, conflicts(out)
+	return out, errors.Join(conflicts(out), toolConflicts(out), inertMiddleware(out))
+}
+
+// toolConflicts refuses two definitions claiming one MCP tool name.
+//
+// This used to be caught inside installTools, because every plugin installed its
+// catalogue onto the ONE host that loaded it, so the second one could see the
+// first. A plugin is now a definition that carries its own catalogue, so two of
+// them cannot see each other at construction — only the composition can, which
+// is the same reason address conflicts moved here when App.claim was deleted.
+//
+// A tool name is what an agent CALLS, so two claimants is not a cosmetic clash:
+// tools/call resolves by name, and the loser's tool is unreachable.
+func toolConflicts(occ []occurrence) error {
+	type claim struct {
+		by   string
+		via  string
+	}
+	held := map[string]claim{}
+	var errs []error
+	seen := map[*App]bool{}
+	var openBy *App
+	for _, o := range occ {
+		def, ok := o.app()
+		if !ok || seen[def] {
+			continue
+		}
+		seen[def] = true
+		def.plugMu.Lock()
+		tools := append([]mcpTool(nil), def.pluginTools...)
+		isOpen := def.open
+		def.plugMu.Unlock()
+		// At most one OPEN catalogue in a composition. An open plugin is asked
+		// about names no catalogue claims, so two would make an unclaimed name
+		// ambiguous — there would be no way to say which one owns it.
+		if isOpen != nil {
+			if openBy != nil {
+				errs = append(errs, fmt.Errorf("zip: two open MCP plugins: %q and %q — a name no "+
+					"catalogue claims must have one owner, and two would make it ambiguous",
+					openBy.label(), def.label()))
+			} else {
+				openBy = def
+			}
+		}
+		for _, t := range tools {
+			mine := claim{by: def.label(), via: o.ctx.trail.String()}
+			if prev, dup := held[t.name]; dup {
+				errs = append(errs, fmt.Errorf("zip: MCP tool %q: claimed by %q (via %s) and by %q (via %s) — "+
+					"a tools/call resolves by name, so the second claimant is unreachable",
+					t.name, prev.by, prev.via, mine.by, mine.via))
+				continue
+			}
+			held[t.name] = mine
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // descend is the one type switch over the closed node set. Every semantic this
@@ -314,6 +369,82 @@ func addrKey(pattern string) string {
 		p = strings.TrimSuffix(p, "/")
 	}
 	return p
+}
+
+// inertMiddleware refuses a definition that contributes middleware and no routes.
+//
+// Under §4 lexical anchoring a definition's middleware wraps THAT DEFINITION's
+// routes. With no routes there is nothing to wrap, so being inert is correct
+// behaviour — the scoping rule is not the problem and must not be bent to let
+// middleware escape upward into whoever composed it.
+//
+// What is unacceptable is that it was SILENT, and typographically identical to
+// the blessed pattern: app.Use(securityModule) reads exactly like working code
+// and did nothing at all. An auth seam is never allowed to be lost quietly, so
+// the composition is refused instead.
+//
+// The fix a user wants is almost always one of two things, and the message says
+// both: put the middleware where the routes are, or give the definition the
+// routes it is meant to guard.
+func inertMiddleware(occ []occurrence) error {
+	type state struct {
+		mw    callsite
+		hasMw bool
+		trail string
+	}
+	// Keyed by definition: one verdict per definition, however often included.
+	st := map[*App]*state{}
+	order := []*App{}
+	for _, o := range occ {
+		if o.ctx.depth == 0 {
+			continue // the app being served IS the server; its middleware is global
+		}
+		h, isMw := o.n.(Handler)
+		_ = h
+		if !isMw {
+			continue
+		}
+		def := o.in
+		if _, ok := st[def]; !ok {
+			st[def] = &state{mw: o.site, hasMw: true, trail: o.ctx.trail.String()}
+			order = append(order, def)
+		}
+	}
+	var errs []error
+	for _, def := range order {
+		// The SUBTREE, not the definition's own entries. A group's routes
+		// usually come from the definitions it includes, and its middleware
+		// legitimately wraps those — that is what a scoped Group is for.
+		if routesUnder(def, map[*App]bool{}) {
+			continue
+		}
+		s := st[def]
+		errs = append(errs, fmt.Errorf("zip: %s declares middleware at %s and no routes anywhere beneath it (via %s) — "+
+			"a definition's middleware wraps the routes in its OWN subtree, so with none it would "+
+			"silently never run; compose the routes it is meant to guard beneath it, or move the "+
+			"middleware to the app that has them",
+			def.who(), s.mw, s.trail))
+	}
+	return errors.Join(errs...)
+}
+
+// routesUnder reports whether anything in def's subtree answers an address.
+func routesUnder(def *App, seen map[*App]bool) bool {
+	if seen[def] {
+		return false // a cycle is reported elsewhere; do not spin here
+	}
+	seen[def] = true
+	for _, e := range def.entries {
+		switch n := e.n.(type) {
+		case route:
+			return true
+		case *App:
+			if routesUnder(n, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // nameOr is an app's name, or fallback when it has none.

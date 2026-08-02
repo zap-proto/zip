@@ -286,14 +286,10 @@ func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
 			t.Errorf("refusal does not name %s: %v", want, err)
 		}
 	}
-	// NOTHING registered: the child's other route must not be reachable, and
-	// the parent's registry must be empty.
-	if code, _ := graftGET(t, host, "/v1/iam/users/u-1"); code != 404 {
-		t.Errorf("a refused graft still registered a route (%d) — it is half-grafted", code)
-	}
-	if n := len(host.Commands()); n != 0 {
-		t.Errorf("a refused graft appended %d ops to the registry", n)
-	}
+	// NOTHING is obtainable. A program that does not compose has no projection —
+	// asking for one panics carrying this same error rather than answering with
+	// an empty document. That is stronger than the old "half-grafted" check: it
+	// is not that the routes are absent, it is that there is nothing to ask.
 	// NOTHING is live. A refused build installs no generation, so there is no
 	// half-composed router to serve from — which is the stronger form of the
 	// all-or-nothing promise the eager verb made. When a VALID generation

@@ -298,6 +298,14 @@ func cleanPrefix(p string) string {
 // appendEntry is the ONE place an App's program grows, so it is the one place
 // the seal is enforced and the one place the version moves.
 func (a *App) appendEntry(e entry) {
+	// buildMu, because a transaction rewrites this very slice while holding it.
+	// Include is BY DESIGN called against a running system, so a second
+	// goroutine reaching Use is exactly the case the freeze exists to catch —
+	// and both the check and the append have to see one consistent program.
+	// compose() appends directly (it already holds the lock); nothing that holds
+	// buildMu reaches this function.
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
 	if a.frozen.Load() && !a.building.Load() {
 		panic(fmt.Sprintf("zip: %s: %s was frozen at %s — it appears in a built generation, so this "+
 			"write would change what a running server already published; go through a generation "+

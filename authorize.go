@@ -47,6 +47,13 @@ func (a *App) Authorize(fn Authorizer) { a.authorizer = fn }
 // Idempotent for the projections (they render once) and monotonic for the
 // freeze. Listen calls it; there is no other way to build.
 func (a *App) Build() error {
+	// VALIDATE FIRST. prepare() renders the projections, and a projection of a
+	// program that does not compose now panics — so validating after it would
+	// turn every build error into a panic escaping the one function whose whole
+	// job is to return it.
+	if _, err := walk(a); err != nil {
+		return err
+	}
 	a.prepare()
 	a.buildMu.Lock()
 	g, err := a.build()

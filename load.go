@@ -282,9 +282,7 @@ func (p *plugin) target() (Client, string) {
 // An Unload'ed plugin stays down: bringing one back is Reload's job, and a
 // deliberate stop that any caller could undo would not be a stop at all.
 func (a *App) Start(name string) (string, error) {
-	a.plugMu.Lock()
-	p := a.plugins[name]
-	a.plugMu.Unlock()
+	_, p := a.pluginNamed(name)
 	if p == nil {
 		return "", fmt.Errorf("zip: Start: no plugin named %q", name)
 	}

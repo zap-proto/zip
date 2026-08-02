@@ -168,22 +168,24 @@ func TestMCP_ComposedListWakesNothing(t *testing.T) {
 // duplicate prefix claim: a tool NAME is dispatch, so two owners make it
 // unroutable and the composition must fail with both names rather than silently
 // forward every call to whichever loaded first.
-func TestMCP_DuplicateToolNameRefusedAtLoad(t *testing.T) {
+func TestMCP_DuplicateToolNameRefusedAtBuild(t *testing.T) {
 	bin := buildPluginBin(t, "v1")
 	tools := catalogue(t, bin)
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: tools}, "/v1/a")))
 	app.Use(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true, Tools: tools}, "/v1/b")))
+	// Refused at BUILD, not at Load: two definitions carry their own catalogues
+	// and cannot see each other at construction, so only the composition can.
+	// Same reason address conflicts moved to the walk when App.claim was deleted.
 	err := app.Build()
 	if err == nil {
-		t.Fatal("two plugins claiming one tool name must be refused at Load")
+		t.Fatal("two plugins claiming one tool name must be refused")
 	}
-	if !strings.Contains(err.Error(), "get_v1_demo_") || !strings.Contains(err.Error(), `already served by plugin "a"`) {
-		t.Fatalf("the refusal must name the tool and the holder: %v", err)
+	if !strings.Contains(err.Error(), "get_v1_demo_") ||
+		!strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
+		t.Fatalf("the refusal must name the tool and BOTH claimants: %v", err)
 	}
-	// The refused Load left nothing behind: its prefix is free for a real owner.
-	app.Use(must(zip.Load(zip.Plugin{Name: "b2", Path: bin, Lazy: true}, "/v1/b")))
 }
 
 // TestMCP_MalformedCatalogueRefusedAtLoad — a catalogue that is not a tool array
@@ -228,8 +230,12 @@ func TestMCP_LoadAfterListenIsOnTheList(t *testing.T) {
 
 	// A second catalogue with a distinct name, as a differently-built plugin would
 	// have — the duplicate case is refused, and is proven separately.
-	app.Use(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
-		Tools: []byte(`[{"name":"b_extra","description":"Added after Listen.","inputSchema":{"type":"object"}}]`)}, "/v1/b")))
+	// Include, not Use: the app is serving, so a composition change goes through
+	// a generation — it is validated and swapped, or the live one keeps serving.
+	if err := app.Include(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
+		Tools: []byte(`[{"name":"b_extra","description":"Added after Listen.","inputSchema":{"type":"object"}}]`)}, "/v1/b"))); err != nil {
+		t.Fatalf("Include after Listen: %v", err)
+	}
 	names := toolNames(t, listBody(t, app))
 	if len(names) != before+1 {
 		t.Fatalf("a plugin Load'ed after Listen is not on the list: %v", names)

@@ -206,7 +206,7 @@ func TestRed_AnUnknownMethodIsRefusedAtTheBoundary(t *testing.T) {
 	}
 }
 
-func TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck(t *testing.T) {
+func TestRed_MethodCaseIsNormalisedBeforeTheConflictCheck(t *testing.T) {
 	host := quiet("host")
 	host.Get("/v1/thing", func(c *Ctx) error { return c.String(200, "host") })
 
@@ -219,11 +219,19 @@ func TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck(t *testing.T) {
 	}
 	host.Use(remote)
 
-	buildErr := build(host)
-	_, body := wireGET(t, host, "/v1/thing")
-	if buildErr == nil {
-		t.Errorf("two definitions claim GET /v1/thing and the walk reported NO conflict; "+
-			"%q silently wins — walk.go addrKey normalises the path but not the method", body)
+	// FIXED. fiber upper-cases the method inside register(), so a hand-written
+	// Declaration saying "get" collided at runtime with the host's Get while
+	// looking like a different key to the walk. conflicts() now upper-cases
+	// before comparing. (The program does not build, so nothing may be asked of
+	// its projections — see TestRed_ABuildErrorPanicsRatherThanEmptying...)
+	err = build(host)
+	if err == nil {
+		t.Fatal(`"get" and "GET" claimed one address and the walk reported no conflict`)
+	}
+	for _, want := range []string{"GET /v1/thing", `"host"`, `"remote"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %s: %v", want, err)
+		}
 	}
 }
 
@@ -240,37 +248,53 @@ func TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck(t *testing.T) {
 //
 // The worst reachable form is `app.Described()`: a release pipeline writes a
 // declaration/OpenAPI file describing ZERO routes and exits 0.
-func TestRed_ABuildErrorSilentlyEmptiesEveryProjection(t *testing.T) {
+func TestRed_ABuildErrorPanicsRatherThanEmptyingEveryProjection(t *testing.T) {
+	// FIXED. One duplicated address used to turn Registry, Fiber, Declaration,
+	// OpenAPISpec and the CLI into EMPTY answers with no error anywhere — and
+	// the worst reachable form was `app declare` writing {"routes":[]} and
+	// exiting 0, so a release pipeline shipped an empty API document for a
+	// broken service and every downstream projection reproduced the emptiness.
+	//
+	// Registry and Declaration return values, not (value, error), so a program
+	// that does not compose has no honest answer for them. They panic, carrying
+	// the joined error. Same category as mutating a frozen App: you cannot
+	// obtain a projection of a program that does not compose. A sentinel loses
+	// here precisely because a sentinel can be ignored, and a caller ignoring it
+	// is the failure this exists to stop.
 	a := billingApp() // one typed op: GET /invoices/:id
 	a.Get("/healthz", redOK)
-	a.Get("/healthz", redOK) // the whole defect needs exactly this one line
+	a.Get("/healthz", redOK) // the whole defect needed exactly this one line
 
-	// The information exists. build() has it.
 	if err := build(a); err == nil {
 		t.Fatal("setup: the duplicate was not detected at all")
 	} else if !strings.Contains(err.Error(), "/healthz") {
 		t.Fatalf("setup: unexpected build error: %v", err)
 	}
 
-	if got := len(a.Registry()); got == 0 {
-		t.Errorf("Registry() reports 0 ops for a program that declares 1, and returns no error — " +
-			"generation.go:266 discards the build error and substitutes an empty generation")
-	}
-	if d := a.Declaration(); len(d.Routes) == 0 {
-		t.Errorf("Declaration() reports 0 routes for a program that declares 3, and returns no error")
-	}
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("Registry() answered for a program that does not compose")
+			}
+			if msg, _ := r.(string); !strings.Contains(msg, "/healthz") {
+				t.Errorf("the panic does not carry the build error: %v", r)
+			}
+		}()
+		_ = a.Registry()
+	}()
 
-	// The projection a release pipeline actually consumes.
+	// And the projection a release pipeline consumes writes NOTHING and fails.
 	dest := filepath.Join(t.TempDir(), "declare.json")
-	if err := a.project(Declare, dest); err != nil {
-		t.Fatalf("project: %v", err)
+	err := a.project(Declare, dest)
+	if err == nil {
+		t.Fatal("`app declare` wrote a document for a program that does not build")
 	}
-	body, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatalf("read: %v", err)
+	if !strings.Contains(err.Error(), "does not build") {
+		t.Errorf("refusal does not say why: %v", err)
 	}
-	if strings.Contains(string(body), `"routes": []`) {
-		t.Errorf("`app declare` wrote an EMPTY declaration and exited 0 for a broken program:\n%s", body)
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Errorf("a refused projection still created %s", dest)
 	}
 }
 
@@ -284,7 +308,15 @@ func TestRed_ABuildErrorSilentlyEmptiesEveryProjection(t *testing.T) {
 // This is load-bearing now that HEAD deleted App.claim: every mount and every
 // plugin registers its prefix as methodAll, and the commit that removed the
 // claims ledger asserts the walk "answers it better".
-func TestRed_AllShadowsAConcreteMethodAndTheWalkSaysNothing(t *testing.T) {
+func TestRed_AllCollidesWithAConcreteMethod(t *testing.T) {
+	// FIXED. methodAll is stored as the literal "ALL", so "ALL /v1/thing" and
+	// "GET /v1/thing" were two keys to the walk and ONE address at runtime:
+	// whichever fiber registered first answered, and the other definition's
+	// route was dead code.
+	//
+	// Load-bearing, because deleting App.claim was justified on the walk
+	// answering better — and the ledger's strongest case was mounts and plugin
+	// prefixes, every one of which registers as methodAll.
 	gateway := quiet("gateway")
 	gateway.All("/v1/thing", func(c *Ctx) error { return c.String(200, "gateway") })
 
@@ -295,56 +327,55 @@ func TestRed_AllShadowsAConcreteMethodAndTheWalkSaysNothing(t *testing.T) {
 	host.Use(gateway, owner)
 
 	err := build(host)
-	_, body := wireGET(t, host, "/v1/thing")
 	if err == nil {
-		t.Errorf("two definitions claim GET /v1/thing (one via All) and the walk reported NO conflict; "+
-			"%q silently wins and the other route is dead — walk.go:265 keys methodAll as its own method", body)
+		t.Fatal("an All and a Get claimed one address and the walk reported no conflict")
 	}
-}
-
-// TestRed_AMiddlewareOnlyDefinitionIsSilentlyInert.
-//
-// materialise registers depth-0 middleware as router middleware and composes
-// depth>0 middleware into the routes of its own subtree. A definition that
-// declares middleware and NO routes therefore has nowhere for its middleware to
-// go, and it is dropped on the floor — not applied to the host, not applied to
-// anything.
-//
-// The shape is the obvious way to package a cross-cutting concern as a unit
-// under one composition verb, it looks exactly like the blessed staged
-// composition example, and neither the build nor Lint says a word.
-func TestRed_AMiddlewareOnlyDefinitionIsSilentlyInert(t *testing.T) {
-	sec := quiet("sec") // a security module: middleware, no routes of its own
-	sec.Use(H(func(c *Ctx) error {
-		if c.Header("Authorization") == "" {
-			return Errorf(401, "no credentials")
+	for _, want := range []string{"/v1/thing", `"gateway"`, `"owner"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %s: %v", want, err)
 		}
-		return c.Continue()
-	}))
-
-	app := quiet("host")
-	app.Use(sec) // "install the security module"
-	app.Get("/private", redOK)
-
-	if err := build(app); err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	if code, _ := wireGET(t, app, "/private"); code != 401 {
-		t.Errorf("an included middleware-only definition never runs: GET /private = %d "+
-			"(build.go:113 skips depth>0 middleware; it has no routes to be composed into)", code)
-	}
-	if len(app.Lint()) == 0 {
-		t.Errorf("...and Lint() reports nothing, so the inert guard is invisible")
 	}
 }
 
-// TestRed_IncludeOnAFrozenChildIsASilentNoOp.
-//
-// appendEntry's panic tells the programmer to "go through a generation
-// (App.Include / App.Drop)". Taking that advice on anything but the ROOT is a
-// silent no-op: transact builds and installs a generation on the RECEIVER, and
-// a group has no listener, so the host keeps serving the old one and Include
-// returns nil.
+func TestRed_AMiddlewareOnlyDefinitionIsRefusedAtSeal(t *testing.T) {
+	// FIXED, by refusing rather than by bending the scoping rule.
+	//
+	// Under lexical anchoring a definition's middleware wraps THAT definition's
+	// routes; with no routes there is nothing to wrap, so inert is CORRECT. The
+	// defect was that it was silent and typographically identical to the blessed
+	// pattern — app.Use(securityModule) reads exactly like working code and did
+	// nothing at all, and Lint() said nothing either.
+	//
+	// Letting the middleware escape upward would have broken §4 for every other
+	// definition, so the composition is refused instead.
+	sec := quiet("sec")
+	sec.Use(H(redGuard(redOK))) // a guard, and nothing to guard
+
+	host := quiet("host")
+	host.Get("/private", redOK)
+	host.Use(sec)
+
+	err := build(host)
+	if err == nil {
+		t.Fatal("a middleware-only definition was composed, and its guard silently never ran")
+	}
+	for _, want := range []string{`"sec"`, "no routes", "red_test.go:"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not mention %q: %v", want, err)
+		}
+	}
+
+	// The correct spelling still works: give the definition the routes it guards.
+	ok := quiet("ok")
+	ok.Use(H(redGuard(redOK)))
+	ok.Get("/guarded", redOK)
+	host2 := quiet("host2")
+	host2.Use(ok)
+	if err := build(host2); err != nil {
+		t.Fatalf("a definition with middleware AND routes was refused: %v", err)
+	}
+}
+
 func TestRed_IncludeOnAFrozenChildIsASilentNoOp(t *testing.T) {
 	host := quiet("host")
 	v1 := host.Group("/v1")

@@ -96,13 +96,13 @@ func (a *App) mcpName() string {
 // must answer it without touching a single child. A pluginTools entry is a
 // build-time catalogue, so the answer is a memcpy and the process count is zero.
 func (a *App) installMCP() {
-	if a.cfg.MCP.Disabled || (len(a.Registry()) == 0 && len(a.pluginTools) == 0 && !a.hasCaller()) {
+	if a.cfg.MCP.Disabled || (len(a.Registry()) == 0 && len(a.tools()) == 0 && !a.hasCaller()) {
 		return
 	}
 	a.renderTools()
 	a.control(fiber.MethodPost, a.mcpPath(), a.handleMCP)
 	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.Registry()),
-		"plugin tools", len(a.pluginTools), "per-caller", a.hasCaller())
+		"plugin tools", len(a.tools()), "per-caller", a.hasCaller())
 }
 
 // hasCaller reports that this door has a per-caller half at all — a Source of its
@@ -142,7 +142,8 @@ type mcpTool struct {
 // that back out of the bytes would re-parse hundreds of schemas per request.
 func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 	own := a.Registry()
-	all := make([]mcpTool, 0, len(own)+len(a.pluginTools))
+	pluginTools := a.tools()
+	all := make([]mcpTool, 0, len(own)+len(pluginTools))
 	for _, op := range own {
 		b, err := json.Marshal(mcpToolOf(op))
 		if err != nil {
@@ -151,7 +152,7 @@ func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 		}
 		all = append(all, mcpTool{name: opName(op), raw: b})
 	}
-	all = append(all, a.pluginTools...)
+	all = append(all, pluginTools...)
 	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
 
 	raws := make([]json.RawMessage, len(all))
@@ -357,9 +358,15 @@ func (a *App) callerTools(fc fiber.Ctx) []mcpTool {
 // openPlugin is the plugin that declared an OPEN catalogue, or nil. At most one:
 // see installTools.
 func (a *App) openPlugin() *plugin {
-	a.plugMu.Lock()
-	defer a.plugMu.Unlock()
-	return a.open
+	for _, h := range a.hosts() {
+		h.plugMu.Lock()
+		p := h.open
+		h.plugMu.Unlock()
+		if p != nil {
+			return p
+		}
+	}
+	return nil
 }
 
 // askOpen forwards this very request — fc's own tools/list message — to one open plugin and lifts the tools out
@@ -512,9 +519,33 @@ func (a *App) mcpAnswer(fc fiber.Ctx, req mcpRequest, out any, err error) error 
 
 // toolOwner is the plugin that declared name in its catalogue, or nil.
 func (a *App) toolOwner(name string) *plugin {
-	a.plugMu.Lock()
-	defer a.plugMu.Unlock()
-	return a.toolOwners[name]
+	for _, h := range a.hosts() {
+		h.plugMu.Lock()
+		p := h.toolOwners[name]
+		h.plugMu.Unlock()
+		if p != nil {
+			return p
+		}
+	}
+	return nil
+}
+
+// tools is every composed plugin's build-time catalogue, gathered by walking.
+//
+// A plugin used to install its catalogue onto whatever host loaded it, so one
+// map answered. A plugin is now a DEFINITION, so its catalogue lives with it and
+// the host finds it the way it finds everything else about its composition. Same
+// move the op registry made, and the same one Plugins/Reload/Unload made: one
+// walk, and no projection keeps a private copy of what the program already says.
+func (a *App) tools() []mcpTool {
+	var out []mcpTool
+	for _, h := range a.hosts() {
+		h.plugMu.Lock()
+		out = append(out, h.pluginTools...)
+		h.plugMu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
 }
 
 // mcpForward hands the SAME JSON-RPC message to the plugin that owns the tool,
