@@ -2,6 +2,7 @@ package zip
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/valyala/fasthttp"
 	fiber "github.com/zap-proto/fiber/v3"
@@ -85,6 +86,13 @@ func (a *App) build() (*generation, error) {
 // install makes g live and freezes every definition it reaches. Freezing is
 // what earns the lock-free read: a definition that cannot change cannot
 // invalidate a projection taken from it.
+// serving is every App with a live generation. A definition does not know where
+// it is included — that is the point of inclusion by reference — so when a
+// composition change lands on a CHILD, the only way to find the servers affected
+// is to ask the servers. There are a handful of them per process, and this runs
+// at composition time, never per request.
+var serving sync.Map // *App -> struct{}
+
 func (a *App) install(g *generation) {
 	site := here(1)
 	for _, o := range g.occ {
@@ -94,6 +102,13 @@ func (a *App) install(g *generation) {
 	}
 	a.freeze(site)
 	a.live.Store(g)
+	serving.Store(a, struct{}{})
+	// The MCP door serves pre-rendered bytes — that is what makes tools/list free
+	// — so a new generation has to re-render them or an agent keeps reading the
+	// previous composition's tool set.
+	if a.mcpList.Load() != nil {
+		a.renderTools()
+	}
 }
 
 func (a *App) freeze(site callsite) {
@@ -201,14 +216,54 @@ func (a *App) transact(site callsite, edit func()) error {
 	edit()
 	a.building.Store(false)
 
-	g, err := a.build()
-	if err != nil {
-		return fmt.Errorf("zip: %s: composition refused, generation %d still serving: %w",
-			site, a.liveN(), err)
+	// Every server this edit can reach must be rebuilt, not just the receiver.
+	// Include on a group used to return nil and change nothing a host served —
+	// while the freeze panic RECOMMENDED Include — because transact installed
+	// onto the receiver and a group has no listener.
+	targets := a.affected()
+	built := make([]*generation, len(targets))
+	for i, t := range targets {
+		g, err := t.build()
+		if err != nil {
+			return fmt.Errorf("zip: %s: composition refused, generation %d still serving: %w",
+				site, t.liveN(), err)
+		}
+		built[i] = g
 	}
-	a.install(g)
+	// Every build succeeded, so nothing below can fail: the swap is the only
+	// observable moment, and it is one atomic store per server.
+	for i, t := range targets {
+		t.install(built[i])
+	}
 	ok = true
 	return nil
+}
+
+// affected is the receiver if it is itself a server, plus every live server that
+// reaches it. Deduplicated, receiver first.
+func (a *App) affected() []*App {
+	out := []*App{}
+	seen := map[*App]bool{}
+	if a.live.Load() != nil {
+		out, seen[a] = append(out, a), true
+	}
+	serving.Range(func(k, _ any) bool {
+		root := k.(*App)
+		if seen[root] || root.live.Load() == nil {
+			return true
+		}
+		for _, o := range root.plan() {
+			if def, ok := o.app(); ok && def == a {
+				out, seen[root] = append(out, root), true
+				return true
+			}
+		}
+		return true
+	})
+	if len(out) == 0 {
+		out = append(out, a) // nothing live yet: build the receiver, as before
+	}
+	return out
 }
 
 func (a *App) liveN() uint64 {
