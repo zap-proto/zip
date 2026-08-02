@@ -26,9 +26,9 @@ package zip
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,7 +170,7 @@ type App struct {
 	draft    *generation
 	draftAt  uint64
 	draftErr error
-	buildMu sync.Mutex
+	buildMu  sync.Mutex
 	// building is set while a transaction holds a private copy of the entry list,
 	// which is the one moment a frozen App legitimately grows. ATOMIC: Include is
 	// by design called against a running system, so a second goroutine reaching

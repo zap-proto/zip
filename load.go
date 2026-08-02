@@ -366,7 +366,6 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	}
 	prefix := prefixes[0]
 
-
 	// The MCP catalogue is read BEFORE anything is mounted or spawned, for the
 	// same reason the prefixes are claimed first: a composition that cannot be
 	// described must not first pay for its process.

@@ -200,8 +200,8 @@ func walk(root *App) ([]occurrence, error) {
 // tools/call resolves by name, and the loser's tool is unreachable.
 func toolConflicts(occ []occurrence) error {
 	type claim struct {
-		by   string
-		via  string
+		by  string
+		via string
 	}
 	held := map[string]claim{}
 	var errs []error
