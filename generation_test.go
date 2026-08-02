@@ -32,7 +32,7 @@ func TestGeneration_RefusedIncludeLeavesTheOldOneServing(t *testing.T) {
 	bad := quiet("bad")
 	bad.Get("/v1/good", func(c *Ctx) error { return c.String(200, "bad") })
 
-	err := host.Include(bad)
+	err := hostOf(t, host).Include(bad)
 	if err == nil {
 		t.Fatal("a colliding plugin was accepted")
 	}
@@ -68,7 +68,7 @@ func TestGeneration_IncludeAdvancesAndServes(t *testing.T) {
 
 	later := quiet("later")
 	later.Get("/v1/later", func(c *Ctx) error { return c.String(200, "later") })
-	if err := host.Include(later); err != nil {
+	if err := hostOf(t, host).Include(later); err != nil {
 		t.Fatalf("Include: %v", err)
 	}
 	if n, _ := host.Generation(); n != 1 {
@@ -116,7 +116,7 @@ func TestGeneration_DropStopsServingEveryOccurrence(t *testing.T) {
 	// referenced billing — the groups did. An entry belongs to the app that wrote
 	// it, so a host can only drop what the host included; anything else would let
 	// one host reach into a definition another host also serves.
-	if err := host.Drop(billing); err != nil {
+	if err := hostOf(t, host).Drop(billing); err != nil {
 		t.Fatalf("Drop(billing): %v", err)
 	}
 	if code, _ := wireGET(t, host, "/a/invoices/i-1"); code != 200 {
@@ -132,7 +132,7 @@ func TestGeneration_DropStopsServingEveryOccurrence(t *testing.T) {
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 group entries, got %d", len(groups))
 	}
-	if err := host.Drop(groups...); err != nil {
+	if err := hostOf(t, host).Drop(groups...); err != nil {
 		t.Fatalf("Drop: %v", err)
 	}
 	// 2, not 1: the no-op Drop above ran a transaction and installed a
@@ -166,7 +166,7 @@ func TestGeneration_DropOfNothingIsANoOpGeneration(t *testing.T) {
 		t.Fatalf("generation 0: %v", err)
 	}
 	unrelated := quiet("unrelated")
-	if err := host.Drop(unrelated); err != nil {
+	if err := hostOf(t, host).Drop(unrelated); err != nil {
 		t.Fatalf("dropping something not composed: %v", err)
 	}
 	if code, _ := wireGET(t, host, "/x"); code != 200 {
@@ -227,7 +227,7 @@ func TestGeneration_RequestsArePinned(t *testing.T) {
 	// Swap generations while the request is in flight.
 	later := quiet("later")
 	later.Get("/v1/later", func(c *Ctx) error { return nil })
-	if err := host.Include(later); err != nil {
+	if err := hostOf(t, host).Include(later); err != nil {
 		t.Fatalf("Include during an in-flight request: %v", err)
 	}
 	if n, _ := host.Generation(); n != 1 {

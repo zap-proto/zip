@@ -55,7 +55,7 @@ func TestRed_DropNeverMovesTheVersionCounter(t *testing.T) {
 	}
 	before := version.Load()
 
-	if err := child.Drop(sub); err != nil {
+	if err := hostOf(t, child).Drop(sub); err != nil {
 		t.Fatalf("Drop: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestRed_TheSealIsNotEnforcedUnderConcurrency(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			c := quiet("c")
 			c.Get("/red/"+itoa(i), redOK)
-			_ = host.Include(c)
+			_ = hostOf(t, host).Include(c)
 		}
 	}()
 	// Anything else that reaches Use. The seal's whole job is to refuse this
@@ -149,7 +149,7 @@ func TestRed_RefusedIncludeStillAdoptsTheChildsTeardown(t *testing.T) {
 	var torn atomic.Bool
 	bad.OnShutdown(func(context.Context) error { torn.Store(true); return nil })
 
-	if err := host.Include(bad); err == nil {
+	if err := hostOf(t, host).Include(bad); err == nil {
 		t.Fatal("setup: the colliding definition was accepted")
 	}
 
@@ -376,54 +376,51 @@ func TestRed_AMiddlewareOnlyDefinitionIsRefusedAtSeal(t *testing.T) {
 	}
 }
 
-func TestRed_IncludeOnAFrozenChildIsASilentNoOp(t *testing.T) {
+func TestRed_IncludeIsAHostVerbSoTheNoOpIsUnaskable(t *testing.T) {
+	// FIXED, by moving the verb rather than by fixing the reach.
+	//
+	// Include used to live on *App. Called on a GROUP it returned nil and changed
+	// nothing a host served, because transact installed onto the receiver and a
+	// group has no listener — while the freeze panic RECOMMENDED Include. The
+	// first fix answered "which hosts does this reach?" with a process-level
+	// server registry, reachability filtering and cross-host locks.
+	//
+	// Anchoring the verb to the host makes the question unaskable: there is no
+	// App.Include to call on a group, and host.Include edits the host's own
+	// program. All that machinery is gone.
 	host := quiet("host")
-	v1 := host.Group("/v1").(*App) // Include is App-level composition
-	v1.Get("/a", redOK)
-	if err := build(host); err != nil {
-		t.Fatalf("generation 0: %v", err)
-	}
+	host.Get("/live", redOK)
+	v1 := host.Group("/v1") // Router now, not *App — the abstraction survives
+	v1.Get("/x", redOK)
 
-	// The advice the panic gives.
-	var advice string
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				advice, _ = r.(string)
-			}
-		}()
-		v1.Get("/late", redOK)
-	}()
-	if !strings.Contains(advice, "App.Include") {
-		t.Fatalf("setup: the freeze panic no longer names Include: %q", advice)
+	h, err := host2(host)
+	if err != nil {
+		t.Fatalf("host: %v", err)
 	}
 
 	later := quiet("later")
 	later.Get("/later", redOK)
-	if err := v1.Include(later); err != nil {
-		t.Fatalf("Include on the frozen group: %v", err)
+	if err := h.Include(later); err != nil {
+		t.Fatalf("Include: %v", err)
 	}
-
-	if code, _ := wireGET(t, host, "/v1/later"); code != 200 {
-		t.Errorf("Include on a frozen CHILD returned nil and changed nothing the host serves: "+
-			"GET /v1/later = %d — transact installs onto the receiver, not onto the root", code)
+	// It took effect — no silent no-op anywhere.
+	if code, _ := wireGET(t, host, "/later"); code != 200 {
+		t.Errorf("host.Include did not take effect: %d", code)
 	}
+	// And the group is still frozen: composing into it panics and points at the
+	// host verb, which now actually works.
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("a frozen group accepted a direct Use")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "frozen") {
+			t.Errorf("panic does not name the freeze: %v", r)
+		}
+	}()
+	v1.Get("/sneak", redOK)
 }
 
-// TestRed_ANilHandlerIsAcceptedAtBoot.
-//
-// App.Use filters nil Handlers (compose.go:218). The route methods do not: they
-// copy the slice, hand each element to toFiberHandler, and the resulting closure
-// is non-nil, so fiber's own nil-handler check passes too. The registration is
-// accepted and the FIRST request nil-derefs.
-//
-// router.go:95 promises the opposite in as many words: "Registering a route with
-// no handler is a programmer error and panics at boot, never at request time."
-//
-// The deref happens on a fasthttp serve goroutine, so it is not an error a
-// handler returns and not something a recover middleware can reach — it takes
-// the process down. (Deliberately not driven here; doing so kills the test
-// binary. The boot-time contract is the assertion.)
 func TestRed_ANilHandlerIsAcceptedAtBoot(t *testing.T) {
 	app := quiet("host")
 	var uninitialised Handler // e.g. a package-level middleware var, never set
@@ -521,12 +518,12 @@ func TestRed_CleanDescendAncestorAliasing(t *testing.T) {
 		t.Fatalf("diamond composition reported an error: %v", err)
 	}
 	n := 0
-	_ = walk(root, func(nd node, sc scope, site callsite) error {
-		if r, ok := nd.(route); ok && strings.HasSuffix(r.path, "/shared") {
+	occ, _ := walk(root)
+	for _, o := range occ {
+		if r, ok := o.route(); ok && strings.HasSuffix(r.path, "/shared") {
 			n++
 		}
-		return nil
-	})
+	}
 	if n != 2 {
 		t.Fatalf("one definition reached by two paths yielded %d occurrences, want 2", n)
 	}

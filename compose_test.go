@@ -40,12 +40,12 @@ func billingApp() *App {
 // absolute path, or -1 when nothing answers there.
 func mwAt(a *App, path string) int {
 	got := -1
-	_ = walk(a, func(n node, sc scope, site callsite) error {
-		if r, ok := n.(route); ok && sc.abs(r.path) == path {
-			got = sc.mw.len()
+	occ, _ := walk(a)
+	for _, o := range occ {
+		if r, ok := o.route(); ok && o.abs(r.path) == path {
+			got = o.ctx.mw.len()
 		}
-		return nil
-	})
+	}
 	return got
 }
 
@@ -54,17 +54,19 @@ func mwAt(a *App, path string) int {
 // builds its own.
 func kinds(a *App) []string {
 	var out []string
-	_ = walk(a, func(n node, sc scope, site callsite) error {
-		switch v := n.(type) {
-		case Handler:
+	occ, _ := walk(a)
+	for _, o := range occ {
+		switch o.kind() {
+		case kindMiddleware:
 			out = append(out, "mw")
-		case route:
-			out = append(out, v.method+" "+sc.abs(v.path))
-		case *App:
-			out = append(out, "app:"+v.label()+"@"+sc.prefix)
+		case kindRoute:
+			r, _ := o.route()
+			out = append(out, r.method+" "+o.abs(r.path))
+		case kindApp:
+			def, _ := o.app()
+			out = append(out, "app:"+def.label()+"@"+o.ctx.prefix)
 		}
-		return nil
-	})
+	}
 	return out
 }
 
@@ -667,3 +669,19 @@ func jsonOf(t *testing.T, v any) string {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// hostOf returns the Host running a, building generation 0 if it has none.
+// Include and Drop are HOST verbs — a program extends with Use, a running one
+// publishes a new generation — so a test that changes a live composition needs
+// the host, not the App.
+func hostOf(t *testing.T, a *App) *Host {
+	t.Helper()
+	if _, live := a.Generation(); live {
+		return &Host{app: a}
+	}
+	h, err := host(a)
+	if err != nil {
+		t.Fatalf("host: %v", err)
+	}
+	return h
+}

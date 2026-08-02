@@ -49,8 +49,56 @@ import (
 // A program under construction has one writer by definition; adding a mutex
 // would buy nothing and would put a lock on the served path.
 
+// occurrence is the walk's internal flattened result — ONE per visit — and it
+// is unexported and non-semantic on purpose.
+//
+// It is not a public model and not a stored source of truth: the TREE remains
+// canonical, and this is what one traversal of it produced. The materialised
+// form is deliberate. The alternatives are rewalking once per reducer, buffering
+// secretly (the slice exists but the document lies), or rendering during
+// traversal — which weakens validation-before-rendering, the one ordering every
+// other guarantee rests on. At real scale, a thousand-odd routes, the slice is
+// free.
+//
+// What died is its claim to be part of the language: zip exports no IR — no
+// Occurrence type, no stored model, no cached contract.
+type occurrence struct {
+	// n is the payload: Handler, route or *App.
+	n node
+	// ctx is where this visit sits.
+	ctx scope
+	// site is where the entry was written.
+	site callsite
+}
+
+// kind is the NORMALISED discriminator downstream code may switch on. Reducers
+// switch on this, never on payload types — the only type switch over node lives
+// in walk.go, and a package test enforces it.
+type kind uint8
+
+const (
+	kindMiddleware kind = iota
+	kindRoute
+	kindApp
+)
+
+func (o occurrence) kind() kind {
+	switch o.n.(type) {
+	case Handler:
+		return kindMiddleware
+	case route:
+		return kindRoute
+	default:
+		return kindApp
+	}
+}
+
+func (o occurrence) route() (route, bool)   { r, ok := o.n.(route); return r, ok }
+func (o occurrence) app() (*App, bool)      { a, ok := o.n.(*App); return a, ok }
+func (o occurrence) abs(path string) string { return joinPath(o.ctx.prefix, path) }
+
 // scope is a visit's path context: everything that is a property of WHERE
-// rather than of WHAT. It is handed to the callback and never retained.
+// rather than of WHAT.
 type scope struct {
 	// in is the definition whose entry list this visit came from — the app that
 	// WROTE the entry, which is never the same question as where it now runs.
@@ -148,27 +196,29 @@ func (t *trail) String() string {
 	return strings.Join(parts, " → ")
 }
 
-// walk visits every entry of a composition in flattened preorder, handing the
-// callback the node, its path context and where it was written.
+// walk flattens a composition and returns the result.
 //
-// There is no payload type and nothing retains the sequence. The callback's
-// parameters WERE the payload, so a struct wrapping them was a noun invented to
-// carry what three arguments already carry — and retaining the slice made every
-// backend a consumer of a materialised intermediate rather than a reducer over
-// a traversal.
+// One function, and the ONLY code that inspects entry payloads as
+// Handler | route | *App. Depth-first, in entry order, carrying context:
+// prefix path, middleware stack (copies share structure), origin trail.
 //
-// It does NOT validate. Cycles are detected here because the traversal cannot
-// proceed through one, but conflicts are a separate first pass ([validate]), so
-// that cycles and conflicts complete — with trails — before any backend sees a
-// single visit.
-func walk(root *App, visit func(n node, sc scope, site callsite) error) error {
+// It does not validate beyond what the traversal itself cannot survive — a
+// cycle, which has nothing to enumerate past. Structural and derived validation
+// are separate stages that consume this result, so both complete with trails
+// before any reducer runs.
+//
+// BINDING REQUIREMENT: every validator and reducer consumes this result. None
+// reopens App.entries or recurses the tree, and none switches on payload types —
+// they switch on the normalised [kind]. TestOnlyOneTypeSwitchOverNode enforces
+// it mechanically.
+func walk(root *App) ([]occurrence, error) {
+	out := make([]occurrence, 0, 32)
 	sc := scope{in: root, trail: (*trail)(nil).push(nameOr(root, "root"), callsite{})}
-	return descend(root, sc, nil, visit)
+	if err := descend(root, sc, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
-
-// abs is the absolute path a visit answers at: the definition's own path
-// composed with the prefix accumulated along the ancestor chain.
-func (sc scope) abs(path string) string { return joinPath(sc.prefix, path) }
 
 // descend is the one type switch over the closed node set. Every semantic this
 // package claims about composition is a readable property of this function
@@ -182,7 +232,7 @@ func (sc scope) abs(path string) string { return joinPath(sc.prefix, path) }
 //     prefixes answers at two absolute paths;
 //   - the ancestor set is the cycle check, so `a.Use(b); b.Use(a)` is an error
 //     with a breadcrumb instead of a hang.
-func descend(a *App, sc scope, ancestors []*App, visit func(node, scope, callsite) error) error {
+func descend(a *App, sc scope, ancestors []*App, out *[]occurrence) error {
 	for _, up := range ancestors {
 		if up == a {
 			return fmt.Errorf("zip: cycle: %s — an App cannot include itself, "+
@@ -196,14 +246,12 @@ func descend(a *App, sc scope, ancestors []*App, visit func(node, scope, callsit
 		switch n := e.n.(type) {
 		case Handler:
 			mw = mw.push(n, e.site, sc.depth)
-			if err := visit(n, scope{in: a, prefix: sc.prefix, mw: mw, trail: sc.trail, depth: sc.depth}, e.site); err != nil {
-				return err
-			}
+			*out = append(*out, occurrence{n: n, site: e.site,
+				ctx: scope{in: a, prefix: sc.prefix, mw: mw, trail: sc.trail, depth: sc.depth}})
 
 		case route:
-			if err := visit(n, scope{in: a, prefix: sc.prefix, mw: mw, trail: sc.trail, depth: sc.depth}, e.site); err != nil {
-				return err
-			}
+			*out = append(*out, occurrence{n: n, site: e.site,
+				ctx: scope{in: a, prefix: sc.prefix, mw: mw, trail: sc.trail, depth: sc.depth}})
 
 		case *App:
 			// The included app's environment is anchored HERE. Everything the
@@ -216,10 +264,9 @@ func descend(a *App, sc scope, ancestors []*App, visit func(node, scope, callsit
 				trail:  sc.trail.push(n.label(), e.site),
 				depth:  sc.depth + 1,
 			}
-			if err := visit(n, scope{in: a, prefix: inner.prefix, mw: mw, trail: inner.trail, depth: inner.depth}, e.site); err != nil {
-				return err
-			}
-			if err := descend(n, inner, ancestors, visit); err != nil {
+			*out = append(*out, occurrence{n: n, site: e.site,
+				ctx: scope{in: a, prefix: inner.prefix, mw: mw, trail: inner.trail, depth: inner.depth}})
+			if err := descend(n, inner, ancestors, out); err != nil {
 				return err
 			}
 		}
@@ -227,54 +274,42 @@ func descend(a *App, sc scope, ancestors []*App, visit func(node, scope, callsit
 	return nil
 }
 
-// verify is the FIRST PASS, and its own traversal.
+// structural is validation stage ONE: everything decidable from the shape of the
+// composition alone — cycles (already caught by the traversal), duplicated
+// addresses, MCP tool-name collisions, two open catalogues, and middleware with
+// nothing beneath it.
 //
-// Cycles and conflicts complete — with trails — before any backend sees a
-// single visit. Interleaving validation with a backend's visits would mean a
-// router half-built out of a program that turns out not to compose, so the
-// separation is the guarantee rather than a tidiness preference.
-//
-// It reports EVERY problem, not the first. Failing fast would mean composing
-// two apps that disagree about three addresses takes three builds to learn
-// three facts. And the traversal is the only place with enough context to name
+// It reports EVERY problem, not the first. Failing fast would mean composing two
+// apps that disagree about three addresses takes three builds to learn three
+// facts. And the flattened result is the only place with enough context to name
 // BOTH parties: it sees the whole set symmetrically, so it can say which two
-// definitions claimed an address and where each was written. Eager composition
-// could only ever attribute a collision to whichever app composed SECOND, which
-// is wiring-file line order and means nothing.
-func verify(root *App) error {
+// definitions claimed an address and where each was written.
+func structural(occ []occurrence) error {
 	type claim struct {
 		by   string
 		site callsite
 		via  string
 	}
-	// Addresses, keyed by PATH then method — see the note in this file on why
-	// the method needs normalising and why ALL collides with everything.
 	held := make(map[string]map[string]claim)
-
-	// MCP tool names: two definitions cannot claim one, because a tools/call
-	// resolves by name and the loser is unreachable. At most one OPEN
-	// catalogue, for the same reason a name no catalogue claims needs one owner.
 	tools := map[string]claim{}
 	var openBy *App
 
-	// Middleware with nothing beneath it. Keyed by definition: one verdict per
-	// definition, however often it is included.
 	type inert struct {
 		mw    callsite
 		trail string
 	}
 	mwOnly := map[*App]*inert{}
 	var mwOrder []*App
-
 	seenDef := map[*App]bool{}
 	var errs []error
 
-	if err := walk(root, func(n node, sc scope, site callsite) error {
-		switch v := n.(type) {
-		case route:
-			method := strings.ToUpper(v.method)
-			path := addrKey(sc.abs(v.path))
-			mine := claim{by: sc.in.label(), site: site, via: sc.trail.String()}
+	for _, o := range occ {
+		switch o.kind() {
+		case kindRoute:
+			r, _ := o.route()
+			method := strings.ToUpper(r.method)
+			path := addrKey(o.abs(r.path))
+			mine := claim{by: o.ctx.in.label(), site: o.site, via: o.ctx.trail.String()}
 			at := held[path]
 			if at == nil {
 				at = map[string]claim{}
@@ -295,39 +330,40 @@ func verify(root *App) error {
 			if dup {
 				errs = append(errs, fmt.Errorf("zip: %s %s: declared by %q at %s (via %s) and by %q at %s (via %s)",
 					method, path, prev.by, prev.site, prev.via, mine.by, mine.site, mine.via))
-				return nil
+				continue
 			}
 			at[method] = mine
 
-		case Handler:
-			if sc.depth == 0 {
-				return nil // the app being served IS the server; its middleware is global
+		case kindMiddleware:
+			if o.ctx.depth == 0 {
+				continue // the app being served IS the server; its middleware is global
 			}
-			if _, ok := mwOnly[sc.in]; !ok {
-				mwOnly[sc.in] = &inert{mw: site, trail: sc.trail.String()}
-				mwOrder = append(mwOrder, sc.in)
+			if _, ok := mwOnly[o.ctx.in]; !ok {
+				mwOnly[o.ctx.in] = &inert{mw: o.site, trail: o.ctx.trail.String()}
+				mwOrder = append(mwOrder, o.ctx.in)
 			}
 
-		case *App:
-			if seenDef[v] {
-				return nil
+		case kindApp:
+			def, _ := o.app()
+			if seenDef[def] {
+				continue
 			}
-			seenDef[v] = true
-			v.plugMu.Lock()
-			cat := append([]mcpTool(nil), v.pluginTools...)
-			isOpen := v.open
-			v.plugMu.Unlock()
+			seenDef[def] = true
+			def.plugMu.Lock()
+			cat := append([]mcpTool(nil), def.pluginTools...)
+			isOpen := def.open
+			def.plugMu.Unlock()
 			if isOpen != nil {
 				if openBy != nil {
 					errs = append(errs, fmt.Errorf("zip: two open MCP plugins: %q and %q — a name no "+
 						"catalogue claims must have one owner, and two would make it ambiguous",
-						openBy.label(), v.label()))
+						openBy.label(), def.label()))
 				} else {
-					openBy = v
+					openBy = def
 				}
 			}
 			for _, tl := range cat {
-				mine := claim{by: v.label(), via: sc.trail.String()}
+				mine := claim{by: def.label(), via: o.ctx.trail.String()}
 				if prev, dup := tools[tl.name]; dup {
 					errs = append(errs, fmt.Errorf("zip: MCP tool %q: claimed by %q (via %s) and by %q (via %s) — "+
 						"a tools/call resolves by name, so the second claimant is unreachable",
@@ -337,29 +373,69 @@ func verify(root *App) error {
 				tools[tl.name] = mine
 			}
 		}
-		return nil
-	}); err != nil {
-		return err // a cycle: there is nothing to enumerate past it
 	}
 
-	// A definition's middleware wraps the routes in its OWN subtree. With none
-	// there is nothing to wrap, so inert is CORRECT under lexical anchoring —
-	// what is unacceptable is that it was silent and reads exactly like working
-	// code.
 	for _, def := range mwOrder {
 		if routesUnder(def, map[*App]bool{}) {
 			continue
 		}
-		s := mwOnly[def]
+		st := mwOnly[def]
 		errs = append(errs, fmt.Errorf("zip: %s declares middleware at %s and no routes anywhere beneath it (via %s) — "+
 			"a definition's middleware wraps the routes in its OWN subtree, so with none it would "+
 			"silently never run.\n\tIf it WRAPS: compose the routes it guards beneath this definition, "+
 			"or move it to the app that has them.\n\tIf it ANSWERS an address (zip.Static and friends), "+
 			"register it at that address instead: app.Get(\"/assets/*\", h) rather than app.Use(h) — "+
 			"Use cannot say WHERE a handler answers, which is why it is only for handlers that wrap",
-			def.who(), s.mw, s.trail))
+			def.who(), st.mw, st.trail))
 	}
 	return errors.Join(errs...)
+}
+
+// derived is validation stage TWO: everything decidable only AFTER identities
+// are derived from the shape.
+//
+// It is separate because it cannot run earlier. An operation id is a function of
+// the occurrence's prefix and the declared id, so two occurrences can be
+// structurally fine — different paths, no address conflict — and still derive
+// the SAME id. That collision does not exist until derivation happens, and a
+// document with two operations under one operationId is invalid.
+func derived(occ []occurrence) error {
+	type claim struct {
+		path string
+		via  string
+		site callsite
+	}
+	ids := map[string]claim{}
+	var errs []error
+	for _, o := range occ {
+		r, ok := o.route()
+		if !ok || r.op == nil {
+			continue
+		}
+		id := occurrenceID(o.ctx.prefix, opName(r.op))
+		mine := claim{path: o.abs(r.path), via: o.ctx.trail.String(), site: o.site}
+		if prev, dup := ids[id]; dup {
+			errs = append(errs, fmt.Errorf("zip: operation id %q is derived twice: %s (via %s) and %s at %s (via %s) — "+
+				"an id is a published SDK method name, so two operations cannot share one",
+				id, prev.path, prev.via, mine.path, mine.site, mine.via))
+			continue
+		}
+		ids[id] = mine
+	}
+	return errors.Join(errs...)
+}
+
+// verify runs both stages in order over ONE walk. Nothing publishes unless both
+// complete clean.
+func verify(root *App) error {
+	occ, err := walk(root)
+	if err != nil {
+		return err // a cycle: there is nothing to enumerate past it
+	}
+	if err := structural(occ); err != nil {
+		return err
+	}
+	return derived(occ)
 }
 
 // routesUnder reports whether anything in def's subtree answers an address.

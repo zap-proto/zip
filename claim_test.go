@@ -48,12 +48,14 @@ func TestASecondClaimOfAPrefixIsRefused(t *testing.T) {
 func TestARefusedCompositionIsRolledBack(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(plugin(t, "first", "/v1/a"))
-	if err := app.Build(); err != nil {
-		t.Fatalf("first build: %v", err)
-	}
 
-	// A second plugin that collides with the first.
-	if err := app.Include(plugin(t, "second", "/v1/a")); err == nil {
+	// Serve IS the build — generation 0. Include is a HOST verb.
+	h, err := zip.Serve(app, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+	if err := h.Include(plugin(t, "second", "/v1/a")); err == nil {
 		t.Fatal("a colliding plugin was included")
 	}
 	if n, _ := app.Generation(); n != 0 {

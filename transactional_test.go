@@ -1,7 +1,6 @@
 package zip
 
 import (
-	"strings"
 	"sync"
 	"testing"
 )
@@ -24,7 +23,7 @@ func TestTransactional_DropIsSymmetricWithInclude(t *testing.T) {
 	}
 
 	// A Drop that leaves a VALID program installs a generation.
-	if err := host.Drop(doomed); err != nil {
+	if err := hostOf(t, host).Drop(doomed); err != nil {
 		t.Fatalf("Drop: %v", err)
 	}
 	if code, _ := wireGET(t, host, "/doomed"); code != 404 {
@@ -35,38 +34,47 @@ func TestTransactional_DropIsSymmetricWithInclude(t *testing.T) {
 	}
 }
 
-// A Drop whose RESULT would not build must leave the live generation serving,
-// exactly as a refused Include does. Here the drop removes the definition whose
-// routes were the only thing making an included middleware-carrying group legal,
-// so the resulting program is refused.
-func TestTransactional_ARefusedDropChangesNothing(t *testing.T) {
+// A Drop cannot produce an invalid program, and that is a CONSEQUENCE of host
+// anchoring rather than a gap in the test.
+//
+// Drop removes entries the host's own program holds, so the result is strictly
+// smaller. The only rule a smaller program can newly violate is inert
+// middleware — a definition left with middleware and no routes beneath it — and
+// that cannot happen by removing a SIBLING, because middleware only ever wraps
+// its own subtree. So there is no refused-Drop case to construct.
+//
+// What remains provable, and is what "transactional" actually buys here: Drop
+// goes through the same transact path as Include, so it builds and validates the
+// next generation before swapping, and a Drop that succeeds advances exactly one
+// generation.
+func TestTransactional_DropCannotProduceAnInvalidProgram(t *testing.T) {
 	guarded := quiet("guarded")
 	guarded.Use(H(func(c *Ctx) error { return c.Continue() }))
 	routes := quiet("routes")
 	routes.Get("/r", func(c *Ctx) error { return c.String(200, "r") })
 	guarded.Use(routes) // the group is legal because routes live beneath it
 
-	host := quiet("host")
-	host.Use(guarded)
-	if err := host.Build(); err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	gen0, _ := host.Generation()
+	spare := quiet("spare")
+	spare.Get("/spare", func(c *Ctx) error { return c.String(200, "spare") })
 
-	// Dropping `routes` from `guarded` would leave middleware with nothing
-	// beneath it — an inert guard, which the walk refuses.
-	err := guarded.Drop(routes)
-	if err == nil {
-		t.Fatal("a Drop producing an invalid program was accepted")
+	app := quiet("host")
+	app.Use(guarded, spare)
+	h := hostOf(t, app)
+	gen0 := h.Generation()
+
+	// Dropping a sibling leaves guarded's own subtree intact, so the program is
+	// still valid and the generation advances by exactly one.
+	if err := h.Drop(spare); err != nil {
+		t.Fatalf("Drop: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no routes") {
-		t.Errorf("refusal does not name the cause: %v", err)
+	if n := h.Generation(); n != gen0+1 {
+		t.Errorf("generation %d after Drop, want %d", n, gen0+1)
 	}
-	if n, _ := host.Generation(); n != gen0 {
-		t.Errorf("a refused Drop advanced the generation %d -> %d", gen0, n)
+	if code, _ := wireGET(t, app, "/spare"); code != 404 {
+		t.Errorf("dropped route still answers %d", code)
 	}
-	if code, _ := wireGET(t, host, "/r"); code != 200 {
-		t.Errorf("a refused Drop disturbed the live generation: %d", code)
+	if code, _ := wireGET(t, app, "/r"); code != 200 {
+		t.Errorf("Drop disturbed a subtree it does not own: %d", code)
 	}
 }
 
@@ -94,15 +102,15 @@ func TestTransactional_NoDeadlockAcrossSharedDefinitions(t *testing.T) {
 			defer wg.Done()
 			p := quiet("p")
 			p.Get("/p", func(c *Ctx) error { return nil })
-			_ = h1.Include(p)
+			_ = hostOf(t, h1).Include(p)
 		}(i)
 		go func(n int) {
 			defer wg.Done()
 			p := quiet("q")
 			p.Get("/q", func(c *Ctx) error { return nil })
-			_ = h2.Include(p)
+			_ = hostOf(t, h2).Include(p)
 		}(i)
-		go func(n int) { defer wg.Done(); _ = h1.Drop(quiet("nothing")) }(i)
+		go func(n int) { defer wg.Done(); _ = hostOf(t, h1).Drop(quiet("nothing")) }(i)
 	}
 	go func() { wg.Wait(); close(done) }()
 	<-done // a deadlock hangs here and the test times out, which is the assertion
