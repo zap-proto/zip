@@ -38,6 +38,34 @@ import (
 // declaration a mount contributes its two proxy addresses and no ops, which is
 // exactly what it contributed before and says honestly that nothing is known
 // about the shape behind it.
+// Mount returns another service, running elsewhere, as a DEFINITION the host
+// composes with Use like any other:
+//
+//	ledger, err := zip.Mount("/v1/ledger", "ledger.hanzo.svc:9653", decl)
+//	if err != nil { return err }
+//	app.Use(ledger)
+//
+// It is no longer a VERB on App. Delegating to another process is not a second
+// kind of composition — it is a definition whose handlers happen to be a
+// network away — so it arrives through the one verb and appears in every
+// projection because it is in the registry, not because five projections each
+// learned what mounting meant.
+//
+// The address scheme selects the transport exactly as [App.Listen]'s does, so a
+// bare address is ZAP and one registry serves both directions.
+//
+// decl is optional and is a BUILD INPUT, never a fetch. Without it the remote
+// contributes its two proxy addresses and no ops, which honestly says nothing
+// is known about the shape behind it. With it, the remote's ops join the
+// document, the tool list, the commands and the call plane.
+func Mount(prefix, addr string, decl ...Declaration) (*App, error) {
+	var d Declaration
+	if len(decl) > 0 {
+		d = decl[0]
+	}
+	return remoteApp(newApp(Config{DisableStartupMessage: true}), prefix, addr, d)
+}
+
 func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 	scheme, hostport, t, err := transportFor(addr)
 	if err != nil {

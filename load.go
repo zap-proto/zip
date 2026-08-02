@@ -337,8 +337,26 @@ func (p *plugin) startOnDemand() (Client, string) {
 // prefixes is variadic because a service often owns more than one route
 // subtree — o11y answers both /v1/o11y and /v1/sentry — and a single-prefix
 // Load silently 404s the others. One call declares everything the plugin owns.
-func Load(p Plugin, prefixes ...string) Service {
-	return func(a *App) error { return a.load(prefixes, p) }
+// Load returns the plugin as a DEFINITION — an [*App] the host composes with
+// Use, like any other. It is not a verb and not a Service: a plugin is a unit of
+// functionality that answers addresses, which is exactly what an App is, so it
+// arrives through the one composition verb rather than through a second one.
+//
+//	billing, err := zip.Load(zip.Plugin{Name: "billing", Bin: bin}, "/v1/billing")
+//	if err != nil { return err }
+//	app.Use(billing)
+//
+// Prefix collisions between two plugins are caught where every other address
+// collision is caught — by the walk, at build, naming both claimants and every
+// collision at once. There is no separate prefix-claim ledger, because a second
+// mechanism for one question is a second answer waiting to disagree.
+func Load(p Plugin, prefixes ...string) (*App, error) {
+	leaf := newApp(Config{AppName: p.Name, DisableStartupMessage: true,
+		OpenAPI: OpenAPIConfig{Disabled: true}, MCP: MCPConfig{Disabled: true}})
+	if err := leaf.load(prefixes, p); err != nil {
+		return nil, err
+	}
+	return leaf, nil
 }
 
 func (a *App) load(prefixes []string, spec Plugin) error {
@@ -350,31 +368,18 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	}
 	prefix := prefixes[0]
 
-	// Claimed BEFORE anything is mounted or spawned: a composition that cannot
-	// route this plugin must not first pay for its process, and a duplicate must
-	// fail at compose time rather than become a live prefix serving another
-	// plugin's 404. All-or-nothing — a plugin owning three prefixes and losing
-	// the third leaves the first two free for whoever really owns them.
-	for i, pre := range prefixes {
-		if err := a.claim(pre, spec.Name); err != nil {
-			a.release(prefixes[:i])
-			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
-		}
-	}
 
 	// The MCP catalogue is read BEFORE anything is mounted or spawned, for the
 	// same reason the prefixes are claimed first: a composition that cannot be
 	// described must not first pay for its process.
 	tools, err := parseTools(spec.Name, spec.Tools)
 	if err != nil {
-		a.release(prefixes)
 		return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
 	}
 
 	if spec.Addr != "" {
 		for _, pre := range prefixes {
 			if err := a.mount(pre, spec.Addr); err != nil {
-				a.release(prefixes)
 				return err
 			}
 		}
@@ -390,17 +395,14 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		err := a.installTools(rp, tools)
 		a.plugMu.Unlock()
 		if err != nil {
-			a.release(prefixes)
 			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
 		}
 		return nil
 	}
 	if len(spec.Bin) == 0 && spec.Path == "" && spec.URL == "" {
-		a.release(prefixes)
 		return fmt.Errorf("zip: Load(%s): plugin %q has no Addr, Bin, Path, or URL", prefix, spec.Name)
 	}
 	if spec.URL != "" && spec.Sum == "" {
-		a.release(prefixes)
 		return fmt.Errorf("zip: Load(%s): plugin %q has URL but no Sum — refusing to run an unverified download", prefix, spec.Name)
 	}
 
@@ -409,7 +411,6 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	if !spec.Lazy {
 		var err error
 		if in, err = start(spec); err != nil {
-			a.release(prefixes)
 			return fmt.Errorf("zip: Load(%s): %w", spec.Name, err)
 		}
 		p.cur.Store(in)
@@ -421,7 +422,6 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 	}
 	if _, dup := a.plugins[spec.Name]; dup {
 		a.plugMu.Unlock()
-		a.release(prefixes)
 		stop(in, 0) // nil for a lazy plugin — stop handles that
 		return fmt.Errorf("zip: Load(%s): plugin %q already loaded", prefix, spec.Name)
 	}
@@ -432,7 +432,6 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		a.plugMu.Lock()
 		delete(a.plugins, spec.Name)
 		a.plugMu.Unlock()
-		a.release(prefixes)
 		stop(in, 0)
 		return fmt.Errorf("zip: Load(%s): %w", spec.Name, toolErr)
 	}

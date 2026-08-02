@@ -207,11 +207,6 @@ type App struct {
 	// Guarded by plugMu.
 	plugins map[string]*plugin
 
-	// claims maps a mounted prefix to the name that claimed it, so a SECOND
-	// claim of the same prefix is an error instead of a silent no-op. Guarded by
-	// plugMu.
-	claims map[string]string
-
 	// The composed MCP surface of the plugins this app Load'ed: every tool
 	// descriptor a plugin's build-time catalogue declared, and which plugin owns
 	// each name. Written by load (under plugMu), read by installMCP and by a

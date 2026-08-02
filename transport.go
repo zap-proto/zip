@@ -237,44 +237,6 @@ func (a *App) Listen(addrs ...string) error {
 	return <-errc
 }
 
-// Mount delegates every request under prefix to the service at addr. Listen
-// serves here; Mount delegates there — one registry, one scheme vocabulary,
-// opposite directions. A bare address uses ZAP (DefaultScheme), so a
-// colocated service is mounted by address alone:
-//
-//	app.Mount("/v1/billing", "billing.hanzo.svc:9653")      // ZAP
-//	app.Mount("/v1/legacy",  "http://legacy.internal:8080") // HTTP
-//
-// The mounted service keeps the whole path — /v1/billing/invoices arrives as
-// /v1/billing/invoices — so its routes ARE the surface, exactly as they are
-// when it is linked in. Nothing is re-encoded in between: the inbound
-// fasthttp request object is handed to the client and the reply is written
-// straight back, so a mount costs a connection, not a copy.
-//
-// This is how a service ships as its own binary. The mounting binary links
-// zip and a transport, never the mounted service's dependency graph, so its
-// link time does not grow when that service does, and the service redeploys
-// without relinking it. Moving a service between Mount and a linked-in route
-// tree is a deployment decision, not a code change.
-func (a *App) Mount(prefix, addr string, decl ...Declaration) error {
-	// A bare Mount is its own claimant, and the address is the only name it has.
-	if err := a.claim(prefix, addr); err != nil {
-		return err
-	}
-	var d Declaration
-	if len(decl) > 0 {
-		d = decl[0]
-	}
-	leaf, err := remoteApp(a, prefix, addr, d)
-	if err != nil {
-		return err
-	}
-	a.logger.Info("zip mounting", "prefix", prefix, "addr", addr,
-		"routes", len(d.Routes), "ops", len(leaf.Registry()))
-	a.appendEntry(entry{n: leaf, site: here(1)})
-	return nil
-}
-
 // mount registers prefix onto a dialled address. The prefix is already CLAIMED
 // by the caller — [Mount] claims its one, [App.load] claims a plugin's whole set
 // all-or-nothing before spawning anything — so this does not claim again and
@@ -344,40 +306,6 @@ func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host
 		return Errorf(502, "%s: %v", what, err)
 	}
 	return nil
-}
-
-// claim records owner as the holder of prefix, or refuses because someone else
-// already holds it. The comparison is on the NORMALISED prefix, so "/v1/x" and
-// "/v1/x/" are one claim and not two.
-//
-// This catches an exact duplicate at compose time, with a message naming both
-// claimants. It does NOT catch SHADOWING — a parameter sibling swallowing
-// another plugin's deeper static path, which is sometimes legitimate — which is
-// why a host also runs the router oracle over the composed union (HIP-0106
-// §3.5). Two checks, two distinct failures, not two ways to do one thing.
-func (a *App) claim(prefix, owner string) error {
-	key := strings.TrimSuffix(normPath(prefix), "/")
-	a.plugMu.Lock()
-	defer a.plugMu.Unlock()
-	if held, dup := a.claims[key]; dup {
-		return fmt.Errorf("zip: %q is already claimed by %q — %q cannot have it too", key, held, owner)
-	}
-	if a.claims == nil {
-		a.claims = map[string]string{}
-	}
-	a.claims[key] = owner
-	return nil
-}
-
-// release drops a claim, so Unload frees the prefix its plugin held and a
-// replacement can take it. Without this an Unload+Load cycle refuses its own
-// second half.
-func (a *App) release(prefixes []string) {
-	a.plugMu.Lock()
-	defer a.plugMu.Unlock()
-	for _, p := range prefixes {
-		delete(a.claims, strings.TrimSuffix(normPath(p), "/"))
-	}
 }
 
 // makeSocketDir creates the directory a unix socket will be bound in, so

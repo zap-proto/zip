@@ -274,6 +274,16 @@ func conflicts(occ []occurrence) error {
 	return errors.Join(errs...)
 }
 
+// addrKey is one address as the conflict check sees it: METHOD + the router's
+// own spelling of the pattern, with "/x/" and "/x" one address and not two.
+func addrKey(method, pattern string) string {
+	p := normPath(pattern)
+	if len(p) > 1 {
+		p = strings.TrimSuffix(p, "/")
+	}
+	return method + " " + p
+}
+
 // nameOr is an app's name, or fallback when it has none.
 func nameOr(a *App, fallback string) string {
 	if a.cfg.AppName != "" {
