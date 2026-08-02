@@ -421,8 +421,10 @@ func inertMiddleware(occ []occurrence) error {
 		s := st[def]
 		errs = append(errs, fmt.Errorf("zip: %s declares middleware at %s and no routes anywhere beneath it (via %s) — "+
 			"a definition's middleware wraps the routes in its OWN subtree, so with none it would "+
-			"silently never run; compose the routes it is meant to guard beneath it, or move the "+
-			"middleware to the app that has them",
+			"silently never run.\n\tIf it WRAPS: compose the routes it guards beneath this definition, "+
+			"or move it to the app that has them.\n\tIf it ANSWERS an address (zip.Static and friends), "+
+			"register it at that address instead: app.Get(\"/assets/*\", h) rather than app.Use(h) — "+
+			"Use cannot say WHERE a handler answers, which is why it is only for handlers that wrap",
 			def.who(), s.mw, s.trail))
 	}
 	return errors.Join(errs...)
@@ -511,3 +513,10 @@ func dotted(prefix string) string {
 	}
 	return b.String()
 }
+
+// A handler that ANSWERS an address is registered at that address; Use is for
+// handlers that WRAP. app.Use(static) cannot say WHERE it answers, which is the
+// same "structure encodes the semantics" argument that made Group the way to
+// express a middleware scope rather than line position. This is why the inert
+// check above condemns no form anyone writes: every zip.Static in the fleet is
+// already registered at an address.

@@ -298,18 +298,25 @@ func cleanPrefix(p string) string {
 // appendEntry is the ONE place an App's program grows, so it is the one place
 // the seal is enforced and the one place the version moves.
 func (a *App) appendEntry(e entry) {
-	// buildMu, because a transaction rewrites this very slice while holding it.
-	// Include is BY DESIGN called against a running system, so a second
-	// goroutine reaching Use is exactly the case the freeze exists to catch —
-	// and both the check and the append have to see one consistent program.
-	// compose() appends directly (it already holds the lock); nothing that holds
-	// buildMu reaches this function.
+	// buildMu, because a transaction rewrites this very slice while holding it,
+	// and both the check and the append must see one consistent program.
+	//
+	// The freeze is UNCONDITIONAL. There used to be an exemption while a
+	// transaction was in flight, and it was a hole rather than a feature: no
+	// transaction path reaches this function — compose, Drop and includeRoutes
+	// all append directly, already holding the lock — so the exemption could
+	// only ever admit a Use racing a transaction from another goroutine. That
+	// append landed on the program and materialised on the NEXT, unrelated
+	// Include, so a plugin load in one subsystem could activate a route appended
+	// hours earlier by a caller that believed it had failed. Locking made the
+	// phantom reliable rather than absent; removing the exemption removes it.
 	a.buildMu.Lock()
 	defer a.buildMu.Unlock()
-	if a.frozen.Load() && !a.building.Load() {
+	if a.frozen.Load() {
 		panic(fmt.Sprintf("zip: %s: %s was frozen at %s — it appears in a built generation, so this "+
-			"write would change what a running server already published; go through a generation "+
-			"(App.Include / App.Drop), which validates and swaps or leaves the current one serving",
+			"write would change what a running server already published; compose before serving, "+
+			"or go through App.Include, which validates the whole program and swaps only if it is "+
+			"valid (App.Drop to remove)",
 			e.site, a.who(), a.freezeSite))
 	}
 	a.entries = append(a.entries, e)
