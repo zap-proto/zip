@@ -31,11 +31,9 @@ func shortDir(t *testing.T) string {
 
 func TestStart_BringsUpALazyPluginThatNoRequestHasReached(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
 	if st := app.Plugins(); st[0].Running {
@@ -59,11 +57,9 @@ func TestStart_BringsUpALazyPluginThatNoRequestHasReached(t *testing.T) {
 // child that is answering its own in-flight calls.
 func TestStart_OnARunningPluginIsANoOp(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
 	if _, err := app.Start("demo"); err != nil {
@@ -89,11 +85,9 @@ func TestStart_OnARunningPluginIsANoOp(t *testing.T) {
 // one child rather than one per caller.
 func TestStart_ConcurrentFirstCallersProduceOneChild(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
 	const n = 12
@@ -123,11 +117,9 @@ func TestStart_ConcurrentFirstCallersProduceOneChild(t *testing.T) {
 // a potential resurrection.
 func TestStart_WillNotResurrectAnUnloadedPlugin(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
 	if _, err := app.Start("demo"); err != nil {

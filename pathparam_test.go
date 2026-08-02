@@ -141,7 +141,9 @@ func TestAuthorizerSeesPathTarget(t *testing.T) {
 // OpenAPI and every generator downstream rejects it.
 func TestOpenAPIDeclaresPathParams(t *testing.T) {
 	a := memberApp(t)
-	a.Prepare()
+	if err := a.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	req, _ := http.NewRequest("GET", "/.well-known/openapi.json", nil)
 	resp, err := a.Fiber().Test(req)
 	if err != nil {

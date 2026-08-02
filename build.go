@@ -233,3 +233,37 @@ func (a *App) fiberConfig() fiber.Config {
 	}
 	return fcfg
 }
+
+// hosts walks the composition and returns every App carrying plugin state,
+// including this one.
+//
+// A plugin used to be registered on whatever host happened to load it, so
+// Plugins/Reload/Unload could read one map. A plugin is now a DEFINITION
+// ([Load] returns one), so its state lives with it, and the host finds it the
+// way it finds everything else about its composition: by walking. That is the
+// same move the op registry made — one walk, and the projections stop keeping
+// private copies of what the program already says.
+func (a *App) hosts() []*App {
+	out := []*App{a}
+	seen := map[*App]bool{a: true}
+	for _, o := range a.plan() {
+		if child, ok := o.app(); ok && !seen[child] {
+			seen[child] = true
+			out = append(out, child)
+		}
+	}
+	return out
+}
+
+// pluginNamed finds the definition holding the named plugin, and the plugin.
+func (a *App) pluginNamed(name string) (*App, *plugin) {
+	for _, h := range a.hosts() {
+		h.plugMu.Lock()
+		p := h.plugins[name]
+		h.plugMu.Unlock()
+		if p != nil {
+			return h, p
+		}
+	}
+	return nil, nil
+}

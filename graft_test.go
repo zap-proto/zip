@@ -65,10 +65,10 @@ func graftGET(t *testing.T, app *zip.App, path string) (int, string) {
 func TestGraft_OneComposeFourProjections(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	child := childApp(t, "iam", nil)
-	if err := host.Graft(child); err != nil {
-		t.Fatalf("Graft: %v", err)
+	host.Use(child)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	host.Prepare()
 
 	// 1. OpenAPI — the path is the CHILD's absolute path, unrewritten, and it
 	//    carries a real schema rather than a wildcard placeholder.
@@ -151,9 +151,7 @@ func TestGraft_OneComposeFourProjections(t *testing.T) {
 func TestGraft_ServesWithoutSwallowing(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	host.Get("/v1/iam/not-the-childs", func(x *zip.Ctx) error { return x.String(200, "host") })
-	if err := host.Graft(childApp(t, "iam", nil)); err != nil {
-		t.Fatalf("Graft: %v", err)
-	}
+	host.Use(childApp(t, "iam", nil))
 
 	if code, b := graftGET(t, host, "/v1/iam/users/u-9"); code != 200 || !strings.Contains(b, "u-9") {
 		t.Errorf("typed child route: %d %s", code, b)
@@ -184,9 +182,7 @@ func TestGraft_MiddlewareStaysInsideTheChild(t *testing.T) {
 	}
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	host.Get("/v1/public", func(x *zip.Ctx) error { return x.String(200, "public") })
-	if err := host.Graft(childApp(t, "iam", guard)); err != nil {
-		t.Fatalf("Graft: %v", err)
-	}
+	host.Use(childApp(t, "iam", guard))
 
 	// The guard DID come across: the child's own route is gated.
 	if code, _ := graftGET(t, host, "/v1/iam/raw"); code != 401 {
@@ -211,10 +207,10 @@ func TestGraft_ChildAuthorizerStillFires(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	// A host authorizer that would ALLOW, to prove whose rule ran.
 	host.Authorize(func(context.Context, zip.Op, any) error { return nil })
-	if err := host.Graft(child); err != nil {
-		t.Fatalf("Graft: %v", err)
+	host.Use(child)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	host.Prepare()
 
 	if code, b := graftGET(t, host, "/v1/iam/users/u-1"); code == 200 {
 		t.Errorf("REST: the child's authorizer did not run (%d %s)", code, b)
@@ -253,9 +249,7 @@ func TestGraft_SameNameDifferentShape(t *testing.T) {
 		zip.WithOperationID("hire_apps"))
 
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := host.Graft(a, b); err != nil {
-		t.Fatalf("Graft: %v", err)
-	}
+	host.Use(a, b)
 	schemas := host.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)
 	for _, want := range []string{"iam.appAlpha", "hire.appBeta"} {
 		if _, ok := schemas[want]; !ok {
@@ -282,9 +276,10 @@ func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
 	host.Get("/v1/iam/raw", func(x *zip.Ctx) error { return x.String(200, "host owns this") })
 
-	err := host.Graft(childApp(t, "iam", nil))
+	host.Use(childApp(t, "iam", nil))
+	err := host.Build()
 	if err == nil {
-		t.Fatal("Graft accepted a colliding address")
+		t.Fatal("a colliding address was accepted")
 	}
 	for _, want := range []string{"GET /v1/iam/raw", `"cloud"`, `"iam"`} {
 		if !strings.Contains(err.Error(), want) {
@@ -299,9 +294,13 @@ func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
 	if n := len(host.Commands()); n != 0 {
 		t.Errorf("a refused graft appended %d ops to the registry", n)
 	}
-	// The host's own route still answers.
-	if code, b := graftGET(t, host, "/v1/iam/raw"); code != 200 || b != "host owns this" {
-		t.Errorf("the refusal disturbed the host's own route: %d %q", code, b)
+	// NOTHING is live. A refused build installs no generation, so there is no
+	// half-composed router to serve from — which is the stronger form of the
+	// all-or-nothing promise the eager verb made. When a VALID generation
+	// already exists, a refused change leaves it serving untouched; that is
+	// TestGeneration_RefusedIncludeLeavesTheOldOneServing.
+	if _, live := host.Generation(); live {
+		t.Error("a refused build installed a generation")
 	}
 }
 
@@ -309,7 +308,8 @@ func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
 // other, not only against the parent.
 func TestGraft_SiblingsCollide(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
-	err := host.Graft(childApp(t, "iam", nil), childApp(t, "iam", nil))
+	host.Use(childApp(t, "iam", nil), childApp(t, "iam", nil))
+	err := host.Build()
 	if err == nil {
 		t.Fatal("two children claiming one address were both accepted")
 	}
@@ -321,15 +321,27 @@ func TestGraft_SiblingsCollide(t *testing.T) {
 // TestGraft_RefusesAfterPrepare: the document, the tool list and the call plane
 // are rendered once. An op grafted afterwards would serve and never describe,
 // which is the exact defect Graft exists to remove.
-func TestGraft_RefusesAfterPrepare(t *testing.T) {
+func TestCompose_RefusedAfterTheAppIsBuilt(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	zip.Get(host, "/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil })
-	host.Prepare()
-	if err := host.Graft(childApp(t, "iam", nil)); err == nil {
-		t.Fatal("Graft after Prepare was accepted")
-	} else if !strings.Contains(err.Error(), "before Listen") {
-		t.Errorf("refusal does not say why: %v", err)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
+	// Composing into an app that is already serving is refused AT THE CALL SITE,
+	// and the panic names the one way to do it instead. Under the eager registry
+	// this was an error saying "before Listen"; under generations it is a freeze,
+	// and the fix is App.Include — which validates and swaps, or leaves the live
+	// generation exactly as it was.
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("composing into a built app was accepted")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "App.Include") {
+			t.Errorf("refusal does not say how to compose against a live app: %v", r)
+		}
+	}()
+	host.Use(childApp(t, "iam", nil))
 }
 
 // TestGraft_UngraftedDocumentIsUnchanged pins the compatibility claim: an app
@@ -351,11 +363,13 @@ func TestGraft_ChildControlPlaneIsNotAdopted(t *testing.T) {
 	zip.Get(host, "/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil },
 		zip.WithOperationID("host_own"))
 	child := childApp(t, "iam", nil)
-	child.Prepare() // the child installs its OWN control plane first
-	if err := host.Graft(child); err != nil {
-		t.Fatalf("Graft: %v", err)
+	if err := child.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	host.Prepare()
+	host.Use(child)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 
 	// The host's document is the host's, and it carries both apps' ops.
 	_, body := graftGET(t, host, zip.SpecPath)
@@ -390,9 +404,7 @@ func TestGraft_ChildShutdownIsAdopted(t *testing.T) {
 	var torn bool
 	child.OnShutdown(func(context.Context) error { torn = true; return nil })
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := host.Graft(child); err != nil {
-		t.Fatalf("Graft: %v", err)
-	}
+	host.Use(child)
 	if err := host.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}

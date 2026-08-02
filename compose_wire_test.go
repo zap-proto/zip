@@ -201,13 +201,18 @@ func TestWire_OneCtxAcrossAnInclusionBoundary(t *testing.T) {
 // composition would publish the part as if it were the whole.
 func TestWire_IncludedControlPlaneIsNotAdopted(t *testing.T) {
 	child := billingApp()
-	child.Prepare() // the definition renders its own control plane first
+	// the definition renders its own control plane first
+	if err := child.Build(); err != nil {
+		t.Fatalf("child Build: %v", err)
+	}
 
 	host := quiet("host")
 	Get(host, "/own", func(context.Context, *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil },
 		WithOperationID("hostOwn"))
 	host.Group("/v1").Use(child)
-	host.Prepare()
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 
 	code, body := wireGET(t, host, SpecPath)
 	if code != 200 {

@@ -55,9 +55,7 @@ func TestLoad_EmbeddedBinary(t *testing.T) {
 	bin := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: bin}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: bin}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
@@ -73,9 +71,7 @@ func TestLoad_Reload(t *testing.T) {
 	v1, v2 := buildPlugin(t, "v1"), buildPlugin(t, "v2")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: v1}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: v1}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
@@ -113,9 +109,7 @@ func TestLoad_ReloadFailureKeepsServing(t *testing.T) {
 	v1 := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: v1}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: v1}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	// Not a binary at all — exec fails, or it dies immediately.
@@ -135,9 +129,7 @@ func TestLoad_Unload(t *testing.T) {
 	v1 := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: v1}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: v1}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	if err := app.Unload("demo"); err != nil {
@@ -168,9 +160,7 @@ func TestLoad_AlreadyRunning(t *testing.T) {
 	waitSocket(t, sock)
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Addr: sock}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load with Addr): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Addr: sock}, "/v1/demo")))
 	if got := version(t, app); !strings.Contains(got, `"version":"external"`) {
 		t.Fatalf("body=%q, want the already-running instance", got)
 	}
@@ -192,11 +182,9 @@ func TestLoad_FromRelease(t *testing.T) {
 
 	cache := t.TempDir()
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{
+	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", URL: srv.URL + "/demo", Sum: hex.EncodeToString(sum[:]), Dir: cache,
-	}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load from release): %v", err)
-	}
+	}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
@@ -206,11 +194,9 @@ func TestLoad_FromRelease(t *testing.T) {
 	// A second load at the same digest must reuse the cached binary rather than
 	// download again — that is what makes a restart offline.
 	app2 := zip.New(zip.Config{AppName: "host2", DisableStartupMessage: true})
-	if err := app2.Add(zip.Load(zip.Plugin{
+	app2.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", URL: srv.URL + "/demo", Sum: hex.EncodeToString(sum[:]), Dir: cache,
-	}, "/v1/demo")); err != nil {
-		t.Fatalf("second Add: %v", err)
-	}
+	}, "/v1/demo")))
 	defer func() { _ = app2.Shutdown() }()
 	if served != 1 {
 		t.Fatalf("server was hit %d times, want 1 — the digest cache did not hold", served)
@@ -226,11 +212,12 @@ func TestLoad_ReleaseRejectsBadSum(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	err := app.Add(zip.Load(zip.Plugin{
+	// The verification is part of BUILDING the definition, so the refusal comes
+	// from Load itself — there is nothing to compose and nothing to build.
+	_, err := zip.Load(zip.Plugin{
 		Name: "demo", URL: srv.URL + "/demo", Dir: t.TempDir(),
 		Sum: strings.Repeat("00", 32), // wrong on purpose
-	}, "/v1/demo"))
+	}, "/v1/demo")
 	if err == nil {
 		t.Fatal("a mismatched Sum was accepted — the binary would have been executed")
 	}
@@ -242,8 +229,7 @@ func TestLoad_ReleaseRejectsBadSum(t *testing.T) {
 // TestLoad_ReleaseRequiresSum proves a URL without a Sum is refused outright,
 // rather than trusting the network.
 func TestLoad_ReleaseRequiresSum(t *testing.T) {
-	app := zip.New(zip.Config{DisableStartupMessage: true})
-	err := app.Add(zip.Load(zip.Plugin{Name: "demo", URL: "https://example.test/x"}, "/v1/demo"))
+	_, err := zip.Load(zip.Plugin{Name: "demo", URL: "https://example.test/x"}, "/v1/demo")
 	if err == nil || !strings.Contains(err.Error(), "unverified") {
 		t.Fatalf("err = %v, want a refusal naming the unverified download", err)
 	}
@@ -262,14 +248,12 @@ func TestPlugins_Status(t *testing.T) {
 
 	cache := t.TempDir()
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(
-		zip.Load(zip.Plugin{Name: "embedded", Bin: v1, Dir: cache}, "/v1/embedded"),
-		zip.Load(zip.Plugin{
+	app.Use(
+		must(zip.Load(zip.Plugin{Name: "embedded", Bin: v1, Dir: cache}, "/v1/embedded")),
+		must(zip.Load(zip.Plugin{
 			Name: "installed", URL: srv.URL + "/x", Sum: hex.EncodeToString(sum[:]), Dir: cache,
-		}, "/v1/installed"),
-	); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
+		}, "/v1/installed")),
+	)
 	defer func() { _ = app.Shutdown() }()
 
 	got := app.Plugins()
@@ -332,11 +316,9 @@ func TestLoad_ChildDiesWithHost(t *testing.T) {
 	bin := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{
+	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", Bin: bin, Dir: t.TempDir(),
-	}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	}, "/v1/demo")))
 
 	pid := app.Plugins()[0].PID
 	if pid == 0 {
@@ -371,12 +353,10 @@ func TestLoad_MultiplePrefixes(t *testing.T) {
 	bin := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()},
 		"/v1/demo", "/v1/other",
-	)); err != nil {
-		t.Fatalf("Add(Load with two prefixes): %v", err)
-	}
+	)))
 	defer func() { _ = app.Shutdown() }()
 
 	// Its real route, through the first mount.
@@ -413,11 +393,9 @@ func TestLoad_MultiplePrefixes(t *testing.T) {
 // split deploy reports the whole reachable surface rather than one prefix of it.
 func TestPlugins_RemotePrefixes(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "remote", Addr: "127.0.0.1:1"}, "/v1/remote", "/v1/legacy",
-	)); err != nil {
-		t.Fatalf("Add(Load remote): %v", err)
-	}
+	)))
 	defer func() { _ = app.Shutdown() }()
 
 	got := app.Plugins()
@@ -431,8 +409,7 @@ func TestPlugins_RemotePrefixes(t *testing.T) {
 
 // TestLoad_NoPrefix proves Load refuses to mount a plugin nowhere.
 func TestLoad_NoPrefix(t *testing.T) {
-	app := zip.New(zip.Config{DisableStartupMessage: true})
-	err := app.Add(zip.Load(zip.Plugin{Name: "demo", Path: "/nonexistent"}))
+	_, err := zip.Load(zip.Plugin{Name: "demo", Path: "/nonexistent"})
 	if err == nil || !strings.Contains(err.Error(), "at least one prefix") {
 		t.Fatalf("err = %v, want a refusal naming the missing prefix", err)
 	}
@@ -450,11 +427,9 @@ func TestPlugins_Usage(t *testing.T) {
 	bin := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	)))
 	defer func() { _ = app.Shutdown() }()
 
 	// Drive it so there is CPU to account for.
@@ -495,11 +470,9 @@ func TestPlugins_SurvivesPanic(t *testing.T) {
 	bin := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	)))
 	defer func() { _ = app.Shutdown() }()
 
 	first := app.Plugins()[0].PID
@@ -548,11 +521,9 @@ func TestLoad_Lazy(t *testing.T) {
 	bin := buildPlugin(t, "v1")
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(
+	app.Use(must(zip.Load(
 		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir(), Lazy: true}, "/v1/demo",
-	)); err != nil {
-		t.Fatalf("Add(lazy Load): %v", err)
-	}
+	)))
 	defer func() { _ = app.Shutdown() }()
 
 	// Registered but not running — that distinction is the whole feature.
@@ -602,11 +573,9 @@ func TestReload_PinAndRollbackByDigest(t *testing.T) {
 
 	cache := t.TempDir()
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{
+	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", URL: srv.URL + "/v1", Sum: d1, Dir: cache,
-	}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {
@@ -649,9 +618,7 @@ func TestReload_PinAndRollbackByDigest(t *testing.T) {
 // into running an unpinned artifact by going through reload instead of Load.
 func TestReload_RefusesUnverifiedURL(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1")}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1")}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	err := app.Reload("demo", zip.Plugin{URL: "https://example.test/x"})
@@ -667,9 +634,7 @@ func TestReload_RefusesUnverifiedURL(t *testing.T) {
 // rather than failing obscurely inside exec.
 func TestReload_RefusesRemote(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "demo", Addr: "127.0.0.1:9"}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Addr: "127.0.0.1:9"}, "/v1/demo")))
 	err := app.Reload("demo", zip.Plugin{Bin: []byte("x")})
 	if err == nil || !strings.Contains(err.Error(), "remote Addr") {
 		t.Fatalf("err = %v, want a refusal naming the remote mount", err)
@@ -683,11 +648,9 @@ func TestReload_RefusesRemote(t *testing.T) {
 // most hosts run.
 func TestUnload_LazyStaysDown(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{
+	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", Bin: buildPlugin(t, "v1"), Lazy: true,
-	}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	}, "/v1/demo")))
 	defer func() { _ = app.Shutdown() }()
 
 	if got := version(t, app); !strings.Contains(got, `"version":"v1"`) {

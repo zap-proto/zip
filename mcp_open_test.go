@@ -38,13 +38,13 @@ func openHost(t *testing.T) *zip.App {
 	bin := buildPluginBin(t, "v1")
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true,
 		MCP: zip.MCPConfig{Path: "/v1/mcp"}})
-	if err := app.Add(zip.Load(zip.Plugin{
+	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", Path: bin, Lazy: true, Open: true, Tools: catalogue(t, bin),
-	}, "/v1/demo")); err != nil {
-		t.Fatalf("Add(Load): %v", err)
-	}
+	}, "/v1/demo")))
 	t.Cleanup(func() { _ = app.Shutdown() })
-	app.Prepare()
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	return app
 }
 
@@ -134,10 +134,9 @@ func TestOpen_OnlyOneMayBeOpen(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true,
 		MCP: zip.MCPConfig{Path: "/v1/mcp"}})
 	t.Cleanup(func() { _ = app.Shutdown() })
-	if err := app.Add(zip.Load(zip.Plugin{Name: "first", Path: bin, Lazy: true, Open: true}, "/v1/first")); err != nil {
-		t.Fatalf("the first open plugin must load: %v", err)
-	}
-	err := app.Add(zip.Load(zip.Plugin{Name: "second", Path: bin, Lazy: true, Open: true}, "/v1/second"))
+	app.Use(must(zip.Load(zip.Plugin{Name: "first", Path: bin, Lazy: true, Open: true}, "/v1/first")))
+	app.Use(must(zip.Load(zip.Plugin{Name: "second", Path: bin, Lazy: true, Open: true}, "/v1/second")))
+	err := app.Build()
 	if err == nil {
 		t.Fatal("a second open plugin must be refused")
 	}

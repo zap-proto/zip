@@ -28,9 +28,7 @@ func TestMount_OverUnixSocket(t *testing.T) {
 	waitSocket(t, sock)
 
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
-	if err := core.Mount("/v1/billing", sock); err != nil {
-		t.Fatalf("Mount over unix socket: %v", err)
-	}
+	core.Use(must(zip.Mount("/v1/billing", sock)))
 
 	status, body := call(t, core, "GET", "/v1/billing/invoices", "")
 	if status != 200 || !strings.Contains(body, `"servedBy":"over-uds"`) {
@@ -76,9 +74,7 @@ func TestMount_OverZAP(t *testing.T) {
 	waitReachable(t, pluginAddr)
 
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
-	if err := core.Mount("/v1/billing", pluginAddr); err != nil {
-		t.Fatalf("Mount over ZAP: %v", err)
-	}
+	core.Use(must(zip.Mount("/v1/billing", pluginAddr)))
 
 	// GET travels core -> ZAP -> plugin and the plugin's body comes back.
 	status, body := call(t, core, "GET", "/v1/billing/invoices", "")
@@ -116,9 +112,7 @@ func TestMount_StaticBeatsRemoteMount(t *testing.T) {
 	waitReachable(t, pluginAddr)
 
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
-	if err := core.Mount("/v1/billing", pluginAddr); err != nil {
-		t.Fatalf("Mount: %v", err)
-	}
+	core.Use(must(zip.Mount("/v1/billing", pluginAddr)))
 	// Registered AFTER the mount, and still wins for its exact path.
 	core.Get("/v1/billing/health", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "core"})
@@ -137,8 +131,7 @@ func TestMount_StaticBeatsRemoteMount(t *testing.T) {
 // TestMount_UnknownScheme proves Mount refuses an unregistered scheme loudly
 // rather than silently falling back to a default wire.
 func TestMount_UnknownScheme(t *testing.T) {
-	app := zip.New(zip.Config{DisableStartupMessage: true})
-	err := app.Mount("/v1/x", "carrier-pigeon://somewhere:1")
+	_, err := zip.Mount("/v1/x", "carrier-pigeon://somewhere:1")
 	if err == nil {
 		t.Fatal("Mount with an unregistered scheme returned nil, want an error")
 	}
@@ -154,8 +147,7 @@ func TestMount_ServeOnlyTransportCannotDial(t *testing.T) {
 	zip.RegisterTransport("serveonly", zip.Transport{
 		Serve: func(addr string, h fasthttp.RequestHandler) zip.Server { return nil },
 	})
-	app := zip.New(zip.Config{DisableStartupMessage: true})
-	err := app.Mount("/v1/x", "serveonly://host:1")
+	_, err := zip.Mount("/v1/x", "serveonly://host:1")
 	if err == nil || !strings.Contains(err.Error(), "cannot dial") {
 		t.Fatalf("Mount on a serve-only transport: err=%v, want a 'cannot dial' error", err)
 	}

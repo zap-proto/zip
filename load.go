@@ -477,9 +477,7 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 // build returns an error and leaves the old one serving. The old one drains
 // for Plugin.Drain, then dies.
 func (a *App) Reload(name string, to Plugin) error {
-	a.plugMu.Lock()
-	p := a.plugins[name]
-	a.plugMu.Unlock()
+	_, p := a.pluginNamed(name)
 	if p == nil {
 		return fmt.Errorf("zip: Reload: no plugin named %q", name)
 	}
@@ -550,9 +548,7 @@ func (spec Plugin) replacedBy(to Plugin) (Plugin, error) {
 // which is both true and retryable. [Status.Disabled] is how an operator
 // tells a deliberate stop from a crash, since the wire looks the same either way.
 func (a *App) Unload(name string) error {
-	a.plugMu.Lock()
-	p := a.plugins[name]
-	a.plugMu.Unlock()
+	_, p := a.pluginNamed(name)
 	if p == nil {
 		return fmt.Errorf("zip: Unload: no plugin named %q", name)
 	}

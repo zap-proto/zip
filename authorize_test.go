@@ -43,7 +43,9 @@ func TestAuthorizer_GatesDecodedInputAcrossRESTandMCP(t *testing.T) {
 		}
 		return nil
 	})
-	app.Prepare() // install the deferred /mcp route so tools/call is reachable
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 
 	post := func(path string, body any) (int, map[string]any) {
 		b, _ := json.Marshal(body)
