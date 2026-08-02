@@ -137,6 +137,112 @@ cannot register an op; `module.go`'s doc comment states both structural reasons
 and the one thing that would close it (an extension declaring its contract on
 `zip.Module`).
 
+## PROTOTYPE (branch `proto/one-verb-fold`) — one verb, one walk
+
+**Not on main. Not tagged. Not released.** This section describes the branch
+only; everything below it describes main and still holds there.
+
+`compose.go`, `walk.go`, `build.go`, `remote.go`.
+
+**The thesis.** `Graft` was a symptom; the EAGER registry was the disease. The
+registry was a `[]*registeredOp` FIELD that composition appended to at call
+time, so composing two apps meant merging two registries, and `AdaptNetHTTP`
+type-erasing an `*App` into a closure destroyed five projections at once. Make
+the registry a lazy PROJECTION over a walk and composition collapses to
+appending a reference.
+
+**The model.** An App is a PROGRAM: an ordered list of `entry{node, callsite}`
+where the node is one of exactly three payloads — a `Handler` (middleware), a
+`route`, or an `*App` **included by reference**. `Use` appends the first and the
+third; the route methods append the second. `Group` returns a child `*App` with
+a prefix, so "a scope" and "a sub-application" are one mechanism.
+
+Not mount, not proxy, not delegate, not embed: **inclusion by reference**. One
+interpreter walks one program and reads the child's entries in place. There is
+no run-time boundary, so nothing hops. Those words are reserved for `Mount`,
+the one case where another runtime genuinely exists.
+
+**The walk is the contract.** `walk(app) ([]occurrence, error)` flattens the
+program in preorder — one occurrence per entry visit, all three kinds, with
+prefix, middleware stack and breadcrumb. Every projection is a REDUCER over that
+slice: the router, the registry, OpenAPI, MCP, CLI, the call plane, the conflict
+report, the lint. Guarantees: pure (no I/O), deterministic, append-stable
+(composing C never reorders A's occurrences — what keeps generated SDKs
+diff-stable), and validated before any reducer runs.
+
+The AST and the walk are unexported. They are the contract projections are
+written against, not a compatibility surface; the tests for them are in-package
+for that reason.
+
+**Snapshot semantics.** A node's middleware environment is the stack inherited
+at its INCLUSION SITE plus the middleware preceding it at its own level. So
+(a) parent entries written after an inclusion site do not reach that subtree,
+and (b) entries written inside a subtree, whenever written, inherit the anchored
+environment. Contents may grow until seal; environment may not. **This diverges
+from Fiber**, where the stack is whatever had been registered by the time a
+route was — migration note material.
+
+Staged composition (middleware appended after an inclusion) is legal and means
+what it says. It is intentional co-located and a latent bug written far apart,
+and nothing can tell those apart, so it is `app.Lint()` — a report naming both
+call sites — and not an error at any tier.
+
+**Seal.** `seal()` is internal and called only from the one place runtime
+execution begins (`Listen`). It propagates across the whole reachable graph, so
+`root.Use(users); go root.Listen(); users.Use(admin)` cannot race. Monotonic:
+mount-after-seal is fine, mutate-after-seal panics naming both call sites.
+Reading NEVER seals — a codegen step must not turn the next legitimate `Use`
+into a panic about a seal nobody asked for.
+
+**Occurrence ids.** One definition included twice declares ONE id and needs TWO
+operations, or the document is invalid. Qualification is prefix-derived and
+unconditional: `v1.listInvoices` vs `admin.listInvoices`. Never positional —
+"first wins" and "append -2" both make generated output a function of mount
+order, so reordering two lines in a wiring file becomes an SDK break. Surface
+keys on the occurrence; TYPES key on the definition, so one `Invoice` stays one
+schema.
+
+**Mount is a leaf.** `Mount(prefix, addr, decl...)` appends an App like any
+other inclusion. The declaration is a BUILD INPUT and is never fetched: a walk
+that did I/O would make `Registry()` fallible and slow and make the document
+depend on another process being up at boot. `Route.Op` (new, additive) is what
+lets a declaration say which op answers which address.
+
+### Things the code proved, that the design did not predict
+
+1. **Middleware placement is depth-dependent.** Root (`depth 0`) middleware
+   stays router middleware — unchanged behaviour, and it still covers requests
+   that match nothing (404 logging, CORS preflight). Middleware inside an
+   INCLUDED definition is composed into that subtree's own route chains instead,
+   because a pathless `app.Use(guard)` placed on the host's router is a barrier
+   for the whole host binary — exactly the failure `Graft`'s delegation existed
+   to avoid. Cost: an included definition's middleware no longer covers
+   unmatched paths, which is arguably correct (a definition does not answer for
+   addresses it does not declare) but IS a change.
+2. **Binding a handler to an App is a BUILD step, not a registration step.**
+   `toFiberHandler` was called at registration with the declaring app; one
+   definition served by two apps then hands out a `*Ctx` belonging to an app
+   that is not serving. Routes carry unbound `[]Handler` and bind at
+   materialisation.
+3. **zip's own control routes are NOT part of the program.** They are a
+   projection OF it, so making them entries made rendering a projection a
+   mutation (seal, then ask for the document, then panic) and made them
+   inheritable by a host. They belong to the build.
+4. **Materialising on a read is a write, and reads are concurrent.** Found by
+   `-race`, not by reading. `router()` takes a mutex; `Registry()` keeps its
+   `sync.Once`. The version counter is process-wide (an append to a child
+   changes a parent's meaning), so a sealed app must stop consulting it or an
+   unrelated App composing anything rebuilds this one's router.
+5. **Errors the router raised at registration now surface at build.** Fiber's
+   ambiguous-route panic (`/x/:id` vs `/x/:name`) fires at `Fiber()`/`Listen`,
+   not at the second `app.Get`. Structural and not undoable: an App can be
+   included after its routes are written, so at any single registration the set
+   of patterns it must coexist with is not yet known.
+6. **ZAP cannot carry a free-form value.** The tidy symmetry — forward a mounted
+   op over the remote's own ZAP call plane — is impossible: ZAP encodes structs
+   and this side has no struct, by construction. Mounted ops forward over the
+   declared REST route with JSON, which is the boundary encoding anyway.
+
 ## Composing an app in process — `Graft` (v1.18.16)
 
 `graft.go`. `app.Graft(child)` puts a live `*App` behind a host's router **and
