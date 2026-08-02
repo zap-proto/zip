@@ -46,7 +46,10 @@ type Router interface {
 	// takes a Group as readily as it takes the App.
 	OpTarget
 
-	Use(handlers ...Handler) Router
+	// Use is the ONE composition verb, so it takes a [Component] — middleware,
+	// or another App included by reference. It is the only signature that
+	// widened; every route method below still takes ...Handler.
+	Use(cs ...Component) Router
 
 	// Route registration takes ONE chain in wrapping order: zero or more
 	// middleware first, the final handler LAST. fiber wants handler-first;
@@ -60,93 +63,14 @@ type Router interface {
 	Options(path string, handlers ...Handler) Router
 	All(path string, handlers ...Handler) Router
 
-	Group(prefix string, handlers ...Handler) Router
+	// Group returns the *App it creates, because a group IS an app with a
+	// prefix — the same definition kind, included by reference like any other.
+	// One mechanism covers "a scope" and "a sub-application"; frameworks that
+	// grew them separately have two.
+	Group(prefix string, handlers ...Handler) *App
 
-	// Fiber returns the underlying fiber.Router for one-off escape.
-	Fiber() fiber.Router
-}
-
-// routerAdapter wraps a fiber.Router (App or Group) and exposes the
-// zip-style Handler signature.
-type routerAdapter struct {
-	r   fiber.Router
-	app *App
-}
-
-func (a *routerAdapter) Use(handlers ...Handler) Router {
-	for _, h := range handlers {
-		a.r.Use(toFiberHandler(a.app, h))
-	}
-	return a
-}
-
-func (a *routerAdapter) Get(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Get(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Post(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Post(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Put(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Put(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Patch(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Patch(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Delete(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Delete(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Head(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Head(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Options(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.Options(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) All(path string, handlers ...Handler) Router {
-	h, mw := splitChain(a.app, handlers)
-	a.r.All(normPath(path), h, mw...)
-	return a
-}
-
-func (a *routerAdapter) Group(prefix string, handlers ...Handler) Router {
-	args := make([]any, 0, len(handlers))
-	for _, h := range handlers {
-		args = append(args, toFiberHandler(a.app, h))
-	}
-	g := a.r.Group(prefix, args...)
-	return &routerAdapter{r: g, app: a.app}
-}
-
-func (a *routerAdapter) Fiber() fiber.Router { return a.r }
-
-// OpScope reads the prefix off the ROUTER rather than keeping a second copy of
-// it: fiber composes a nested group's prefix when the group is made, so asking
-// it is the one reading that cannot drift from where the routes actually land.
-func (a *routerAdapter) OpScope() OpScope {
-	if g, ok := a.r.(*fiber.Group); ok {
-		return OpScope{App: a.app, Prefix: g.Prefix}
-	}
-	return OpScope{App: a.app}
+	// Fiber returns the underlying router for one-off escape.
+	Fiber() *fiber.App
 }
 
 // joinPath composes a group's prefix with a leaf path the way the router does,

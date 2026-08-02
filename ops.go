@@ -117,9 +117,9 @@ func (a *App) metrics() string {
 	b.WriteString("# TYPE zip_uptime_seconds gauge\nzip_uptime_seconds ")
 	b.WriteString(strconv.FormatFloat(time.Since(a.born).Seconds(), 'f', 3, 64))
 	b.WriteString("\n# HELP zip_ops Registered typed operations.\n# TYPE zip_ops gauge\nzip_ops ")
-	b.WriteString(strconv.Itoa(len(a.registry)))
+	b.WriteString(strconv.Itoa(len(a.Registry())))
 	b.WriteString("\n# HELP zip_routes Registered routes.\n# TYPE zip_routes gauge\nzip_routes ")
-	b.WriteString(strconv.Itoa(len(a.fiber.GetRoutes(false))))
+	b.WriteString(strconv.Itoa(len(a.router().GetRoutes(false))))
 	b.WriteString("\n")
 	if st := a.Plugins(); len(st) > 0 {
 		b.WriteString("# HELP zip_plugin_running 1 when a composed plugin has a live instance.\n")

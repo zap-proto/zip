@@ -42,7 +42,7 @@ type OpenAPIConfig struct {
 // installOpenAPIRoutes wires /.well-known/openapi.json and /docs.
 // Called from Listen / Serve. Idempotent if there are no typed ops.
 func (a *App) installOpenAPIRoutes() {
-	if a.cfg.OpenAPI.Disabled || len(a.registry) == 0 {
+	if a.cfg.OpenAPI.Disabled || len(a.Registry()) == 0 {
 		return
 	}
 	spec := a.buildOpenAPI()
@@ -78,7 +78,7 @@ func (a *App) buildOpenAPI() map[string]any {
 	reg := newSchemaRegistry(specDefs)
 
 	// Sort ops by path,method for deterministic output.
-	ops := append([]*registeredOp{}, a.registry...)
+	ops := append([]*registeredOp{}, a.Registry()...)
 	sort.Slice(ops, func(i, j int) bool {
 		if ops[i].Path != ops[j].Path {
 			return ops[i].Path < ops[j].Path

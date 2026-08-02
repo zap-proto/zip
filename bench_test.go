@@ -119,7 +119,7 @@ func Benchmark_ChainTax(b *testing.B) {
 		za := zip.New(benchConfig())
 		fa := fiber.New()
 		for i := 0; i < mw; i++ {
-			za.Use(func(c *zip.Ctx) error { return c.Continue() })
+			za.Use(zip.H(func(c *zip.Ctx) error { return c.Continue() }))
 			fa.Use(func(c fiber.Ctx) error { return c.Next() })
 		}
 		za.Get("/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })

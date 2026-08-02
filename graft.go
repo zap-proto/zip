@@ -1,11 +1,8 @@
 package zip
 
 import (
-	"cmp"
 	"fmt"
 	"strings"
-
-	fiber "github.com/zap-proto/fiber/v3"
 )
 
 // Graft composes a child App into this one, IN PROCESS: the parent's router
@@ -100,82 +97,36 @@ func (a *App) Graft(children ...*App) error {
 			"and the call plane are rendered once from the registry, so an op grafted after " +
 			"that would serve and never describe")
 	}
-
-	// PASS 1 — no mutation. Every address every child wants, checked against the
-	// parent's router and against its siblings, so a refusal costs nothing.
-	held := map[string]string{}
-	host := cmp.Or(a.cfg.AppName, "host")
-	for _, r := range a.fiber.GetRoutes(true) {
-		if r.Method == "" || r.Path == "" {
-			continue
-		}
-		held[addrKey(r.Method, r.Path)] = host
-	}
-
-	type graftee struct {
-		name  string
-		decl  Declaration
-		child *App
-	}
-	grafts := make([]graftee, 0, len(children))
-	var refused []string
 	for _, child := range children {
 		if child == nil {
 			return fmt.Errorf("zip: Graft: nil child")
 		}
-		name := child.cfg.AppName
-		if name == "" {
+		if child.cfg.AppName == "" {
 			return fmt.Errorf("zip: Graft: a child with no AppName cannot be grafted — " +
 				"its name is what qualifies its types in the composed document")
 		}
-		decl := child.Declaration() // prepares the child; excludes zip's control plane
-		for _, r := range decl.Routes {
-			k := addrKey(r.Method, r.Pattern)
-			if owner, dup := held[k]; dup {
-				refused = append(refused, fmt.Sprintf(
-					"%q is already claimed by %q — %q cannot have it too",
-					r.Method+" "+r.Pattern, owner, name))
-				continue
-			}
-			held[k] = name
-		}
-		grafts = append(grafts, graftee{name: name, decl: decl, child: child})
-	}
-	if len(refused) > 0 {
-		return fmt.Errorf("zip: Graft refused, nothing registered:\n\t%s", strings.Join(refused, "\n\t"))
 	}
 
-	// PASS 2 — register. Every check has passed, so nothing below can fail.
-	for _, g := range grafts {
-		// One handler value for every one of the child's patterns: the child's
-		// own router, run on the request the parent already has.
-		serve := g.child.fiber.Handler()
-		delegate := func(c fiber.Ctx) error {
-			serve(c.RequestCtx())
-			return nil
-		}
-		for _, r := range g.decl.Routes {
-			a.fiber.Add([]string{r.Method}, r.Pattern, delegate)
-		}
-		for _, op := range g.child.registry {
-			// A COPY: the parent's registry is its own value, so composing a
-			// child never edits what the child says about itself. An op that
-			// already names its declarer keeps that name — a graft two levels
-			// deep still credits the app that wrote the type.
-			c := *op
-			if c.Origin == "" {
-				c.Origin = g.name
-			}
-			if len(c.Tags) == 0 {
-				// Derived, never invented: a grafted product is a named group
-				// in the parent's document instead of an untagged blob.
-				c.Tags = []string{c.Origin}
-			}
-			a.registry = append(a.registry, &c)
-		}
-		a.OnShutdown(g.child.ShutdownWithContext)
-		a.logger.Info("zip grafting", "child", g.name,
-			"routes", len(g.decl.Routes), "ops", len(g.child.registry))
+	// The whole verb, now: append the references and ask the walk whether the
+	// result is a program. Every check Graft used to run by hand — the address
+	// collisions against the parent AND between siblings — is one property of
+	// one walk, and it reports every collision instead of the first.
+	mark := len(a.entries)
+	site := here(1)
+	for _, child := range children {
+		a.appendEntry(entry{n: child, site: site})
+		a.OnShutdown(child.ShutdownWithContext)
+	}
+	if _, err := walk(a); err != nil {
+		// All-or-nothing: a half-grafted app is worse than a refused one, and
+		// under a lazy registry "nothing registered" is literally truncating the
+		// program back to where it was.
+		a.entries = a.entries[:mark]
+		version.Add(1)
+		return fmt.Errorf("zip: Graft refused, nothing registered:\n\t%w", err)
+	}
+	for _, child := range children {
+		a.logger.Info("zip grafting", "child", child.cfg.AppName, "ops", len(child.Registry()))
 	}
 	return nil
 }

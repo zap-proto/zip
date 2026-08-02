@@ -279,8 +279,6 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		}
 		return out, nil
 	}
-	app.registry = append(app.registry, op)
-
 	handler := func(c fiber.Ctx) error {
 		// hasBody is THE rule about what a method carries, read here as well as
 		// by the document and the CLI's remote invoker. Reading the body for a
@@ -326,5 +324,9 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		core := handler
 		handler = toFiberHandler(app, scope.Middleware(func(c *Ctx) error { return core(c.fc) }))
 	}
-	app.fiber.Add([]string{method}, path, handler)
+	// ONE entry. The route and the op are the same fact recorded once, so the
+	// router and all five projections read the same value and cannot disagree
+	// about what exists — which is what makes composition a walk rather than a
+	// merge of a router and a registry that were written separately.
+	app.addRoute(here(2), route{method: method, path: path, serve: handler, op: op})
 }

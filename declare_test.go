@@ -40,10 +40,15 @@ func TestDeclarationIsTheRouter(t *testing.T) {
 	if d.Name != "demo" {
 		t.Fatalf("name = %q, want demo", d.Name)
 	}
+	// Op names the operation this address answers under, empty for the untyped
+	// door. It is what lets a host that MOUNTS this service contribute its ops
+	// and not merely its addresses — without it a remote is a set of paths with
+	// no names, and every projection but the router stops at the process
+	// boundary.
 	want := []zip.Route{
 		{Method: "POST", Pattern: "/v1/demo/ingest"},
-		{Method: "POST", Pattern: "/v1/demo/quote"},
-		{Method: "GET", Pattern: "/v1/demo/quotes/:id"},
+		{Method: "POST", Pattern: "/v1/demo/quote", Op: "demo_quote"},
+		{Method: "GET", Pattern: "/v1/demo/quotes/:id", Op: "demo_quote_read"},
 	}
 	if len(d.Routes) != len(want) {
 		t.Fatalf("routes = %+v, want %+v", d.Routes, want)

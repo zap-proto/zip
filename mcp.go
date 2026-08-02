@@ -96,12 +96,12 @@ func (a *App) mcpName() string {
 // must answer it without touching a single child. A pluginTools entry is a
 // build-time catalogue, so the answer is a memcpy and the process count is zero.
 func (a *App) installMCP() {
-	if a.cfg.MCP.Disabled || (len(a.registry) == 0 && len(a.pluginTools) == 0 && !a.hasCaller()) {
+	if a.cfg.MCP.Disabled || (len(a.Registry()) == 0 && len(a.pluginTools) == 0 && !a.hasCaller()) {
 		return
 	}
 	a.renderTools()
 	a.control(fiber.MethodPost, a.mcpPath(), a.handleMCP)
-	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.registry),
+	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.Registry()),
 		"plugin tools", len(a.pluginTools), "per-caller", a.hasCaller())
 }
 
@@ -141,8 +141,9 @@ type mcpTool struct {
 // per-caller half has to know what the build-time half already claims and reading
 // that back out of the bytes would re-parse hundreds of schemas per request.
 func (a *App) composeTools() (json.RawMessage, map[string]bool) {
-	all := make([]mcpTool, 0, len(a.registry)+len(a.pluginTools))
-	for _, op := range a.registry {
+	own := a.Registry()
+	all := make([]mcpTool, 0, len(own)+len(a.pluginTools))
+	for _, op := range own {
 		b, err := json.Marshal(mcpToolOf(op))
 		if err != nil {
 			a.logger.Warn("zip mcp: op has no renderable schema", "op", opName(op), "err", err)
@@ -423,8 +424,9 @@ func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
 // build-time catalogue — and an artifact ordered by registration churns on an
 // edit that changed nothing a client can see.
 func (a *App) mcpTools() []map[string]any {
-	tools := make([]map[string]any, 0, len(a.registry))
-	for _, op := range a.registry {
+	reg := a.Registry()
+	tools := make([]map[string]any, 0, len(reg))
+	for _, op := range reg {
 		tools = append(tools, mcpToolOf(op))
 	}
 	sort.Slice(tools, func(i, j int) bool {
@@ -539,7 +541,7 @@ func (a *App) mcpForward(fc fiber.Ctx, req mcpRequest, p *plugin) error {
 }
 
 func (a *App) opByName(name string) *registeredOp {
-	for _, op := range a.registry {
+	for _, op := range a.Registry() {
 		if opName(op) == name {
 			return op
 		}

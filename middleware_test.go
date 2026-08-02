@@ -139,7 +139,7 @@ func TestWith_CloudRateLimit_ShortCircuits(t *testing.T) {
 func TestWith_CoexistsWithUse(t *testing.T) {
 	app := mwApp()
 	var rec []string
-	app.Use(func(c *zip.Ctx) error { rec = append(rec, "use"); return c.Next() })
+	app.Use(zip.H(func(c *zip.Ctx) error { rec = append(rec, "use"); return c.Next() }))
 	app.With(order(&rec, "with")).Get("/z", func(c *zip.Ctx) error {
 		rec = append(rec, "handler")
 		return c.String(200, "ok")

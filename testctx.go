@@ -11,5 +11,5 @@ func (a *App) TestCtx(method, path string) *Ctx {
 	fctx := &fasthttp.RequestCtx{}
 	fctx.Request.Header.SetMethod(method)
 	fctx.Request.URI().SetPath(path)
-	return &Ctx{fc: a.fiber.AcquireCtx(fctx), app: a, log: a.logger}
+	return &Ctx{fc: a.router().AcquireCtx(fctx), app: a, log: a.logger}
 }

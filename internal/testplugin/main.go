@@ -61,10 +61,10 @@ func orgOf(ctx context.Context) string { org, _ := ctx.Value(orgKey{}).(string);
 func main() {
 	app := zip.New(zip.Config{AppName: "testplugin", DisableStartupMessage: true,
 		MCP: zip.MCPConfig{Source: tenant{}}})
-	app.Use(func(c *zip.Ctx) error {
+	app.Use(zip.H(func(c *zip.Ctx) error {
 		c.SetContext(context.WithValue(c.Context(), orgKey{}, c.Org()))
 		return c.Continue()
-	})
+	}))
 
 	// Typed, like any other route worth having: a plugin is an ordinary zip
 	// app, so its ops project into the host's document, tools and call plane

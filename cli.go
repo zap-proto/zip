@@ -109,8 +109,9 @@ type Flag struct {
 // Commands projects every registered typed op into a command. This is the whole
 // derivation: no registration, no list of commands, no per-endpoint code.
 func (a *App) Commands() []Command {
-	cmds := make([]Command, 0, len(a.registry))
-	for _, op := range a.registry {
+	ops := a.Registry()
+	cmds := make([]Command, 0, len(ops))
+	for _, op := range ops {
 		doc, has := docFor(op.Method, op.Path)
 		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op

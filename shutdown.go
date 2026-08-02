@@ -60,7 +60,11 @@ func (a *App) shutdown(ctx context.Context) error {
 	// 1. Stop accepting new connections on every transport listener.
 	a.closeServers()
 	// 2. Drain in-flight requests (graceful; bounded by ctx).
-	errs := []error{a.fiber.ShutdownWithContext(ctx)}
+	// A program that was never served has no router to drain.
+	var errs []error
+	if a.fiber != nil {
+		errs = append(errs, a.fiber.ShutdownWithContext(ctx))
+	}
 	// 3. Tear subsystems down in reverse mount order (LIFO). Run ALL hooks
 	//    even if some fail; aggregate every error.
 	for i := len(hooks) - 1; i >= 0; i-- {
