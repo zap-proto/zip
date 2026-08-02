@@ -51,7 +51,7 @@ func (a *App) Build() error {
 	// program that does not compose now panics — so validating after it would
 	// turn every build error into a panic escaping the one function whose whole
 	// job is to return it.
-	if _, err := walk(a); err != nil {
+	if err := verify(a); err != nil {
 		return err
 	}
 	a.prepare()

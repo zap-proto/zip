@@ -322,19 +322,16 @@ func (p *plugin) startOnDemand() (Client, string) {
 	return in.client, in.sock
 }
 
-// Load returns the [Service] that makes p serve prefix. When p.Addr is set it
-// is mounted directly. Otherwise the binary is started as a child process
-// listening on its own unix socket in a private 0700 directory — no port to
-// allocate, and filesystem permissions are the ACL.
+// When p.Addr is set the remote is proxied directly. Otherwise the binary is
+// started as a child process listening on its own unix socket in a private 0700
+// directory — no port to allocate, and filesystem permissions are the ACL. The
+// child is stopped and its directory removed on Shutdown, in LIFO order with
+// every other hook, so a host that exits cleanly leaves nothing behind.
 //
-// It returns a Service rather than taking an *App so a plugin and a linked-in
-// service have the SAME type, and composing either is the same line.
+// prefixes is variadic because a service often owns more than one route subtree
+// — o11y answers both /v1/o11y and /v1/sentry — and a single-prefix Load
+// silently 404s the others. One call declares everything the plugin owns.
 //
-// The child is stopped and its directory removed on Shutdown, in LIFO order
-// with every other hook, so a host that exits cleanly leaves nothing behind.
-// prefixes is variadic because a service often owns more than one route
-// subtree — o11y answers both /v1/o11y and /v1/sentry — and a single-prefix
-// Load silently 404s the others. One call declares everything the plugin owns.
 // Load returns the plugin as a DEFINITION — an [*App] the host composes with
 // Use, like any other. It is not a verb and not a Service: a plugin is a unit of
 // functionality that answers addresses, which is exactly what an App is, so it

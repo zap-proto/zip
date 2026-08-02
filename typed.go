@@ -37,7 +37,7 @@ type registeredOp struct {
 	InType      reflect.Type
 	OutType     reflect.Type
 	// Origin names the app this op was DECLARED in when it arrived here through
-	// [App.Graft] — empty for an op this app registered itself. It qualifies the
+	// Graft — empty for an op this app registered itself. It qualifies the
 	// op's named types in the composed document (see schemaRegistry.origin), so
 	// two children may both call a type Application without one overwriting the
 	// other. It is the child's own AppName, never a prefix or a deployment

@@ -517,16 +517,16 @@ func TestRed_CleanDescendAncestorAliasing(t *testing.T) {
 	root := quiet("root")
 	root.Use(left, right)
 
-	occ, err := walk(root)
-	if err != nil {
+	if err := verify(root); err != nil {
 		t.Fatalf("diamond composition reported an error: %v", err)
 	}
 	n := 0
-	for _, o := range occ {
-		if r, ok := o.route(); ok && strings.HasSuffix(r.path, "/shared") {
+	_ = walk(root, func(nd node, sc scope, site callsite) error {
+		if r, ok := nd.(route); ok && strings.HasSuffix(r.path, "/shared") {
 			n++
 		}
-	}
+		return nil
+	})
 	if n != 2 {
 		t.Fatalf("one definition reached by two paths yielded %d occurrences, want 2", n)
 	}

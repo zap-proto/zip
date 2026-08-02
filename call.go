@@ -186,7 +186,7 @@ type Conn struct {
 }
 
 // Dial returns a Conn to the app at addr. The address scheme selects the
-// transport exactly as it does for [App.Listen] and [App.Mount] — one registry,
+// transport exactly as it does for [App.Listen] and [Mount] — one registry,
 // one vocabulary — so a bare path is ZAP over a unix socket and a bare host:port
 // is ZAP over tcp:
 //

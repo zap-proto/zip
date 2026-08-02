@@ -20,9 +20,23 @@ import (
 // router expands it; [App.Declaration] reads the expansion back off the router.
 const methodAll = "ALL"
 
-// plan is the occurrence slice the live generation was built from, or a fresh
-// walk when nothing is live yet.
-func (a *App) plan() []occurrence { return a.mustBuild().occ }
+// hostSet is every definition this composition reaches, including this one.
+// It is a REDUCTION the generation keeps, not the traversal it came from.
+func (a *App) hostSet() []*App { return a.mustBuild().hosts }
+
+// computeHosts reduces a traversal to that set.
+func (a *App) computeHosts() []*App {
+	out := []*App{a}
+	seen := map[*App]bool{a: true}
+	_ = walk(a, func(n node, sc scope, site callsite) error {
+		if def, ok := n.(*App); ok && !seen[def] {
+			seen[def] = true
+			out = append(out, def)
+		}
+		return nil
+	})
+	return out
+}
 
 // mustBuild is liveOrBuild for the accessors that CANNOT report an error.
 //
@@ -48,7 +62,7 @@ func (a *App) mustBuild() *generation {
 // composition, at the path and under the id its occurrence gives it.
 //
 // This is the value that replaced five verbs with one. It used to be a FIELD
-// that [App.Graft] appended to at compose time, which is why composing an app
+// that Graft appended to at compose time, which is why composing an app
 // needed a verb of its own and why type-erasing one into an http.Handler
 // destroyed the OpenAPI document, the MCP tool list, the CLI commands, the
 // by-name call plane and the [Declaration] all at once. A projection cannot be
@@ -68,33 +82,34 @@ func (a *App) Registry() []*registeredOp { return a.mustBuild().ops }
 func (a *App) router() *fiber.App { return a.mustBuild().router }
 
 // composeOps reduces a walk to the op registry.
-func composeOps(occ []occurrence) []*registeredOp {
-	out := make([]*registeredOp, 0, len(occ))
-	for _, o := range occ {
-		r, ok := o.route()
+func (a *App) composeOps() []*registeredOp {
+	var out []*registeredOp
+	_ = walk(a, func(n node, sc scope, site callsite) error {
+		r, ok := n.(route)
 		if !ok || r.op == nil {
-			continue
+			return nil
 		}
-		if o.ctx.depth == 0 && o.ctx.prefix == "" {
+		if sc.depth == 0 && sc.prefix == "" {
 			// The served app's own op, at the root: untouched, so an app that
 			// composes nothing publishes byte-for-byte what it declared.
 			out = append(out, r.op)
-			continue
+			return nil
 		}
 		c := *r.op // a copy: composing never edits what a definition says about itself
-		c.Path = o.abs(r.path)
-		c.OperationID = occurrenceID(o.ctx.prefix, opName(r.op))
+		c.Path = sc.abs(r.path)
+		c.OperationID = occurrenceID(sc.prefix, opName(r.op))
 		if c.Origin == "" {
 			// Who DECLARED the type — a property of the code, never of where it
 			// was deployed. An op that already names its declarer keeps that
 			// name, so a definition two levels deep still credits its author.
-			c.Origin = o.in.cfg.AppName
+			c.Origin = sc.in.cfg.AppName
 		}
 		if len(c.Tags) == 0 && c.Origin != "" {
 			c.Tags = []string{c.Origin}
 		}
 		out = append(out, &c)
-	}
+		return nil
+	})
 	return out
 }
 
@@ -121,22 +136,23 @@ func composeOps(occ []occurrence) []*registeredOp {
 //     CHAIN of that subtree's own routes instead. Router middleware here would
 //     escape the definition: a child's pathless app.Use(guard) registered on the
 //     host's router is a barrier for the whole host binary, which is precisely
-//     the failure [App.Graft]'s delegation existed to avoid. Composing it into
+//     the failure Graft's delegation existed to avoid. Composing it into
 //     the subtree's routes keeps it inside the definition that declared it, and
 //     costs the definition's middleware its coverage of unmatched paths — a
 //     definition does not answer for addresses it does not declare.
-func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
+func (a *App) materialise(ctl []route) *fiber.App {
 	f := fiber.New(a.fiberConfig())
-	for _, o := range occ {
-		switch n := o.n.(type) {
+	_ = walk(a, func(n node, sc scope, site callsite) error {
+		switch v := n.(type) {
 		case Handler:
-			if o.ctx.depth == 0 {
-				f.Use(toFiberHandler(a, n))
+			if sc.depth == 0 {
+				f.Use(toFiberHandler(a, v))
 			}
 		case route:
-			a.installRoute(f, o.ctx.prefix, o.ctx.mw.included(), n)
+			a.installRoute(f, sc.prefix, sc.mw.included(), v)
 		}
-	}
+		return nil
+	})
 	// zip's OWN projection routes go on last, and are not entries at all: a
 	// control route SERVES what the program computes, so putting it in the
 	// program would make rendering a projection a mutation, and would make it
@@ -202,13 +218,11 @@ func (a *App) addRoute(site callsite, r route) {
 // Reported per receiver, naming the included app, the middleware, and both
 // sites.
 func (a *App) Lint() []string {
-	occ := a.plan()
 	seen := map[*App]bool{}
 	var out []string
-	for _, o := range occ {
-		def := o.in
+	visitDef := func(def *App) {
 		if seen[def] {
-			continue
+			return
 		}
 		seen[def] = true
 		var included []entry
@@ -226,6 +240,9 @@ func (a *App) Lint() []string {
 				}
 			}
 		}
+	}
+	for _, def := range a.hostSet() {
+		visitDef(def)
 	}
 	sort.Strings(out)
 	return out
@@ -263,17 +280,7 @@ func (a *App) fiberConfig() fiber.Config {
 // way it finds everything else about its composition: by walking. That is the
 // same move the op registry made — one walk, and the projections stop keeping
 // private copies of what the program already says.
-func (a *App) hosts() []*App {
-	out := []*App{a}
-	seen := map[*App]bool{a: true}
-	for _, o := range a.plan() {
-		if child, ok := o.app(); ok && !seen[child] {
-			seen[child] = true
-			out = append(out, child)
-		}
-	}
-	return out
-}
+func (a *App) hosts() []*App { return a.hostSet() }
 
 // pluginNamed finds the definition holding the named plugin, and the plugin.
 func (a *App) pluginNamed(name string) (*App, *plugin) {

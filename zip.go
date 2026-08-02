@@ -251,7 +251,7 @@ type App struct {
 
 	prepareOnce sync.Once // installs deferred routes (OpenAPI, MCP) exactly once
 	// prepared reports whether that has happened, which sync.Once cannot be
-	// asked. [App.Graft] needs the answer: the document, the tool list and the
+	// asked. Graft needs the answer: the document, the tool list and the
 	// call plane are rendered ONCE from the registry, so an op that arrives
 	// afterwards would serve and never describe.
 	prepared atomic.Bool
