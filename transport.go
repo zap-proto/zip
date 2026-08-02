@@ -179,6 +179,12 @@ func (a *App) Listen(addrs ...string) error {
 	if err != nil {
 		return err
 	}
+	return a.listenOn(addrs)
+}
+
+// listenOn serves an ALREADY BUILT program. [Serve] uses it after installing
+// generation 0, so the build happens once and in one place.
+func (a *App) listenOn(addrs []string) error {
 	// The handler resolves the generation PER REQUEST, so a later Include or
 	// Drop is picked up without re-binding a listener, and a request that has
 	// already arrived finishes on the generation it arrived under.

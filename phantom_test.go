@@ -52,7 +52,7 @@ func TestPhantomComposition_PostSealUseAlwaysPanics(t *testing.T) {
 	// suddenly materialise the phantom route.
 	later := quiet("later")
 	later.Get("/later", func(c *Ctx) error { return c.String(200, "later") })
-	if err := host.Include(later); err != nil {
+	if err := hostOf(t, host).Include(later); err != nil {
 		t.Fatalf("Include: %v", err)
 	}
 	if code, _ := wireGET(t, host, "/phantom"); code != 404 {
@@ -98,7 +98,7 @@ func TestPhantomComposition_UseRacingATransactionStillPanics(t *testing.T) {
 			defer wg.Done()
 			p := quiet("p")
 			p.Get("/p", func(c *Ctx) error { return nil })
-			_ = host.Include(p) // may fail on a collision; either is fine
+			_ = hostOf(t, host).Include(p) // may fail on a collision; either is fine
 		}()
 	}
 	wg.Wait()

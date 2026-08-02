@@ -232,7 +232,12 @@ func TestMCP_LoadAfterListenIsOnTheList(t *testing.T) {
 	// have — the duplicate case is refused, and is proven separately.
 	// Include, not Use: the app is serving, so a composition change goes through
 	// a generation — it is validated and swapped, or the live one keeps serving.
-	if err := app.Include(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
+	h, herr := zip.Serve(app, "127.0.0.1:0")
+	if herr != nil {
+		t.Fatalf("Serve: %v", herr)
+	}
+	defer func() { _ = h.Close() }()
+	if err := h.Include(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
 		Tools: []byte(`[{"name":"b_extra","description":"Added after Listen.","inputSchema":{"type":"object"}}]`)}, "/v1/b"))); err != nil {
 		t.Fatalf("Include after Listen: %v", err)
 	}

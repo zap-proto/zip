@@ -776,9 +776,8 @@ this; copy that shape, not `-check ./...`.
 
 # The Zip specification
 
-Canonical. Three documents, one dependency rule: runtime may cite language,
-deployment may cite both, never backward. The code implements this, so it is no
-longer a draft.
+Canonical. Two documents, one dependency rule: the runtime may cite the
+language; the language does not cite the runtime. The code implements this.
 
 # Zip: the language
 
@@ -848,23 +847,46 @@ unexported; the entries slice is not a public surface.
 
 ## The walk
 
-    walk(app, visit func(n node, ctx Ctx, site callSite) error) error
+    walk(app *App) ([]occurrence, error)
 
-One function. All composition semantics live in it; to change scoping,
-audit one switch. Depth-first, in entry order, carrying context: prefix
-path, middleware stack (copies share structure), origin trail
-(`root → billing → /v1`). The callback takes parameters; there is no
-payload type, and nothing retains the sequence.
+One function, and the only code that inspects entry payloads as
+`Handler | operation | *App`. Depth-first, in entry order, carrying
+context: prefix path, middleware stack (copies share structure), origin
+trail (`root → billing → /v1`). It returns the flattened result — one
+occurrence per visit: (def, kind, ctx, site).
 
-- **Occurrences, not definitions.** An App referenced twice is visited
-  twice, each visit with its own context. Definition identity is the
-  pointer, valid because frozen definitions never change.
-- **Pure.** No global state. Validation is its own first pass: cycles and
-  conflicts complete, with trails, before any backend sees a visit.
-- **Deterministic.** Same program, same visit order, every time. This is
-  why every generated artifact is reproducible, and why any two backends
+`occurrence` is unexported and non-semantic: the walk's internal
+flattened result, not a public model, not a stored source of truth. The
+tree remains canonical. The materialized form is deliberate: the
+alternatives are rewalking once per reducer, buffering secretly (the
+slice exists but the document lies), or rendering during traversal
+(weakening validation-before-rendering). At real scale — a thousand-odd
+routes — the slice is free.
+
+**Binding requirement.** Every validator and reducer consumes the walk's
+result; none reopens `App.entries` or recurses the tree. Downstream code
+may switch on a normalized occurrence kind, never on payload types. A
+package test enforces it mechanically: the only type switch over `node`
+lives in walk.go.
+
+Pipeline, in order, or nothing publishes:
+
+    App tree
+      → walk once
+      → structural validation, complete (cycles, conflicts, inert middleware)
+      → derived validation (ID derivation, post-derivation collisions)
+      → reducers (router, registry, SDK, MCP, CLI, llms.txt)
+      → publish — or write nothing
+
+- **Occurrences, not definitions.** An App referenced twice appears
+  twice, each with its own context. Definition identity is the pointer,
+  valid because frozen definitions never change.
+- **Pure.** No global state. Both validation stages complete, with
+  trails, before any reducer runs.
+- **Deterministic.** Same program, same slice, every time. This is why
+  every generated artifact is reproducible, and why any two backends
   agree.
-- **Append-stable.** Adding an entry never reorders visits inside
+- **Append-stable.** Adding an entry never reorders occurrences inside
   previously composed subtrees. Order only: a new entry can still create
   a conflict that fails validation.
 
@@ -926,8 +948,11 @@ domains compensated for registry mutation at compose time; the walk made
 the registry a backend, and the verbs had nothing left to name.
 Per-kind wrappers and the ref type: every wrapper held only a call site,
 and every entry holds one, so one envelope replaced them all.
-The Occurrence type: the callback's parameters were already the payload.
-The word survives in English; the noun died as a type.
+The Occurrence type as public artifact: the language exports no IR — no
+Occurrence type, no stored model, no cached contract. The walk's
+flattened result exists, unexported and non-semantic; what died was its
+claim to be part of the language. The tree is canonical; the slice is
+implementation.
 
 The test behind every deletion: a concept may go if removing it loses no
 semantic distinction the system depends on. Everything above survived it.
@@ -974,7 +999,10 @@ the current one. Change means: build the next generation, validate
 completely (the walk's first pass), swap only on success. A bad change
 cannot take down routing — the build fails with trails and the old
 generation keeps serving. Requests pin their generation on arrival; no
-locks on the hot path; drained generations are collected.
+locks on the hot path; drained generations are collected. Each generation
+retains its walk result; reducers serving the live generation — the
+OpenAPI endpoint, the MCP list, llms.txt — reuse it rather than
+rewalking.
 
 ## Inspection
 
@@ -997,94 +1025,3 @@ commitment): existed only because Include was anchored to Apps. Host
 anchoring made the question they answered unaskable. The old guarantee's
 own text conceded cutover was never simultaneous; explicit per-host
 reloads are the same reality without the machinery.
-
----
-
-# Zip: deployment
-
-Depends on zip-language.md and zip-runtime.md. Neither depends on this.
-Replace everything here — Go plugins with WASM, remotes with anything —
-and those documents do not change. That is the test this file must keep
-passing.
-
-## Loaders are constructors
-
-One host binary. Each plugin is one `.so`. There are no other files.
-
-- **`zip.Plugin(path) *App`** resolves at the generation build that
-  composes it: `plugin.Open`, `Lookup("Plugin") → *App`, real App spliced
-  into the tree. The constructor never fails; the build does — an
-  unloadable or conflicting plugin fails with trails and the old
-  generation keeps serving. There is no composed-but-unloaded state: if a
-  plugin is in the live surface, its code is in memory. No sidecars, no
-  stubs, no binding, no verification — the loaded App is the only claim,
-  so there is nothing to check it against. Toolchain skew is a build
-  refusal, by construction.
-- **`zip.Remote(addr) *App`** is the one place a declaration exists,
-  because you cannot dlopen across a network. The remote serves its App
-  tree as JSON — `{"zip": 1, "app": {prefix, entries: […]}}`, middleware
-  as position and name, operations with method, path, id, description,
-  schemas — and the host builds a proxy App from the response at
-  generation build. Re-fetched per build; a remote's shape change does
-  nothing until the next generation. A network message, not a file.
-  (OpenAPI cannot be this message: it is a backend — flattened, no
-  middleware, no tree — one of this JSON's outputs, not its source.)
-- **Go plugin limits (not ours):** loaded code never unloads; Drop is
-  routing-level only; reload leaks the old version's code; each version
-  needs a distinct path; toolchain and deps must match exactly; Linux and
-  macOS only. True unload exists: run it as a process and compose
-  `Use(zip.Remote(addr))`.
-
-## Generate
-
-The host binary is the generator, because it is the only process that
-knows the composition:
-
-    go build ./cloud && go build -buildmode=plugin ./plugins/...
-    ./cloud generate -o dist/
-
-    dist/openapi.yaml  dist/mcp.json  dist/llms.txt  dist/sdk/  dist/cli/
-
-`generate` builds generation 0 exactly as Serve would — opens every
-composed plugin, splices, walks, validates — then writes the backends to
-disk and exits. Not composing → joined errors, exit 1, CI red. The walk's
-determinism makes generate's output byte-identical to what the same
-composition serves at runtime. SDKs are inherently compile-time. Published
-artifacts document a release (the pinned composition CI built); runtime
-endpoints (/openapi.json, the MCP list, /llms.txt) document the live
-generation. For a pinned deployment they are identical; after a runtime
-Include they answer different questions, both correctly.
-
-## Acceptance gates
-
-1. **Consumer scan.** Across the sixteen consumers: every Use of an App
-   followed by a Handler Use on the same receiver, classified co-located
-   vs cross-scope by enclosing function. Calibrates the lint; each
-   cross-scope hit is reviewed as a candidate bug.
-2. **Reproduction.** `./cloud generate` against the composition that
-   produces today's iam 164-path document, diffed against production
-   output. Empty diff retires the old path; any diff is the bug report.
-3. **Startup budget.** Measure generation-0 build time — every
-   plugin.Open and init across the consumers' plugins. If the number is
-   unacceptable, the fallback — specified here so it never becomes a
-   second file — is the declaration JSON embedded in the `.so` as an ELF
-   section, read with `debug/elf` without executing anything, deferring
-   the Open. That machinery returns only if the measurement demands it.
-   No number, no fallback.
-
-## Still empirical
-
-- The `"zip": 1` version field on the remote declaration is a
-  compatibility surface between services; bumping it is coordinated.
-- Resident-memory growth per reload cycle; the number that makes the
-  subprocess path mandatory.
-- Migration timing: the 102-site removal in cloud stays behind the parked
-  release train; nothing here ships before it moves.
-
-## Removed, and why
-
-The sidecar, stubs, binding, poisoning, and the bind switch: all served
-one requirement — a plugin composed but not loaded — and nothing needed
-that state. Dynamic loading is Include at build time; deferred loading of
-composed plugins was the invention. The declaration JSON survives only
-where physics forces it: over the wire, for remotes.

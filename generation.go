@@ -2,7 +2,6 @@ package zip
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/valyala/fasthttp"
 	fiber "github.com/zap-proto/fiber/v3"
@@ -45,8 +44,10 @@ import (
 type generation struct {
 	// n counts generations from 0, so a diagnostic can say which one answered.
 	n uint64
-	// No occurrence slice. The generation retains what was REDUCED — the router,
-	// the ops, the host set — never the traversal they were reduced from.
+	// occ is the walk this generation was built from, RETAINED so the reducers
+	// serving it — the OpenAPI endpoint, the MCP list, llms.txt — reuse it
+	// rather than rewalking per request.
+	occ []occurrence
 	// The projections, computed once, read without a lock forever after.
 	router *fiber.App
 	serve  fasthttp.RequestHandler
@@ -68,33 +69,33 @@ func (a *App) Generation() (uint64, bool) {
 // installing it. Nothing it does is observable, so a failed build costs the
 // live system nothing.
 func (a *App) build() (*generation, error) {
-	// Validation is its own first pass: cycles and conflicts complete, with
-	// trails, before any backend sees a visit.
-	if err := verify(a); err != nil {
+	// Pipeline, in order, or nothing publishes: walk once, then BOTH validation
+	// stages complete with trails, then the reducers.
+	occ, err := walk(a)
+	if err != nil {
+		return nil, err
+	}
+	if err := structural(occ); err != nil {
+		return nil, err
+	}
+	if err := derived(occ); err != nil {
 		return nil, err
 	}
 	var n uint64
 	if prev := a.live.Load(); prev != nil {
 		n = prev.n + 1
 	}
-	g := &generation{n: n, ctl: a.ctl}
-	g.router = a.materialise(g.ctl)
+	g := &generation{n: n, occ: occ, ctl: a.ctl}
+	g.router = a.materialise(occ, g.ctl)
 	g.serve = g.router.Handler()
-	g.ops = a.composeOps()
-	g.hosts = a.computeHosts()
+	g.ops = composeOps(occ)
+	g.hosts = computeHosts(a, occ)
 	return g, nil
 }
 
 // install makes g live and freezes every definition it reaches. Freezing is
 // what earns the lock-free read: a definition that cannot change cannot
 // invalidate a projection taken from it.
-// serving is every App with a live generation. A definition does not know where
-// it is included — that is the point of inclusion by reference — so when a
-// composition change lands on a CHILD, the only way to find the servers affected
-// is to ask the servers. There are a handful of them per process, and this runs
-// at composition time, never per request.
-var serving sync.Map // *App -> struct{}
-
 func (a *App) install(g *generation) {
 	site := here(1)
 	for _, child := range g.hosts {
@@ -102,7 +103,6 @@ func (a *App) install(g *generation) {
 	}
 	a.freeze(site)
 	a.live.Store(g)
-	serving.Store(a, struct{}{})
 	// The MCP door serves pre-rendered bytes — that is what makes tools/list free
 	// — so a new generation has to re-render them or an agent keeps reading the
 	// previous composition's tool set.
@@ -121,96 +121,6 @@ func (a *App) freeze(site callsite) {
 // can therefore no longer be edited in place.
 func (a *App) Frozen() bool { return a.frozen.Load() }
 
-// Include builds and installs the next generation with cs composed in.
-//
-// It is [App.Use] against a RUNNING system, and it is a different verb for one
-// reason that is not cosmetic: it can fail. Use is a declaration written while
-// nothing is serving, so it cannot conflict with anything live and returns the
-// receiver for chaining. Include is a transaction against a live route set, so
-// it returns the error and — on error — changes nothing at all.
-//
-//	if err := app.Include(billingPlugin); err != nil {
-//	    log.Error("plugin refused, previous generation still serving", "err", err)
-//	}
-func (a *App) Include(cs ...Component) error {
-	return a.transact(here(1), func() { a.compose(here(2), cs) })
-}
-
-// Drop builds and installs the next generation with every entry that references
-// defs removed. Identity is the POINTER, which is what makes this expressible at
-// all: an entry is a reference, and the definition is the thing being named.
-//
-// It drops every reference THE RECEIVER HOLDS. That answers the shared-definition
-// question the obvious way once you see whose program is being edited: an entry
-// belongs to the app that wrote it, so a host can only drop what the host
-// included. A definition reached through a group is referenced by the GROUP, so
-// dropping it means dropping the group — and a definition that some other host
-// also includes keeps serving there, which is required, not a limitation:
-//
-//	billing := billingApp()
-//	v1 := app.Group("/v1"); v1.Use(billing)
-//	app.Drop(billing)  // no-op: app never referenced billing, v1 did
-//	app.Drop(v1)       // stops serving /v1/...
-//
-// Within the receiver it drops ALL references: a definition the receiver
-// included at two prefixes is one thing serving in two places, and "stop
-// serving billing" is not a question about one of them.
-//
-// Routing-level only. Go's plugin package has no Close and never unloads a
-// .so — code and package state live for the process. To reclaim memory, run the
-// subsystem out of process behind [Mount] instead; that is what the one
-// remaining deployment verb is for.
-func (a *App) Drop(defs ...*App) error {
-	site := here(1)
-	return a.transact(site, func() {
-		drop := make(map[*App]bool, len(defs))
-		for _, d := range defs {
-			drop[d] = true
-		}
-		kept := a.entries[:0:0]
-		for _, e := range a.entries {
-			if child, ok := e.n.(*App); ok && drop[child] {
-				continue
-			}
-			kept = append(kept, e)
-		}
-		a.entries = kept
-		version.Add(1)
-	})
-}
-
-// LOCK DISCIPLINE, and what "transactional" actually guarantees.
-//
-// transact holds ONE lock — the receiver's buildMu — for the whole edit, build
-// and swap. It never acquires a second App's buildMu, and that is not luck; it
-// rests on two invariants that are load-bearing and would otherwise look
-// accidental:
-//
-//  1. liveOrBuild returns BEFORE taking the lock when a generation is already
-//     live. affected() calls plan() on other servers, and every server it
-//     considers is live by construction (it skips any whose live pointer is
-//     nil), so those calls never reach the lock.
-//  2. install stores the live pointer BEFORE re-rendering the MCP list. The
-//     render reads Registry(), which routes through liveOrBuild — so ordering
-//     the store first is what keeps a build from waiting on the lock it already
-//     holds.
-//
-// Reverse either and you get a self-deadlock on the receiver, or a lock-order
-// inversion between two servers sharing a definition.
-//
-// THE GUARANTEE, stated exactly:
-//
-//   - Every affected server is BUILT before any is INSTALLED, so a change that
-//     is invalid anywhere installs nowhere, and Drop guarantees exactly what
-//     Include does — one path, not two.
-//   - Each install is one atomic pointer store, and a request pins its
-//     generation on arrival.
-//   - It is NOT atomic ACROSS servers. Installs happen in sequence, so two
-//     servers sharing a definition switch microseconds apart and a request can
-//     be served by the old generation on one while the new one is live on the
-//     other. Commitment, not simultaneity — which is what a rolling deployment
-//     already is.
-//
 // transact is the ONE path a composition change takes once something is live:
 // edit, build, and install — or put the entry list back exactly as it was and
 // return why. There is no partial outcome, because the edit is only ever
@@ -245,54 +155,14 @@ func (a *App) transact(site callsite, edit func()) error {
 	a.entries = append(a.entries[:0:0], a.entries...) // copy: rollback must be total
 	edit()
 
-	// Every server this edit can reach must be rebuilt, not just the receiver.
-	// Include on a group used to return nil and change nothing a host served —
-	// while the freeze panic RECOMMENDED Include — because transact installed
-	// onto the receiver and a group has no listener.
-	targets := a.affected()
-	built := make([]*generation, len(targets))
-	for i, t := range targets {
-		g, err := t.build()
-		if err != nil {
-			return fmt.Errorf("zip: %s: composition refused, generation %d still serving: %w",
-				site, t.liveN(), err)
-		}
-		built[i] = g
+	g, err := a.build()
+	if err != nil {
+		return fmt.Errorf("zip: %s: composition refused, generation %d still serving: %w",
+			site, a.liveN(), err)
 	}
-	// Every build succeeded, so nothing below can fail: the swap is the only
-	// observable moment, and it is one atomic store per server.
-	for i, t := range targets {
-		t.install(built[i])
-	}
+	a.install(g)
 	ok = true
 	return nil
-}
-
-// affected is the receiver if it is itself a server, plus every live server that
-// reaches it. Deduplicated, receiver first.
-func (a *App) affected() []*App {
-	out := []*App{}
-	seen := map[*App]bool{}
-	if a.live.Load() != nil {
-		out, seen[a] = append(out, a), true
-	}
-	serving.Range(func(k, _ any) bool {
-		root := k.(*App)
-		if seen[root] || root.live.Load() == nil {
-			return true
-		}
-		for _, def := range root.hostSet() {
-			if def == a {
-				out, seen[root] = append(out, root), true
-				return true
-			}
-		}
-		return true
-	})
-	if len(out) == 0 {
-		out = append(out, a) // nothing live yet: build the receiver, as before
-	}
-	return out
 }
 
 func (a *App) liveN() uint64 {

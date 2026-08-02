@@ -20,21 +20,24 @@ import (
 // router expands it; [App.Declaration] reads the expansion back off the router.
 const methodAll = "ALL"
 
+// plan is the walk result the live generation was built from. Each generation
+// RETAINS it, so the reducers serving that generation — the OpenAPI endpoint,
+// the MCP list, llms.txt — reuse it rather than rewalking per request.
+func (a *App) plan() []occurrence { return a.mustBuild().occ }
+
 // hostSet is every definition this composition reaches, including this one.
-// It is a REDUCTION the generation keeps, not the traversal it came from.
 func (a *App) hostSet() []*App { return a.mustBuild().hosts }
 
-// computeHosts reduces a traversal to that set.
-func (a *App) computeHosts() []*App {
-	out := []*App{a}
-	seen := map[*App]bool{a: true}
-	_ = walk(a, func(n node, sc scope, site callsite) error {
-		if def, ok := n.(*App); ok && !seen[def] {
+// computeHosts reduces the walk result to that set.
+func computeHosts(root *App, occ []occurrence) []*App {
+	out := []*App{root}
+	seen := map[*App]bool{root: true}
+	for _, o := range occ {
+		if def, ok := o.app(); ok && !seen[def] {
 			seen[def] = true
 			out = append(out, def)
 		}
-		return nil
-	})
+	}
 	return out
 }
 
@@ -75,41 +78,65 @@ func (a *App) mustBuild() *generation {
 // DEFINITION for types: the *registeredOp's InType/OutType are the definition's
 // own reflect.Types, so one Invoice struct included twice is one schema, not
 // two identical copies under two names.
-func (a *App) Registry() []*registeredOp { return a.mustBuild().ops }
+func (a *App) Registry() []*registeredOp {
+	if g := a.live.Load(); g != nil {
+		return g.ops // the live generation's, computed once, read without a lock
+	}
+	// MUTABLE PHASE. No host exists, so the program can still change and there is
+	// no generation to be consistent with: recompute per call, and do not
+	// memoise. Caching here is what produced a stale answer once already — a
+	// draft keyed on a counter that one mutation forgot to bump — and the phase
+	// where this matters is codegen and tests, never the served path.
+	//
+	// Deliberately NOT goroutine-safe: a program under construction has one
+	// writer by definition, and a lock here would buy nothing while implying a
+	// guarantee the phase cannot make.
+	occ, err := walk(a)
+	if err == nil {
+		if verr := structural(occ); verr != nil {
+			err = verr
+		} else {
+			err = derived(occ)
+		}
+	}
+	if err != nil {
+		panic("zip: this program does not compose, so it has no projection:\n\t" + err.Error())
+	}
+	return composeOps(occ)
+}
 
 // router returns the live generation's router, building a draft if nothing is
 // live yet. It never installs — see [App.liveOrBuild].
 func (a *App) router() *fiber.App { return a.mustBuild().router }
 
 // composeOps reduces a walk to the op registry.
-func (a *App) composeOps() []*registeredOp {
-	var out []*registeredOp
-	_ = walk(a, func(n node, sc scope, site callsite) error {
-		r, ok := n.(route)
+func composeOps(occ []occurrence) []*registeredOp {
+	out := make([]*registeredOp, 0, len(occ))
+	for _, o := range occ {
+		r, ok := o.route()
 		if !ok || r.op == nil {
-			return nil
+			continue
 		}
-		if sc.depth == 0 && sc.prefix == "" {
+		if o.ctx.depth == 0 && o.ctx.prefix == "" {
 			// The served app's own op, at the root: untouched, so an app that
 			// composes nothing publishes byte-for-byte what it declared.
 			out = append(out, r.op)
-			return nil
+			continue
 		}
 		c := *r.op // a copy: composing never edits what a definition says about itself
-		c.Path = sc.abs(r.path)
-		c.OperationID = occurrenceID(sc.prefix, opName(r.op))
+		c.Path = o.abs(r.path)
+		c.OperationID = occurrenceID(o.ctx.prefix, opName(r.op))
 		if c.Origin == "" {
 			// Who DECLARED the type — a property of the code, never of where it
 			// was deployed. An op that already names its declarer keeps that
 			// name, so a definition two levels deep still credits its author.
-			c.Origin = sc.in.cfg.AppName
+			c.Origin = o.ctx.in.cfg.AppName
 		}
 		if len(c.Tags) == 0 && c.Origin != "" {
 			c.Tags = []string{c.Origin}
 		}
 		out = append(out, &c)
-		return nil
-	})
+	}
 	return out
 }
 
@@ -140,19 +167,19 @@ func (a *App) composeOps() []*registeredOp {
 //     the subtree's routes keeps it inside the definition that declared it, and
 //     costs the definition's middleware its coverage of unmatched paths — a
 //     definition does not answer for addresses it does not declare.
-func (a *App) materialise(ctl []route) *fiber.App {
+func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
 	f := fiber.New(a.fiberConfig())
-	_ = walk(a, func(n node, sc scope, site callsite) error {
-		switch v := n.(type) {
-		case Handler:
-			if sc.depth == 0 {
-				f.Use(toFiberHandler(a, v))
+	for _, o := range occ {
+		switch o.kind() {
+		case kindMiddleware:
+			if o.ctx.depth == 0 {
+				f.Use(toFiberHandler(a, o.n.(Handler)))
 			}
-		case route:
-			a.installRoute(f, sc.prefix, sc.mw.included(), v)
+		case kindRoute:
+			r, _ := o.route()
+			a.installRoute(f, o.ctx.prefix, o.ctx.mw.included(), r)
 		}
-		return nil
-	})
+	}
 	// zip's OWN projection routes go on last, and are not entries at all: a
 	// control route SERVES what the program computes, so putting it in the
 	// program would make rendering a projection a mutation, and would make it
@@ -218,32 +245,37 @@ func (a *App) addRoute(site callsite, r route) {
 // Reported per receiver, naming the included app, the middleware, and both
 // sites.
 func (a *App) Lint() []string {
-	seen := map[*App]bool{}
+	// A reducer, like every other. Filtering the walk's result by the definition
+	// that WROTE each entry recovers that definition's own entries in order,
+	// which is all this needs — and it keeps the tree from being reopened here.
+	type seen struct {
+		included []occurrence
+	}
+	per := map[*App]*seen{}
+	var order []*App
 	var out []string
-	visitDef := func(def *App) {
-		if seen[def] {
-			return
+	for _, o := range a.plan() {
+		def := o.ctx.in
+		st, ok := per[def]
+		if !ok {
+			st = &seen{}
+			per[def] = st
+			order = append(order, def)
 		}
-		seen[def] = true
-		var included []entry
-		for _, e := range def.entries {
-			switch e.n.(type) {
-			case *App:
-				included = append(included, e)
-			case Handler:
-				for _, inc := range included {
-					child, _ := inc.n.(*App)
-					out = append(out, fmt.Sprintf(
-						"zip: staged composition in %s: middleware at %s was appended after %s was included at %s — "+
-							"it does not apply to that subtree; co-located this is intentional, far apart it is a missing seam",
-						def.who(), e.site, child.who(), inc.site))
-				}
+		switch o.kind() {
+		case kindApp:
+			st.included = append(st.included, o)
+		case kindMiddleware:
+			for _, inc := range st.included {
+				child, _ := inc.app()
+				out = append(out, fmt.Sprintf(
+					"zip: staged composition in %s: middleware at %s was appended after %s was included at %s — "+
+						"it does not apply to that subtree; co-located this is intentional, far apart it is a missing seam",
+					def.who(), o.site, child.who(), inc.site))
 			}
 		}
 	}
-	for _, def := range a.hostSet() {
-		visitDef(def)
-	}
+	_ = order
 	sort.Strings(out)
 	return out
 }
