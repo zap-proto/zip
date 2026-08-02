@@ -171,12 +171,6 @@ type App struct {
 	draftAt  uint64
 	draftErr error
 	buildMu  sync.Mutex
-	// building is set while a transaction holds a private copy of the entry list,
-	// which is the one moment a frozen App legitimately grows. ATOMIC: Include is
-	// by design called against a running system, so a second goroutine reaching
-	// Use is exactly the case the freeze exists to catch — and the check that
-	// catches it must not itself be a race.
-	building atomic.Bool
 	// control is zip's own projection routes. They belong to the BUILD, not to
 	// the program — see [App.control].
 	ctl []route

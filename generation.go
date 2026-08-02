@@ -207,14 +207,11 @@ func (a *App) transact(site callsite, edit func()) error {
 			a.hooks = a.hooks[:adopted]
 		}
 		a.hookMu.Unlock()
-		a.building.Store(false)
 		version.Add(1)
 	}()
 
 	a.entries = append(a.entries[:0:0], a.entries...) // copy: rollback must be total
-	a.building.Store(true)
 	edit()
-	a.building.Store(false)
 
 	// Every server this edit can reach must be rebuilt, not just the receiver.
 	// Include on a group used to return nil and change nothing a host served —
