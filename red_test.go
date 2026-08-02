@@ -1,0 +1,510 @@
+package zip
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+)
+
+// Adversarial tests for the one-verb fold. Each one FAILS on the branch as
+// written and names the single line that causes it. Nothing here is a style
+// complaint: every assertion is a runtime behaviour a caller can observe.
+
+func redOK(c *Ctx) error { return c.String(200, "ok") }
+
+func redGuard(next Handler) Handler {
+	return func(c *Ctx) error {
+		if c.Header("Authorization") == "" {
+			return Errorf(401, "no credentials")
+		}
+		return next(c)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 1. CONCURRENCY / STALENESS
+// ---------------------------------------------------------------------------
+
+// TestRed_DropNeverMovesTheVersionCounter.
+//
+// liveOrBuild caches a draft keyed on the process-wide `version` counter. Every
+// other mutation moves that counter (appendEntry, compose, includeRoutes, and
+// even transact's own rollback path). App.Drop is the one that does not — it
+// assigns a.entries = kept inside the transaction and never calls version.Add.
+//
+// So a definition that is Drop'ed keeps serving, forever, in every OTHER app
+// that had already materialised a draft over it. The host is not frozen and has
+// no live generation, so nothing ever forces it to rebuild.
+func TestRed_DropNeverMovesTheVersionCounter(t *testing.T) {
+	child := quiet("child")
+	child.Get("/keep", redOK)
+	sub := child.Group("/sub")
+	sub.Get("/gone", redOK)
+
+	host := quiet("host")
+	host.Use(child)
+
+	// Ordinary pre-Listen inspection: a codegen step, a doc generator, Fiber().
+	// It materialises a draft and CACHES it against the version counter.
+	if code, _ := wireGET(t, host, "/sub/gone"); code != 200 {
+		t.Fatalf("setup: host does not serve /sub/gone: %d", code)
+	}
+	before := version.Load()
+
+	if err := child.Drop(sub); err != nil {
+		t.Fatalf("Drop: %v", err)
+	}
+
+	if after := version.Load(); after != before {
+		t.Logf("version moved %d -> %d (bug is fixed)", before, after)
+	} else {
+		t.Errorf("Drop did not move the version counter (still %d) — "+
+			"generation.go:148 App.Drop assigns a.entries without version.Add(1)", before)
+	}
+
+	// The child itself is correct: it installed a generation, so it reads live.
+	if code, _ := wireGET(t, child, "/sub/gone"); code == 200 {
+		t.Errorf("the child still serves its own dropped route")
+	}
+	// The host is not. It answers out of a draft the Drop invalidated but never
+	// marked stale.
+	if code, _ := wireGET(t, host, "/sub/gone"); code == 200 {
+		t.Errorf("a DROPPED route is still served by a host that composed it: "+
+			"GET /sub/gone = %d (stale draft, draftAt == version)", code)
+	}
+}
+
+// TestRed_TheSealIsNotEnforcedUnderConcurrency.
+//
+// appendEntry decides whether to panic with `a.frozen.Load() && !a.building`.
+// frozen is atomic; building is a plain bool, written by transact under buildMu
+// and read here under no lock at all. Include is BY DESIGN called against a
+// running system, so a second goroutine reaching Use is exactly the case the
+// seal exists to catch — and the check that catches it is racy.
+//
+// When the read observes building==true the panic is skipped and the goroutine
+// appends to a.entries while transact is copying and reassigning it: a torn
+// entry list, or a silently discarded registration.
+//
+// Run with -race; the detector is the assertion.
+func TestRed_TheSealIsNotEnforcedUnderConcurrency(t *testing.T) {
+	host := quiet("host")
+	host.Get("/ok", redOK)
+	if err := build(host); err != nil {
+		t.Fatalf("generation 0: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// The control plane: composing against a running system, the sanctioned way.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			c := quiet("c")
+			c.Get("/red/"+itoa(i), redOK)
+			_ = host.Include(c)
+		}
+	}()
+	// Anything else that reaches Use. The seal's whole job is to refuse this
+	// with a panic naming the freeze site.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			func() {
+				defer func() { _ = recover() }()
+				host.Use(H(redOK))
+			}()
+		}
+	}()
+	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// 2. TRANSACTION ROLLBACK IS NOT TOTAL
+// ---------------------------------------------------------------------------
+
+// TestRed_RefusedIncludeStillAdoptsTheChildsTeardown.
+//
+// transact restores a.entries and nothing else. compose() has a SECOND effect —
+// a.OnShutdown(v.ShutdownWithContext) — which is appended to a.hooks before the
+// build runs and is never undone. Include's contract is "on error — changes
+// nothing at all". It changes the host's teardown set.
+//
+// Consequence: a host that refuses a plugin still owns that plugin's shutdown,
+// so shutting the host down stops a subsystem it never composed and which may
+// still be serving somewhere else.
+func TestRed_RefusedIncludeStillAdoptsTheChildsTeardown(t *testing.T) {
+	host := quiet("host")
+	host.Get("/v1/x", redOK)
+	if err := build(host); err != nil {
+		t.Fatalf("generation 0: %v", err)
+	}
+
+	bad := quiet("bad")
+	bad.Get("/v1/x", redOK) // collides with the live set: Include must refuse
+	var torn atomic.Bool
+	bad.OnShutdown(func(context.Context) error { torn.Store(true); return nil })
+
+	if err := host.Include(bad); err == nil {
+		t.Fatal("setup: the colliding definition was accepted")
+	}
+
+	if err := host.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if torn.Load() {
+		t.Error("a REFUSED Include still adopted the child's teardown — " +
+			"generation.go:212 compose() calls OnShutdown, generation.go:182 rolls back only a.entries")
+	}
+}
+
+// TestRed_APanicInMaterialiseBricksTheProgram.
+//
+// A route whose method fiber does not know panics inside register(). That panic
+// unwinds through build() and through transact() — past line 182, where the
+// rollback lives. buildMu is released by defer, but a.entries keeps the edit.
+//
+// The live generation survives (requests keep being served), so the failure is
+// invisible until the NEXT composition, which panics on the poison left behind.
+// "A plugin whose patterns collide with the live set fails the build, with
+// breadcrumbs, and the old generation keeps serving" holds for collisions and
+// not for this.
+func TestRed_APanicInMaterialiseBricksTheProgram(t *testing.T) {
+	host := quiet("host")
+	host.Get("/ok", redOK)
+	if err := build(host); err != nil {
+		t.Fatalf("generation 0: %v", err)
+	}
+
+	// A Declaration is a BUILD INPUT — JSON handed over by another team. Nothing
+	// validates the method it names, and fiber knows only its nine. PURGE is a
+	// real method (Varnish, Fastly, nginx cache invalidation); so are PROPFIND
+	// and MKCOL. Any of them, or a typo, reaches fiber's register() as a panic.
+	bad, err := remoteApp(host, "/v1/cdn", "http://127.0.0.1:9", Declaration{
+		Name:   "cdn",
+		Routes: []Route{{Method: "PURGE", Pattern: "/v1/cdn/object"}},
+	})
+	if err != nil {
+		t.Fatalf("remoteApp: %v", err)
+	}
+
+	var first any
+	func() {
+		defer func() { first = recover() }()
+		if err := host.Include(bad); err != nil {
+			t.Logf("Include refused cleanly: %v", err)
+		}
+	}()
+	if first != nil {
+		t.Errorf("a Declaration's method panicked the build instead of failing it: %v", first)
+	}
+
+	// Whatever happened above, the host must still be composable.
+	good := quiet("good")
+	good.Get("/v1/good", redOK)
+	var second any
+	func() {
+		defer func() { second = recover() }()
+		_ = host.Include(good)
+	}()
+	if second != nil {
+		t.Errorf("the host is BRICKED: a later, valid Include panics too (%v) — "+
+			"the panic skipped generation.go:182, so a.entries still holds the poison", second)
+	}
+}
+
+// TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck.
+//
+// fiber upper-cases a method inside register(); zip stores route.method exactly
+// as written and conflicts() keys on that raw string. So "get /v1/thing" and
+// "GET /v1/thing" are two keys to the walk and ONE address to the router: the
+// build passes, and one of the two definitions is dead.
+//
+// Same root cause as the All/GET hole — addrKey normalises the PATH and not the
+// METHOD — and it arrives through the same door, a hand-written Declaration.
+func TestRed_MethodCaseIsNotNormalisedBeforeTheConflictCheck(t *testing.T) {
+	host := quiet("host")
+	host.Get("/v1/thing", func(c *Ctx) error { return c.String(200, "host") })
+
+	remote, err := remoteApp(host, "/v1", "http://127.0.0.1:9", Declaration{
+		Name:   "remote",
+		Routes: []Route{{Method: "get", Pattern: "/v1/thing"}},
+	})
+	if err != nil {
+		t.Fatalf("remoteApp: %v", err)
+	}
+	host.Use(remote)
+
+	buildErr := build(host)
+	_, body := wireGET(t, host, "/v1/thing")
+	if buildErr == nil {
+		t.Errorf("two definitions claim GET /v1/thing and the walk reported NO conflict; "+
+			"%q silently wins — walk.go addrKey normalises the path but not the method", body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 3. SILENT DROPS
+// ---------------------------------------------------------------------------
+
+// TestRed_ABuildErrorSilentlyEmptiesEveryProjection.
+//
+// liveOrBuild does `g, _ := a.build()` and substitutes an EMPTY generation when
+// the build fails. build() fails on any conflict, so one duplicated address
+// turns Registry, Fiber, Declaration, OpenAPISpec and the CLI into empty
+// answers — with no error anywhere. Only Listen reports it.
+//
+// The worst reachable form is `app.Described()`: a release pipeline writes a
+// declaration/OpenAPI file describing ZERO routes and exits 0.
+func TestRed_ABuildErrorSilentlyEmptiesEveryProjection(t *testing.T) {
+	a := billingApp() // one typed op: GET /invoices/:id
+	a.Get("/healthz", redOK)
+	a.Get("/healthz", redOK) // the whole defect needs exactly this one line
+
+	// The information exists. build() has it.
+	if err := build(a); err == nil {
+		t.Fatal("setup: the duplicate was not detected at all")
+	} else if !strings.Contains(err.Error(), "/healthz") {
+		t.Fatalf("setup: unexpected build error: %v", err)
+	}
+
+	if got := len(a.Registry()); got == 0 {
+		t.Errorf("Registry() reports 0 ops for a program that declares 1, and returns no error — "+
+			"generation.go:266 discards the build error and substitutes an empty generation")
+	}
+	if d := a.Declaration(); len(d.Routes) == 0 {
+		t.Errorf("Declaration() reports 0 routes for a program that declares 3, and returns no error")
+	}
+
+	// The projection a release pipeline actually consumes.
+	dest := filepath.Join(t.TempDir(), "declare.json")
+	if err := a.project(Declare, dest); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(body), `"routes": []`) {
+		t.Errorf("`app declare` wrote an EMPTY declaration and exited 0 for a broken program:\n%s", body)
+	}
+}
+
+// TestRed_AllShadowsAConcreteMethodAndTheWalkSaysNothing.
+//
+// conflicts() keys on addrKey(r.method, path) and methodAll is stored as the
+// literal "ALL", so "ALL /v1/thing" and "GET /v1/thing" are two different keys.
+// They are ONE address at runtime: whichever fiber registers first answers, and
+// the other definition's route is dead code.
+//
+// This is load-bearing now that HEAD deleted App.claim: every mount and every
+// plugin registers its prefix as methodAll, and the commit that removed the
+// claims ledger asserts the walk "answers it better".
+func TestRed_AllShadowsAConcreteMethodAndTheWalkSaysNothing(t *testing.T) {
+	gateway := quiet("gateway")
+	gateway.All("/v1/thing", func(c *Ctx) error { return c.String(200, "gateway") })
+
+	owner := quiet("owner")
+	owner.Get("/v1/thing", func(c *Ctx) error { return c.String(200, "owner") })
+
+	host := quiet("host")
+	host.Use(gateway, owner)
+
+	err := build(host)
+	_, body := wireGET(t, host, "/v1/thing")
+	if err == nil {
+		t.Errorf("two definitions claim GET /v1/thing (one via All) and the walk reported NO conflict; "+
+			"%q silently wins and the other route is dead — walk.go:265 keys methodAll as its own method", body)
+	}
+}
+
+// TestRed_AMiddlewareOnlyDefinitionIsSilentlyInert.
+//
+// materialise registers depth-0 middleware as router middleware and composes
+// depth>0 middleware into the routes of its own subtree. A definition that
+// declares middleware and NO routes therefore has nowhere for its middleware to
+// go, and it is dropped on the floor — not applied to the host, not applied to
+// anything.
+//
+// The shape is the obvious way to package a cross-cutting concern as a unit
+// under one composition verb, it looks exactly like the blessed staged
+// composition example, and neither the build nor Lint says a word.
+func TestRed_AMiddlewareOnlyDefinitionIsSilentlyInert(t *testing.T) {
+	sec := quiet("sec") // a security module: middleware, no routes of its own
+	sec.Use(H(func(c *Ctx) error {
+		if c.Header("Authorization") == "" {
+			return Errorf(401, "no credentials")
+		}
+		return c.Continue()
+	}))
+
+	app := quiet("host")
+	app.Use(sec) // "install the security module"
+	app.Get("/private", redOK)
+
+	if err := build(app); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if code, _ := wireGET(t, app, "/private"); code != 401 {
+		t.Errorf("an included middleware-only definition never runs: GET /private = %d "+
+			"(build.go:113 skips depth>0 middleware; it has no routes to be composed into)", code)
+	}
+	if len(app.Lint()) == 0 {
+		t.Errorf("...and Lint() reports nothing, so the inert guard is invisible")
+	}
+}
+
+// TestRed_IncludeOnAFrozenChildIsASilentNoOp.
+//
+// appendEntry's panic tells the programmer to "go through a generation
+// (App.Include / App.Drop)". Taking that advice on anything but the ROOT is a
+// silent no-op: transact builds and installs a generation on the RECEIVER, and
+// a group has no listener, so the host keeps serving the old one and Include
+// returns nil.
+func TestRed_IncludeOnAFrozenChildIsASilentNoOp(t *testing.T) {
+	host := quiet("host")
+	v1 := host.Group("/v1")
+	v1.Get("/a", redOK)
+	if err := build(host); err != nil {
+		t.Fatalf("generation 0: %v", err)
+	}
+
+	// The advice the panic gives.
+	var advice string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				advice, _ = r.(string)
+			}
+		}()
+		v1.Get("/late", redOK)
+	}()
+	if !strings.Contains(advice, "App.Include") {
+		t.Fatalf("setup: the freeze panic no longer names Include: %q", advice)
+	}
+
+	later := quiet("later")
+	later.Get("/later", redOK)
+	if err := v1.Include(later); err != nil {
+		t.Fatalf("Include on the frozen group: %v", err)
+	}
+
+	if code, _ := wireGET(t, host, "/v1/later"); code != 200 {
+		t.Errorf("Include on a frozen CHILD returned nil and changed nothing the host serves: "+
+			"GET /v1/later = %d — transact installs onto the receiver, not onto the root", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 4. SCOPED MIDDLEWARE IS LOST (auth bypass)
+// ---------------------------------------------------------------------------
+
+// TestRed_AScopedWithIsLostByANestedGroup.
+//
+// On origin/main wrapRouter.Group returned another *wrapRouter, so the chain
+// propagated to every nested group. On this branch Router.Group returns *App
+// and wrapRouter.Group stashes the chain in g.wrap — but App.Group builds the
+// child from groupConfig() and never copies a.wrap, so the chain stops at one
+// level.
+//
+// A regression, and the failure mode is an ungated route.
+func TestRed_AScopedWithIsLostByANestedGroup(t *testing.T) {
+	app := quiet("host")
+	v1 := app.With(redGuard).Group("/v1")
+	v1.Get("/direct", redOK)
+	sub := v1.Group("/sub")
+	sub.Get("/nested", redOK)
+
+	if err := build(app); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if code, _ := wireGET(t, app, "/v1/direct"); code != 401 {
+		t.Fatalf("setup: the direct leaf is not gated either: %d", code)
+	}
+	if code, _ := wireGET(t, app, "/v1/sub/nested"); code != 401 {
+		t.Errorf("a nested group escaped the scoped With: GET /v1/sub/nested = %d "+
+			"(compose.go:254 newApp(a.groupConfig()) drops a.wrap)", code)
+	}
+}
+
+// TestRed_WithUseDropsTheGateForTheWholeSubtree.
+//
+// wrapRouter implements Router, Router now carries the ONE composition verb, and
+// wrapRouter.Use delegates straight to the inner App. Group propagates the
+// chain and OpScope propagates the chain — with the comment that dropping it
+// "is a hole, not an inconvenience" — and Use silently drops it.
+func TestRed_WithUseDropsTheGateForTheWholeSubtree(t *testing.T) {
+	child := quiet("child")
+	child.Get("/child/x", redOK)
+
+	app := quiet("host")
+	app.With(redGuard).Use(child)
+
+	if err := build(app); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if code, _ := wireGET(t, app, "/child/x"); code != 401 {
+		t.Errorf("With(...).Use(def) composed the definition UNGATED: GET /child/x = %d "+
+			"(middleware.go:60 wrapRouter.Use ignores w.wrap)", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 5. CONTROL PROBES — categories I claim are CLEAN. These must PASS.
+// ---------------------------------------------------------------------------
+
+// TestRed_CleanDescendAncestorAliasing: descend appends to a shared `ancestors`
+// backing array across siblings. It is safe, because every frame only ever
+// reads the prefix it was handed. A diamond (one definition reached by two
+// paths) and repeated siblings must not be mistaken for a cycle.
+func TestRed_CleanDescendAncestorAliasing(t *testing.T) {
+	shared := quiet("shared")
+	shared.Get("/shared", redOK)
+
+	left := quiet("left")
+	left.Group("/l").Use(shared)
+	right := quiet("right")
+	right.Group("/r").Use(shared)
+
+	root := quiet("root")
+	root.Use(left, right)
+
+	occ, err := walk(root)
+	if err != nil {
+		t.Fatalf("diamond composition reported an error: %v", err)
+	}
+	n := 0
+	for _, o := range occ {
+		if r, ok := o.route(); ok && strings.HasSuffix(r.path, "/shared") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("one definition reached by two paths yielded %d occurrences, want 2", n)
+	}
+}
+
+// TestRed_CleanComposeOpsDoesNotEditTheDefinition: a definition's own document
+// must be unchanged by being composed, at any number of prefixes.
+func TestRed_CleanComposeOpsDoesNotEditTheDefinition(t *testing.T) {
+	billing := billingApp()
+	own := billing.Registry()
+	if len(own) != 1 {
+		t.Fatalf("setup: %d ops", len(own))
+	}
+	path, id, origin, tags := own[0].Path, own[0].OperationID, own[0].Origin, len(own[0].Tags)
+
+	host := quiet("host")
+	host.Group("/v1").Use(billing)
+	host.Group("/admin").Use(billing)
+	if got := len(host.Registry()); got != 2 {
+		t.Fatalf("composed registry has %d ops, want 2", got)
+	}
+	if own[0].Path != path || own[0].OperationID != id || own[0].Origin != origin || len(own[0].Tags) != tags {
+		t.Errorf("composing edited the definition's own op: %+v", own[0])
+	}
+}

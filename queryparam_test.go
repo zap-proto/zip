@@ -187,7 +187,9 @@ func TestQueryBeatsBodyAndPathBeatsQuery(t *testing.T) {
 // describes a route nobody can call correctly.
 func TestOpenAPIDeclaresQueryParams(t *testing.T) {
 	a := searchApp(t)
-	a.Prepare()
+	if err := a.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	req, _ := http.NewRequest("GET", "/.well-known/openapi.json", nil)
 	resp, err := a.Fiber().Test(req)
 	if err != nil {
@@ -249,7 +251,9 @@ func TestOpenAPIDeclaresQueryParams(t *testing.T) {
 // the tool's input is the whole struct with no URL involved.
 func TestMCPCallIsUnaffectedByQueryBinding(t *testing.T) {
 	a := searchApp(t)
-	a.Prepare()
+	if err := a.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	req, _ := http.NewRequest("POST", "/mcp", stringReader(
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_v1_t_search","arguments":{"q":"viajson","limit":9}}}`))
 	req.Header.Set("Content-Type", "application/json")

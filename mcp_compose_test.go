@@ -98,11 +98,11 @@ func TestMCP_ComposedListWakesNothing(t *testing.T) {
 		if name == "demo" {
 			p.Tools = tools // only one of them declares a catalogue
 		}
-		if err := app.Add(zip.Load(p, "/v1/"+name)); err != nil {
-			t.Fatalf("Add(Load %s): %v", name, err)
-		}
+		app.Use(must(zip.Load(p, "/v1/"+name)))
 	}
-	app.Prepare()
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 
 	if up := running(t, app); len(up) != 0 {
 		t.Fatalf("a lazy Load started something: %v", up)
@@ -173,10 +173,9 @@ func TestMCP_DuplicateToolNameRefusedAtLoad(t *testing.T) {
 	tools := catalogue(t, bin)
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: tools}, "/v1/a")); err != nil {
-		t.Fatalf("first Load: %v", err)
-	}
-	err := app.Add(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true, Tools: tools}, "/v1/b"))
+	app.Use(must(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: tools}, "/v1/a")))
+	app.Use(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true, Tools: tools}, "/v1/b")))
+	err := app.Build()
 	if err == nil {
 		t.Fatal("two plugins claiming one tool name must be refused at Load")
 	}
@@ -184,17 +183,14 @@ func TestMCP_DuplicateToolNameRefusedAtLoad(t *testing.T) {
 		t.Fatalf("the refusal must name the tool and the holder: %v", err)
 	}
 	// The refused Load left nothing behind: its prefix is free for a real owner.
-	if err := app.Add(zip.Load(zip.Plugin{Name: "b2", Path: bin, Lazy: true}, "/v1/b")); err != nil {
-		t.Fatalf("a refused Load must release its prefixes: %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "b2", Path: bin, Lazy: true}, "/v1/b")))
 }
 
 // TestMCP_MalformedCatalogueRefusedAtLoad — a catalogue that is not a tool array
 // is a build bug, and it fails at Load rather than at the first tools/list.
 func TestMCP_MalformedCatalogueRefusedAtLoad(t *testing.T) {
 	bin := buildPluginBin(t, "v1")
-	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	err := app.Add(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: []byte(`{"not":"an array"}`)}, "/v1/a"))
+	_, err := zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: []byte(`{"not":"an array"}`)}, "/v1/a")
 	if err == nil || !strings.Contains(err.Error(), "not a JSON array") {
 		t.Fatalf("a malformed catalogue must be refused at Load: %v", err)
 	}
@@ -205,7 +201,9 @@ func TestMCP_MalformedCatalogueRefusedAtLoad(t *testing.T) {
 func TestMCP_NoOpsNoCatalogueNoDoor(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true,
 		MCP: zip.MCPConfig{Path: "/v1/mcp"}})
-	app.Prepare()
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	status, _ := call(t, app, "POST", "/v1/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	if status != 404 {
 		t.Fatalf("no ops and no catalogue must serve no door, got %d", status)
@@ -222,18 +220,16 @@ func TestMCP_LoadAfterListenIsOnTheList(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true,
 		MCP: zip.MCPConfig{Path: "/v1/mcp"}})
 	// One plugin at boot, so the door installs; a second one after.
-	if err := app.Add(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: catalogue(t, bin)}, "/v1/a")); err != nil {
-		t.Fatalf("first Load: %v", err)
+	app.Use(must(zip.Load(zip.Plugin{Name: "a", Path: bin, Lazy: true, Tools: catalogue(t, bin)}, "/v1/a")))
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	app.Prepare()
 	before := len(toolNames(t, listBody(t, app)))
 
 	// A second catalogue with a distinct name, as a differently-built plugin would
 	// have — the duplicate case is refused, and is proven separately.
-	if err := app.Add(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
-		Tools: []byte(`[{"name":"b_extra","description":"Added after Listen.","inputSchema":{"type":"object"}}]`)}, "/v1/b")); err != nil {
-		t.Fatalf("second Load: %v", err)
-	}
+	app.Use(must(zip.Load(zip.Plugin{Name: "b", Path: bin, Lazy: true,
+		Tools: []byte(`[{"name":"b_extra","description":"Added after Listen.","inputSchema":{"type":"object"}}]`)}, "/v1/b")))
 	names := toolNames(t, listBody(t, app))
 	if len(names) != before+1 {
 		t.Fatalf("a plugin Load'ed after Listen is not on the list: %v", names)

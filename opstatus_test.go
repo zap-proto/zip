@@ -138,7 +138,9 @@ func TestWithStatus_RefusesANonSuccessCode(t *testing.T) {
 func TestWithStatus_MCPIsUnaffected(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
 	zip.Post(a, "/v1/st/things", mk, zip.WithStatus(201), zip.WithOperationID("st_make"))
-	a.Prepare()
+	if err := a.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 
 	code, body := call2(t, a, "POST", "/mcp",
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"st_make","arguments":{"name":"x"}}}`)

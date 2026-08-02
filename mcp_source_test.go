@@ -63,7 +63,9 @@ func sourceApp(t *testing.T, src Source) *App {
 		return c.Continue()
 	}))
 	Get(app, "/ping", ping)
-	app.Prepare()
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	return app
 }
 
@@ -154,7 +156,9 @@ func TestSourceCallRunsAndIsScopedToTheCaller(t *testing.T) {
 func TestNoSourceIsTheOldDoor(t *testing.T) {
 	app := New(Config{AppName: "plain"})
 	Get(app, "/ping", ping)
-	app.Prepare()
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	if app.hasCaller() {
 		t.Fatal("a door with no Source and no open plugin has no per-caller half")
 	}

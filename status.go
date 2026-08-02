@@ -90,12 +90,14 @@ type Usage struct {
 // Plugins reports every plugin this host has loaded, ordered by name so a diff
 // between two hosts is stable. Safe to call while requests are in flight.
 func (a *App) Plugins() []Status {
-	a.plugMu.Lock()
-	ps := make([]*plugin, 0, len(a.plugins))
-	for _, p := range a.plugins {
-		ps = append(ps, p)
+	var ps []*plugin
+	for _, h := range a.hosts() {
+		h.plugMu.Lock()
+		for _, p := range h.plugins {
+			ps = append(ps, p)
+		}
+		h.plugMu.Unlock()
 	}
-	a.plugMu.Unlock()
 
 	out := make([]Status, 0, len(ps))
 	for _, p := range ps {

@@ -7,60 +7,82 @@ import (
 	"github.com/zap-proto/zip"
 )
 
-// The defect this closes: a SECOND claim of a prefix used to return nil and the
-// first registration kept answering. The losing plugin's whole surface then
-// served another plugin's 404, and nothing in the composition said so — which is
-// why a host's conflict gate has to run at build time.
+// Two definitions cannot own one address. That rule used to live in a private
+// prefix-claim ledger (App.claim/release) that only Mount and Load consulted;
+// it now lives where every OTHER address collision is already decided — the
+// walk, at build. One mechanism, so there is no second answer to disagree with
+// the first, and the report is strictly better: every collision at once, with
+// both claimants and their call sites named.
+//
+// The defect the old ledger closed is still closed, and these prove it.
+
+func plugin(t *testing.T, name, prefix string) *zip.App {
+	t.Helper()
+	p, err := zip.Load(zip.Plugin{Name: name, Addr: "/run/zip/" + name + ".sock"}, prefix)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", name, err)
+	}
+	return p
+}
+
+// A second definition claiming a held prefix is refused. Before, the second
+// claim returned nil and the first registration kept answering, so the losing
+// plugin's whole surface served the winner's 404 and nothing said so.
 func TestASecondClaimOfAPrefixIsRefused(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "a", Addr: "/run/zip/a.sock"}, "/v1/x")); err != nil {
-		t.Fatalf("first claim: %v", err)
-	}
-	err := app.Add(zip.Load(zip.Plugin{Name: "b", Addr: "/run/zip/b.sock"}, "/v1/x"))
+	app.Use(plugin(t, "a", "/v1/x"), plugin(t, "b", "/v1/x"))
+
+	err := app.Build()
 	if err == nil {
-		t.Fatal("the second claim of /v1/x was accepted — the losing plugin serves a's 404")
+		t.Fatal("two definitions claiming /v1/x were both accepted")
 	}
 	for _, want := range []string{"/v1/x", `"a"`, `"b"`} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not name %s", err, want)
-		}
-	}
-	// "/v1/x" and "/v1/x/" are ONE claim: the router normalises, so the gate must.
-	if err := app.Add(zip.Load(zip.Plugin{Name: "c", Addr: "/run/zip/c.sock"}, "/v1/x/")); err == nil {
-		t.Fatal("a trailing slash bought a second claim on the same subtree")
-	}
-}
-
-// All-or-nothing: a plugin owning three prefixes and losing the third must not
-// leave the first two held, or the plugins that really own them cannot load.
-func TestAPartialClaimIsRolledBack(t *testing.T) {
-	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Add(zip.Load(zip.Plugin{Name: "held", Addr: "/run/zip/h.sock"}, "/v1/c")); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.Add(zip.Load(zip.Plugin{Name: "wide", Addr: "/run/zip/w.sock"},
-		"/v1/a", "/v1/b", "/v1/c")); err == nil {
-		t.Fatal("wide took /v1/c from held")
-	}
-	// /v1/a and /v1/b must be free for whoever really owns them.
-	for _, p := range []string{"/v1/a", "/v1/b"} {
-		if err := app.Add(zip.Load(zip.Plugin{Name: "real" + p, Addr: "/run/zip/r.sock"}, p)); err != nil {
-			t.Fatalf("%s stayed held by a plugin that failed to load: %v", p, err)
+			t.Errorf("refusal does not name %s: %v", want, err)
 		}
 	}
 }
 
-// A bare Mount is the same claim through a different door, so it is refused the
-// same way — otherwise the gate is one that any caller can walk around.
-func TestMountAndLoadShareOneClaimRegister(t *testing.T) {
+// A refused composition changes nothing: the live generation is whatever was
+// valid, and a half-applied plugin is not a state that exists.
+func TestARefusedCompositionIsRolledBack(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	if err := app.Mount("/v1/y", "/run/zip/y.sock"); err != nil {
-		t.Fatal(err)
+	app.Use(plugin(t, "first", "/v1/a"))
+	if err := app.Build(); err != nil {
+		t.Fatalf("first build: %v", err)
 	}
-	if err := app.Add(zip.Load(zip.Plugin{Name: "z", Addr: "/run/zip/z.sock"}, "/v1/y")); err == nil {
-		t.Fatal("Load walked around a claim Mount already held")
+
+	// A second plugin that collides with the first.
+	if err := app.Include(plugin(t, "second", "/v1/a")); err == nil {
+		t.Fatal("a colliding plugin was included")
 	}
-	if err := app.Mount("/v1/y", "/run/zip/other.sock"); err == nil {
-		t.Fatal("Mount walked around its own claim")
+	if n, _ := app.Generation(); n != 0 {
+		t.Errorf("a refused Include advanced the generation to %d", n)
+	}
+	// The plugin table still holds exactly the one that was valid.
+	names := []string{}
+	for _, p := range app.Plugins() {
+		names = append(names, p.Name)
+	}
+	if len(names) != 1 || names[0] != "first" {
+		t.Errorf("plugins = %v, want [first]", names)
+	}
+}
+
+// Mount and Load are the same kind of thing now — definition constructors — so
+// they collide with each other exactly as two Loads do. There is no separate
+// register for either.
+func TestMountAndLoadCollideThroughOneMechanism(t *testing.T) {
+	remote, err := zip.Mount("/v1/y", "/run/zip/y.sock")
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	app.Use(remote, plugin(t, "z", "/v1/y"))
+
+	if err := app.Build(); err == nil {
+		t.Fatal("a Mount and a Load claiming /v1/y were both accepted")
+	} else if !strings.Contains(err.Error(), "/v1/y") {
+		t.Errorf("refusal does not name the address: %v", err)
 	}
 }

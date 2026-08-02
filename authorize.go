@@ -33,8 +33,26 @@ type Authorizer func(ctx context.Context, op Op, in any) error
 // decoded request then runs unauthorized).
 func (a *App) Authorize(fn Authorizer) { a.authorizer = fn }
 
-// Prepare installs the deferred projections (the OpenAPI document and the MCP
-// tool surface) without starting a listener, so a test can drive them through
-// Fiber().Test exactly as a served app exposes them. Listen calls it too; both
-// share one guard, so it runs at most once however it is reached.
-func (a *App) Prepare() { a.prepare() }
+// Build constructs and installs a generation without starting a listener: the
+// walk runs, every validation runs, the projections are rendered, and the
+// router goes live — exactly what [App.Listen] does minus the sockets.
+//
+// It RETURNS THE VERDICT, which is the whole reason it replaced Prepare. A
+// composition can be invalid — two definitions claiming one address, a cycle —
+// and the old Prepare returned nothing, so the only way to learn was to start
+// a server. Now a codegen step, a test or a wiring file's own main can ask
+// whether the program it just wrote is a program, and get every conflict at
+// once with both claimants named.
+//
+// Idempotent for the projections (they render once) and monotonic for the
+// freeze. Listen calls it; there is no other way to build.
+func (a *App) Build() error {
+	a.prepare()
+	a.buildMu.Lock()
+	g, err := a.build()
+	if err == nil {
+		a.install(g)
+	}
+	a.buildMu.Unlock()
+	return err
+}

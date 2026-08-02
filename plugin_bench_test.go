@@ -42,9 +42,7 @@ func Benchmark_PluginHop(b *testing.B) {
 	})
 
 	host := zip.New(benchConfig())
-	if err := host.Add(zip.Load(zip.Plugin{Name: "demo", Bin: bin}, "/v1/demo")); err != nil {
-		b.Skipf("cannot load plugin: %v", err)
-	}
+	host.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: bin}, "/v1/demo")))
 	defer func() { _ = host.Shutdown() }()
 
 	for _, tc := range []struct {

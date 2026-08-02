@@ -59,16 +59,13 @@ func remoteService(t *testing.T) (string, Declaration) {
 func TestMount_DeclarationIsAnInputNotAFetch(t *testing.T) {
 	host := quiet("cloud")
 	dead := "/nonexistent/nothing-listens-here.sock"
-	err := host.Mount("/v1/ledger", dead, Declaration{
+	host.Use(mustApp(Mount("/v1/ledger", dead, Declaration{
 		Name: "ledger",
 		Routes: []Route{
 			{Method: "GET", Pattern: "/v1/ledger/entries/:id", Op: "getEntry"},
 			{Method: "GET", Pattern: "/v1/ledger/raw"},
 		},
-	})
-	if err != nil {
-		t.Fatalf("Mount: %v", err)
-	}
+	})))
 	if err := build(host); err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -110,10 +107,10 @@ func TestMount_ServesAndCallsTheRemote(t *testing.T) {
 	}
 
 	host := quiet("cloud")
-	if err := host.Mount("/v1/ledger", sock, decl); err != nil {
-		t.Fatalf("Mount: %v", err)
+	host.Use(mustApp(Mount("/v1/ledger", sock, decl)))
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	host.Prepare()
 
 	// 1. The proxied route reaches the remote's own handler.
 	if code, body := wireGET(t, host, "/v1/ledger/raw"); code != 200 || body != "raw ledger" {
