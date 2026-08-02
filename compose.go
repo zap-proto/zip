@@ -252,6 +252,11 @@ func (a *App) Group(prefix string, handlers ...Handler) *App {
 	site := here(1)
 	g := newApp(a.groupConfig())
 	g.prefix = cleanPrefix(prefix)
+	// A scoped With wraps every leaf in its scope, and a nested group is still
+	// in the scope. Dropping it here reopened a gate that origin/main held shut
+	// (wrapRouter.Group used to return another wrapRouter, so the chain rode
+	// down every level) — an auth seam quietly lost at the second nesting.
+	g.wrap = a.wrap
 	for _, h := range handlers {
 		if h == nil {
 			continue
@@ -293,7 +298,7 @@ func cleanPrefix(p string) string {
 // appendEntry is the ONE place an App's program grows, so it is the one place
 // the seal is enforced and the one place the version moves.
 func (a *App) appendEntry(e entry) {
-	if a.frozen.Load() && !a.building {
+	if a.frozen.Load() && !a.building.Load() {
 		panic(fmt.Sprintf("zip: %s: %s was frozen at %s — it appears in a built generation, so this "+
 			"write would change what a running server already published; go through a generation "+
 			"(App.Include / App.Drop), which validates and swaps or leaves the current one serving",

@@ -160,6 +160,7 @@ func (a *App) Drop(defs ...*App) error {
 			kept = append(kept, e)
 		}
 		a.entries = kept
+		version.Add(1)
 	})
 }
 
@@ -172,19 +173,41 @@ func (a *App) transact(site callsite, edit func()) error {
 	defer a.buildMu.Unlock()
 
 	before := a.entries
+	adopted := len(a.hooks)
+	// DEFERRED, because a build can PANIC as well as fail: fiber refuses an
+	// unknown HTTP method by panicking, and a Declaration is a build input from
+	// another team. A straight-line rollback unwinds past itself and leaves the
+	// edit in a.entries, so the next composition — a valid one — panics on the
+	// poison. "The old generation keeps serving" has to hold for a panic too.
+	ok := false
+	defer func() {
+		if ok {
+			return
+		}
+		a.entries = before
+		// compose() adopts a child's teardown BEFORE the build can refuse it; a
+		// host that refused a plugin must not own that plugin's shutdown.
+		a.hookMu.Lock()
+		if len(a.hooks) > adopted {
+			a.hooks = a.hooks[:adopted]
+		}
+		a.hookMu.Unlock()
+		a.building.Store(false)
+		version.Add(1)
+	}()
+
 	a.entries = append(a.entries[:0:0], a.entries...) // copy: rollback must be total
-	a.building = true
+	a.building.Store(true)
 	edit()
-	a.building = false
+	a.building.Store(false)
 
 	g, err := a.build()
 	if err != nil {
-		a.entries = before
-		version.Add(1)
 		return fmt.Errorf("zip: %s: composition refused, generation %d still serving: %w",
 			site, a.liveN(), err)
 	}
 	a.install(g)
+	ok = true
 	return nil
 }
 
@@ -263,10 +286,16 @@ func (a *App) liveOrBuild() *generation {
 	if a.draft != nil && a.draftAt == version.Load() {
 		return a.draft
 	}
-	g, _ := a.build() // a conflict does not stop enumeration; Listen reports it
+	at := version.Load() // BEFORE the build: an append during it must invalidate
+	g, err := a.build()
 	if g == nil {
 		g = &generation{router: fiber.New(a.fiberConfig())}
 	}
-	a.draft, a.draftAt = g, version.Load()
+	// The error is REMEMBERED, not swallowed. An invalid program used to render
+	// as an empty one — Registry() 0 ops, Declaration() 0 routes, and
+	// `app declare` writing {"routes":[]} and exiting 0, which ships an empty
+	// API document for a broken build. Accessors still answer (they cannot
+	// return an error), but anything that PUBLISHES asks first: see project().
+	a.draft, a.draftAt, a.draftErr = g, at, err
 	return g
 }

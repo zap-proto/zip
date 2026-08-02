@@ -94,6 +94,15 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 	// Declared: exactly the addresses the remote says it answers, so an
 	// undeclared path falls through to the host instead of being swallowed.
 	for _, rt := range d.Routes {
+		// A Declaration is a BUILD INPUT — JSON from another team — and fiber
+		// refuses a method it does not know by PANICKING inside register(). A
+		// panic is not a refusal: it unwinds past the transaction and leaves the
+		// program poisoned. Validate at the boundary the input crosses, so a bad
+		// declaration is an error like every other bad declaration.
+		if !knownMethod(rt.Method) {
+			return nil, Errorf(400, "zip: Mount(%s): %q is not an HTTP method zip can route (route %q)",
+				prefix, rt.Method, rt.Pattern)
+		}
 		if rt.Op == "" {
 			r.method(rt.Method, rt.Pattern, []Handler{proxy})
 			continue
@@ -224,6 +233,17 @@ func toStr(v any) string {
 	default:
 		return fmt.Sprint(t)
 	}
+}
+
+// knownMethod reports whether zip can register this method. The list is fiber's
+// own; anything else is a typo or a protocol zip does not speak, and either way
+// it must not reach the router.
+func knownMethod(m string) bool {
+	switch strings.ToUpper(m) {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE", methodAll:
+		return true
+	}
+	return false
 }
 
 // trimPrefix is the prefix as the router spells it: "/x/" and "/x" are one
