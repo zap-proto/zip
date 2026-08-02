@@ -48,6 +48,11 @@ type generation struct {
 	// serving it — the OpenAPI endpoint, the MCP list, llms.txt — reuse it
 	// rather than rewalking per request.
 	occ []occurrence
+	// routes is how many routes this generation's router held the moment it was
+	// built. A later rebuild compares it against the router's CURRENT count to
+	// catch a caller that registered on the value [App.Fiber] handed out — see
+	// checkForeignRoutes.
+	routes int
 	// The projections, computed once, read without a lock forever after.
 	router *fiber.App
 	serve  fasthttp.RequestHandler
@@ -90,12 +95,45 @@ func (a *App) build() (*generation, error) {
 	g.serve = g.router.Handler()
 	g.ops = composeOps(occ)
 	g.hosts = computeHosts(a, occ)
+	g.routes = len(g.router.GetRoutes(false))
 	return g, nil
 }
 
 // install makes g live and freezes every definition it reaches. Freezing is
 // what earns the lock-free read: a definition that cannot change cannot
 // invalidate a projection taken from it.
+// checkForeignRoutes refuses to discard work a caller did on the router.
+//
+// [App.Fiber] hands out the CURRENT generation's router, and a generation is a
+// projection: the next build materialises a fresh one and the old is dropped. So
+//
+//	app.Fiber().Use(cors.New(...))
+//
+// registered CORS on a value that the next registration silently threw away — no
+// error, no panic, no CORS headers, on a policy whose entire job is to be there.
+// A middleware seam lost silently is the exact failure this design exists to
+// prevent, and it was arriving through the one door left open.
+//
+// A doc line is weak medicine for that, so this is a mechanism: the generation
+// records how many routes its router had when it was built, and a rebuild that
+// finds MORE refuses rather than discarding them. It cannot see a Use that
+// matched nothing, but it catches every registration, which is the shape the
+// footgun actually takes.
+func (a *App) checkForeignRoutes(site callsite) {
+	prev := a.live.Load()
+	if prev == nil || prev.router == nil {
+		return
+	}
+	if now := len(prev.router.GetRoutes(false)); now != prev.routes {
+		panic(fmt.Sprintf("zip: %s: %d route(s) were registered directly on the value App.Fiber() "+
+			"returned, and rebuilding the program would discard them.\n\tFiber() hands out the "+
+			"CURRENT generation's router; a generation is a PROJECTION, so the next build "+
+			"materialises a fresh one.\n\tRegister on the App instead — app.Use(mw) for "+
+			"middleware, app.Get(path, h) for a route — so it survives every generation.",
+			site, now-prev.routes))
+	}
+}
+
 func (a *App) install(g *generation) {
 	site := here(1)
 	for _, child := range g.hosts {
@@ -155,6 +193,7 @@ func (a *App) transact(site callsite, edit func()) error {
 	a.entries = append(a.entries[:0:0], a.entries...) // copy: rollback must be total
 	edit()
 
+	a.checkForeignRoutes(site)
 	g, err := a.build()
 	if err != nil {
 		return fmt.Errorf("zip: %s: composition refused, generation %d still serving: %w",

@@ -102,24 +102,19 @@ func (a *App) Declaration() Declaration {
 	d := Declaration{Name: a.cfg.AppName, Eager: a.cfg.Eager, Routes: []Route{}}
 
 	seen := map[string]bool{}
-	for _, r := range a.router().GetRoutes(true) {
-		if r.Method == "" || r.Path == "" {
+	for _, o := range a.plan() {
+		r, ok := o.route()
+		if !ok || r.method == "" {
 			continue
 		}
-		if a.controls[r.Method+" "+r.Path] {
-			continue
+		for _, m := range declaredMethods(r.method) {
+			k := m + " " + o.abs(r.path)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			d.Routes = append(d.Routes, Route{Method: m, Pattern: o.abs(r.path)})
 		}
-		// fiber registers a HEAD alongside every GET and an OPTIONS shadow for
-		// CORS; neither is a door a host routes on its own.
-		if r.Method == fiber.MethodHead || r.Method == fiber.MethodOptions {
-			continue
-		}
-		k := r.Method + " " + r.Path
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		d.Routes = append(d.Routes, Route{Method: r.Method, Pattern: r.Path})
 	}
 	sort.Slice(d.Routes, func(i, j int) bool {
 		if d.Routes[i].Pattern != d.Routes[j].Pattern {
@@ -150,6 +145,33 @@ func (a *App) Declaration() Declaration {
 	}
 	sort.Strings(d.Ops)
 	return d
+}
+
+// declaredMethods expands one registered method into the methods a host must
+// route, and is where the SHADOW DOCTRINE lives.
+//
+// A declaration is projected from the PROGRAM, not from the materialised router,
+// and that is what settles the shadow question rather than a filter settling it.
+// fiber registers a HEAD alongside every GET and an OPTIONS shadow for CORS.
+// Those are not entries — nothing wrote them — so they never reach a declaration
+// in the first place, and they do not need to: they are regenerated wherever the
+// GET is registered, including on the host that routes to this service. A shadow
+// is a property of registering a GET, not a door anybody declared.
+//
+// The filter this replaced dropped ALL HEAD and OPTIONS, which silently deleted
+// an EXPLICITLY declared HEAD — a real door, and one a host would then answer
+// 405 on. That is the analytics-outage class this type exists to prevent, so the
+// distinction has to be structural: an entry is a door, a shadow is not an entry.
+//
+// App.All is the one entry that is genuinely many doors, so it expands here.
+// HEAD and OPTIONS are left out of that expansion for the same reason as before:
+// under All they are indistinguishable from the shadows, and a host that routes
+// the GET gets them regenerated.
+func declaredMethods(m string) []string {
+	if m != methodAll {
+		return []string{m}
+	}
+	return []string{"GET", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE"}
 }
 
 // installPluginRoute serves this app's own declaration, so a host can read the
