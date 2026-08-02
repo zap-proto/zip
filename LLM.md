@@ -226,6 +226,28 @@ that did I/O would make `Registry()` fallible and slow and make the document
 depend on another process being up at boot. `Route.Op` (new, additive) is what
 lets a declaration say which op answers which address.
 
+### Acceptance: the iam graft case, byte for byte
+
+Reproduced with `iamserver.NewApp(db)` (hanzoai/iam v1.34.0) grafted into a
+4-path host, rendered through `OpenAPISpec()`:
+
+| | released zip v1.18.22 | this branch |
+|---|---|---|
+| host alone | 4 paths | 4 paths |
+| iam alone | 81 paths | 81 paths |
+| after graft | **85 paths / 102 operations** | **85 paths / 102 operations** |
+| document sha256 | `e0b1924352028050…` | `e0b1924352028050…` |
+
+**Byte-for-byte identical.** iam v1.34.0 also compiles against this branch with
+NO source change — it has no bare closure at a `Use` call, so it needs no
+`zip.H`.
+
+Note the real number is **4 → 85 paths** (98 iam ops + 4 host ops = 102
+operations), not the 4 → 164 in circulation. 164 is not what this pairing
+produces; it is presumably the whole api.hanzo.ai document across every
+subsystem, or a different iam. The acceptance property — composition is the
+union, and the prototype changes no byte of it — holds either way.
+
 ### Things the code proved, that the design did not predict
 
 1. **Middleware placement is depth-dependent.** Root (`depth 0`) middleware
@@ -749,3 +771,134 @@ is in extraction under whole-module packages.Load, not in emission.
 Until fixed, gates must invoke -check per package directory — exactly the
 load mode the //go:generate directive uses. hanzoai/cloud's `make test` does
 this; copy that shape, not `-check ./...`.
+
+---
+
+# Zip Composition Spec
+
+> Status: draft, pending empirical validation (Appendix A). Binding on all
+> projections once accepted. **Working-tree only — not committed.**
+
+## 1. Canonical model
+
+A zip application is an **ordered immutable program**: a DAG of nodes in which
+each `*App` holds an ordered slice of child nodes, appended by `Use`, `Group`,
+and route-registration calls. Order is semantic. The same `*App` value may occur
+under multiple parents (a *definition* with multiple *occurrences*); each
+occurrence has its own path context. There is no mutable registry: the registry,
+the router, and every generated artifact are projections computed from the
+program. The semantic core is the occurrence stream defined by the walk contract
+(§3); the AST (§2) exists to define that stream.
+
+**Vocabulary.** Local composition is *inclusion by reference*: nothing is
+mounted, proxied, or delegated — one interpreter walks one program, and plugin
+boundaries do not exist at interpretation time. An `*App` is a reusable
+application definition, not a server. Deployment words are reserved for actual
+deployment boundaries: `Mount` names remote delegation (Appendix B) and nothing
+else, because that is the one operation where another runtime genuinely exists.
+
+## 2. Node kinds
+
+One envelope, three payload kinds: `entry{n node, site callsite}` where `node` is
+`Handler | route | *App`.
+
+- `Handler` — appended by `Use(Handler)`. No wrapper struct: the envelope carries
+  the call site, which was the only thing a wrapper ever held.
+- `route{method, path, op}` — appended by `Get`/`Post`/etc.
+- `*App` — appended by `Use(*App)`. The entry is the **reference**; the `*App` is
+  the shared, immutable definition. `App` carries its own `prefix` (set by
+  `Group`, which creates and returns a child `*App`). One shared definition at
+  two prefixes is two `Group(...).Use(shared)` calls.
+
+`node` is an internal sealed marker; it is distinct from the public `Component`
+(route entries come from route methods, not `Use`). Every entry records its
+registration call site on the envelope, uniformly by construction — conflict
+breadcrumbs, post-freeze panics, and the lint all resolve to `file:line` pairs.
+
+Public surface: `Component`, `Use`, `Group`, route methods, `Listen`, `H`.
+
+## 3. The fold
+
+One function, one exhaustive type switch. Threads prefix stack, a persistent
+middleware stack, and an origin breadcrumb. Enumerates **occurrences**.
+Maintains an ancestor set and fails on cycles with the full breadcrumb.
+
+**Walk contract.** `walk(app) ([]Occurrence, error)`; `Occurrence = (def, kind,
+ctx, callsite)`, flattened preorder, all three kinds. **Definition identity is
+pointer identity** (valid because freezing makes definitions immutable). The walk
+is **pure**, **eager** (materialised once per generation build, before the swap),
+**deterministic**, and **append-stable** (order guarantee only — appending can
+still change validity).
+
+## 4. Middleware scope
+
+**Snapshot semantics.** A node's environment is (a) the stack inherited at its
+inclusion site, plus (b) the middleware preceding it at its own level. Staged
+composition is supported and means what it says.
+
+**Lexical anchoring**, two clauses: (a) parent-level registrations after the
+inclusion site do not affect the subtree; (b) registrations inside the subtree,
+whenever they occur before freezing, inherit the environment anchored at the
+inclusion site. Contents may grow until freeze; environment may not. Documented
+divergence from Fiber. Migration note required.
+
+## 5. Generations
+
+A *generation* is a sealed, immutable program; the live system is an
+`atomic.Pointer` to the current one.
+
+- **Build-then-swap, never mutate.** Changes construct N+1, run the full walk and
+  §7 validation, and swap only on success. On failure the old generation keeps
+  serving — load and reload are transactional.
+- **Requests are generation-pinned.** One pointer load at arrival; in-flight
+  requests complete on their generation. Lock-free; no lock on the hot path.
+- **Definitions freeze at first inclusion in a built generation.** Mutating a
+  frozen `*App` panics, meaning precisely "go through a generation."
+- **Lifecycle.** `Listen` builds and swaps generation 0. `Include` produces N+1
+  with new refs; `Drop(*App)` produces N+1 without the identified entries.
+- **Plugin registration by exported symbol**, not `init`-time side effects.
+
+**Hard constraints from Go's `plugin` package:** plugins never unload; `Drop` is
+routing-level only; reload leaks the prior version's code; each version needs a
+distinct path; identical toolchain/deps; Linux/macOS only. For true unload, run
+the subsystem out-of-process behind `Mount(prefix, addr)`.
+
+## 6. Projections
+
+Router, OpenAPI/registry, SDK, CLI, MCP — all consume the same fold; none
+inspects another's output.
+
+- **Router**: keys on occurrence.
+- **Registry/OpenAPI**: paths key on occurrence; operation IDs **deterministic
+  and prefix-derived** (`v1.billing.listInvoices`), never positional.
+- **SDK/CLI/MCP**: types key on definition; surface keys on occurrence.
+
+## 7. Diagnostics
+
+All are reducers over the occurrence stream. Three tiers:
+
+1. **Build-time, accumulated** (`errors.Join`): pattern conflicts, cycles. Every
+   error carries the composition breadcrumb of all parties. Never fail-fast.
+2. **Call-site panic**: mutation after freeze.
+3. **Lint (vet-style), not semantics**: middleware registered after an `*App`
+   entry on the same receiver. Intentional when co-located, a latent bug when
+   cross-scope; no fold can distinguish them, so it cannot be a rule at any tier.
+
+## Appendix A — Measurement protocol
+
+Across the consumers: find every call site passing an `*App` to `Use` (or legacy
+`Graft`/`Mount`); find subsequent `Use` calls with `Handler` arguments on the same
+receiver; classify each pair as **co-located** (same function) or **cross-scope**;
+output counts per class with file:line for the cross-scope set. Co-located hits
+validate snapshot expressiveness; cross-scope hits are the lint's target
+population. If cross-scope is zero, keep the lint anyway.
+
+## Appendix B — Open questions for the prototype
+
+- zipdoc dependence on graft-time ordering (byte-for-byte on the iam 4→164 case).
+- Operation-ID scheme vs existing generated SDKs; compatibility alias table.
+- `Mount` as a leaf: declaration fetched vs declared inline.
+- Closure-adapter ergonomics: `zip.H` a footnote, not a headline.
+- Generation-scoped surfaces: how consumers learn of changes.
+- Drop semantics for shared definitions.
+- Reload memory budget.

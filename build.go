@@ -154,7 +154,6 @@ func (a *App) installRoute(f *fiber.App, prefix string, mw []Handler, r route) {
 	f.Add([]string{r.method}, p, args[0], args[1:]...)
 }
 
-
 // addRoute is the ONE place a route entry is appended, so every route method,
 // every typed registration and zip's own control plane record the same thing in
 // the same shape with a real call site.
