@@ -144,8 +144,8 @@ func (w *wrapRouter) OpScope() OpScope {
 // scope is wrapped, including ones registered on the returned App later — which
 // is what a scoped With has to mean, and is why this cannot just delegate and
 // drop the chain the way a decorator that returned a bare group would.
-func (w *wrapRouter) Group(prefix string, handlers ...Handler) *App {
-	g := w.inner.Group(prefix, handlers...)
+func (w *wrapRouter) Group(prefix string, handlers ...Handler) Router {
+	g := w.inner.group(here(1), prefix, handlers...)
 	if g.wrap == nil {
 		g.wrap = w.wrap
 	} else {

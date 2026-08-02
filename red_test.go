@@ -42,7 +42,7 @@ func redGuard(next Handler) Handler {
 func TestRed_DropNeverMovesTheVersionCounter(t *testing.T) {
 	child := quiet("child")
 	child.Get("/keep", redOK)
-	sub := child.Group("/sub")
+	sub := child.Group("/sub").(*App) // Drop takes the concrete child
 	sub.Get("/gone", redOK)
 
 	host := quiet("host")
@@ -378,7 +378,7 @@ func TestRed_AMiddlewareOnlyDefinitionIsRefusedAtSeal(t *testing.T) {
 
 func TestRed_IncludeOnAFrozenChildIsASilentNoOp(t *testing.T) {
 	host := quiet("host")
-	v1 := host.Group("/v1")
+	v1 := host.Group("/v1").(*App) // Include is App-level composition
 	v1.Get("/a", redOK)
 	if err := build(host); err != nil {
 		t.Fatalf("generation 0: %v", err)

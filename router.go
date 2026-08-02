@@ -80,11 +80,13 @@ type Router interface {
 	Options(path string, handlers ...Handler) Router
 	All(path string, handlers ...Handler) Router
 
-	// Group returns the *App it creates, because a group IS an app with a
-	// prefix — the same definition kind, included by reference like any other.
-	// One mechanism covers "a scope" and "a sub-application"; frameworks that
-	// grew them separately have two.
-	Group(prefix string, handlers ...Handler) *App
+	// Group creates a group and returns it as a Router. A group IS an app with a
+	// prefix — the same definition kind, included by reference like any other —
+	// and one mechanism covers "a scope" and "a sub-application" where
+	// frameworks that grew them separately have two. What it must NOT do is
+	// promise the concrete *App: a decorator's group has to stay decorated, so
+	// it returns itself around the group. See [App.Group].
+	Group(prefix string, handlers ...Handler) Router
 }
 
 // joinPath composes a group's prefix with a leaf path the way the router does,
