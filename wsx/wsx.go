@@ -61,10 +61,14 @@ func Upgrade(fn Handler, opts ...Config) zip.Handler {
 	} else {
 		up.CheckOrigin = func(ctx *fasthttp.RequestCtx) bool { return true }
 	}
-	return func(c *zip.Ctx) error {
+	// TERMINAL: the upgrade takes over the connection, so this answers the
+	// address it is registered at and never yields to anything after it.
+	// zip.Terminal is what makes app.Use(wsx.Upgrade(…)) a build error instead
+	// of a server that tries to upgrade every request it receives.
+	return zip.Terminal("wsx.Upgrade", func(c *zip.Ctx) error {
 		rc := c.Fiber().RequestCtx()
 		return up.Upgrade(rc, func(ws *Conn) {
 			_ = fn(ws)
 		})
-	}
+	})
 }

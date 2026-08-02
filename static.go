@@ -65,7 +65,10 @@ func Static(fsys fs.FS, opts ...StaticOption) Handler {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return func(c *Ctx) error {
+	// TERMINAL: it answers the address it is registered at, so composing it
+	// with Use — where it would answer every address beneath — is refused at
+	// build time rather than serving files in place of the program.
+	return Terminal("zip.Static", func(c *Ctx) error {
 		sub := c.fc.Params("*")
 		if cfg.stripPrefix != "" {
 			sub = strings.TrimPrefix(c.fc.Path(), cfg.stripPrefix)
@@ -85,7 +88,7 @@ func Static(fsys fs.FS, opts ...StaticOption) Handler {
 			return c.Next() // missing → SPA catch-all / next route wins
 		}
 		return serveFile(c, f, info)
-	}
+	})
 }
 
 // staticClean maps a raw wildcard subpath to a validated fs path. ok=false is

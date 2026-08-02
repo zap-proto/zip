@@ -3,10 +3,12 @@ package zip
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 )
 
 // These are internal tests on purpose. The walk, the seal and the occurrence
@@ -506,6 +508,155 @@ func TestConflicts_NamesTheCompositionPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "root → /v1 → leaf") {
 		t.Fatalf("conflict does not carry the composition path: %v", err)
+	}
+}
+
+// ── Use position: a Handler may never terminate a request ───────────────────
+
+// TestUse_ATerminalHandlerIsRefusedOnTheAppBeingServed.
+//
+// This is the rule the three node kinds encode — Use is for handlers that WRAP,
+// an address is something only a route method can say — and until the walk
+// could SEE terminality, nothing enforced it. The inert check enforces something
+// strictly weaker (a definition carrying middleware must have routes beneath
+// it), which app.Use(zip.Static(assets)) passes on any app that has a route at
+// all. It would then answer every one of them.
+//
+// Depth 0 is the sharp case: the app being SERVED is where a static handler gets
+// composed in real wiring files, and it was skipped entirely.
+func TestUse_ATerminalHandlerIsRefusedOnTheAppBeingServed(t *testing.T) {
+	assets := fstest.MapFS{"main.css": &fstest.MapFile{Data: []byte("body{}")}}
+
+	root := quiet("root")
+	root.Get("/x", func(c *Ctx) error { return nil })
+	root.Use(Static(assets)) // depth 0 — the app being served
+
+	err := build(root)
+	if err == nil {
+		t.Fatal("a terminal handler was composed with Use and the composition was accepted — " +
+			"it answers every request beneath it, so nothing composed after it is ever reached")
+	}
+	for _, want := range []string{"zip.Static", `"root"`, "compose_test.go:", "ANSWERS"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+
+	// The blessed spelling is untouched: registered AT an address, it serves.
+	fine := quiet("fine")
+	fine.Get("/assets/*", Static(assets))
+	if err := build(fine); err != nil {
+		t.Fatalf("a leaf registered at its address was refused: %v", err)
+	}
+	if code, body := wireGET(t, fine, "/assets/main.css"); code != 200 || body != "body{}" {
+		t.Errorf("GET /assets/main.css = %d %q, want 200 %q", code, body, "body{}")
+	}
+}
+
+// TestUse_ATerminalHandlerIsRefusedInsideAnIncludedDefinition: the same rule one
+// level down, where the definition that wrote the line is not the one being
+// served — so the message has to name the definition AND the composition trail
+// to be actionable at all.
+func TestUse_ATerminalHandlerIsRefusedInsideAnIncludedDefinition(t *testing.T) {
+	ui := quiet("ui")
+	ui.Use(Static(fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>")}}))
+	ui.Get("/health", func(c *Ctx) error { return nil }) // routes, so it is not merely inert
+
+	root := quiet("root")
+	root.Group("/app").Use(ui)
+
+	err := build(root)
+	if err == nil {
+		t.Fatal("a terminal handler inside an included definition was accepted")
+	}
+	for _, want := range []string{"zip.Static", `"ui"`, "root → /app → ui", "compose_test.go:"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+}
+
+// TestUse_TerminalityIsADeclaredPropertyNotAName is the mechanism, pinned.
+//
+// A name match would bless zip's own three leaves and miss every leaf anyone
+// else writes — the wrong half of the fleet. So a constructor DECLARES what it
+// built, through [Terminal], and the two handlers below are the proof that the
+// declaration and not the shape is what decides: AdaptNetHTTP and
+// AdaptNetHTTPMiddleware return closures with the same body, over the same
+// adapter type, from the same file. One answers, one wraps. Only their authors
+// could know which, and only one of them is refused.
+func TestUse_TerminalityIsADeclaredPropertyNotAName(t *testing.T) {
+	wraps := quiet("wraps")
+	wraps.Get("/x", func(c *Ctx) error { return nil })
+	wraps.Use(AdaptNetHTTPMiddleware(func(next http.Handler) http.Handler { return next }))
+	if err := build(wraps); err != nil {
+		t.Fatalf("a net/http MIDDLEWARE adapter was refused in Use position: %v", err)
+	}
+
+	answers := quiet("answers")
+	answers.Get("/x", func(c *Ctx) error { return nil })
+	answers.Use(AdaptNetHTTP(http.NotFoundHandler()))
+	err := build(answers)
+	if err == nil {
+		t.Fatal("a net/http HANDLER adapter was accepted in Use position; it answers every request")
+	}
+	if !strings.Contains(err.Error(), "zip.AdaptNetHTTP") {
+		t.Errorf("refusal does not name the constructor: %v", err)
+	}
+
+	// And it is not zip's own three: anyone's leaf constructor says so the same
+	// way, which is why Terminal is exported. (wsx.Upgrade is one of these.)
+	mine := quiet("mine")
+	mine.Get("/x", func(c *Ctx) error { return nil })
+	mine.Use(Terminal("spa.Shell", func(c *Ctx) error { return c.String(200, "<html>") }))
+	err = build(mine)
+	if err == nil {
+		t.Fatal("a third-party terminal handler was accepted in Use position")
+	}
+	if !strings.Contains(err.Error(), "spa.Shell") {
+		t.Errorf("refusal does not name the third-party constructor: %v", err)
+	}
+
+	// The SAME closure, undeclared, is ordinary middleware and stays legal —
+	// terminality is what the constructor said, never what the handler looks
+	// like or where it came from.
+	plain := quiet("plain")
+	plain.Get("/x", func(c *Ctx) error { return nil })
+	plain.Use(H(func(c *Ctx) error { return c.String(200, "<html>") }))
+	if err := build(plain); err != nil {
+		t.Fatalf("an undeclared handler was refused in Use position: %v", err)
+	}
+}
+
+// TestInert_TheServedAppsMiddlewareIsGlobalAndSoIsNeverInert documents the one
+// thing the depth-0 skip in the inert check guards, because the terminal rule
+// above deliberately does NOT share it.
+//
+// Middleware on the app being served is registered as ROUTER middleware
+// (App.materialise), so it runs for every request the process answers —
+// including requests that match no route at all, which is what 404 logging, CORS
+// preflight and recovery exist for. A root that declares a logger and gets its
+// routes from the definitions it composes has nothing wrong with it, and "no
+// routes beneath it" is not evidence of anything there. That is the whole of the
+// exemption: it is about COVERAGE, and it says nothing about whether a handler
+// wraps — which is why the terminal check asks its own question, at depth 0 too.
+func TestInert_TheServedAppsMiddlewareIsGlobalAndSoIsNeverInert(t *testing.T) {
+	ran := 0
+	root := quiet("root") // no routes of its own, ever
+	root.Use(H(func(c *Ctx) error { ran++; return c.Continue() }))
+	child := quiet("child")
+	child.Get("/x", func(c *Ctx) error { return c.String(200, "ok") })
+	root.Use(child)
+
+	if err := build(root); err != nil {
+		t.Fatalf("the served app's own middleware was called inert: %v", err)
+	}
+	if code, _ := wireGET(t, root, "/nowhere"); code != 404 {
+		t.Fatalf("GET /nowhere = %d, want 404", code)
+	}
+	if ran == 0 {
+		t.Error("root middleware did not run for an unmatched request — if that were true, " +
+			"the depth-0 exemption would be wrong and this middleware would be inert after all")
 	}
 }
 

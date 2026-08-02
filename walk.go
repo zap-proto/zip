@@ -93,9 +93,13 @@ func (o occurrence) kind() kind {
 	}
 }
 
-func (o occurrence) route() (route, bool)   { r, ok := o.n.(route); return r, ok }
-func (o occurrence) app() (*App, bool)      { a, ok := o.n.(*App); return a, ok }
-func (o occurrence) abs(path string) string { return joinPath(o.ctx.prefix, path) }
+// middleware / route / app read the payload once a [kind] has already said
+// which one it is. They are accessors and not a second interpreter: each is one
+// assertion with no traversal, no ordering and no semantics of its own.
+func (o occurrence) middleware() (Handler, bool) { h, ok := o.n.(Handler); return h, ok }
+func (o occurrence) route() (route, bool)        { r, ok := o.n.(route); return r, ok }
+func (o occurrence) app() (*App, bool)           { a, ok := o.n.(*App); return a, ok }
+func (o occurrence) abs(path string) string      { return joinPath(o.ctx.prefix, path) }
 
 // scope is a visit's path context: everything that is a property of WHERE
 // rather than of WHAT.
@@ -168,19 +172,27 @@ func (s *mwStack) included() []Handler {
 }
 
 // trail is a persistent composition breadcrumb: root → plugin → group.
+//
+// It carries the definition itself and not only the name it renders under,
+// which makes it the ANCESTOR CHAIN as well as the breadcrumb: an occurrence's
+// trail names, in pointers, every definition this event sits beneath. That is
+// what lets a question about a subtree ("does anything beneath this definition
+// answer an address?") be answered by reading the occurrence slice instead of
+// walking the tree a second time — see [routesUnder].
 type trail struct {
+	def   *App
 	label string
 	site  callsite
 	up    *trail
 	n     int
 }
 
-func (t *trail) push(label string, site callsite) *trail {
+func (t *trail) push(def *App, label string, site callsite) *trail {
 	n := 1
 	if t != nil {
 		n = t.n + 1
 	}
-	return &trail{label: label, site: site, up: t, n: n}
+	return &trail{def: def, label: label, site: site, up: t, n: n}
 }
 
 // String renders the breadcrumb root-first.
@@ -209,11 +221,13 @@ func (t *trail) String() string {
 //
 // BINDING REQUIREMENT: every validator and reducer consumes this result. None
 // reopens App.entries or recurses the tree, and none switches on payload types —
-// they switch on the normalised [kind]. TestOnlyOneTypeSwitchOverNode enforces
-// it mechanically.
+// they switch on the normalised [kind].
+// TestOneInterpreter_NothingOutsideTheWalkReadsAPayloadOrWalksTheTree enforces it
+// mechanically, and every site it allow-lists must still be doing the thing it
+// was allowed for.
 func walk(root *App) ([]occurrence, error) {
 	out := make([]occurrence, 0, 32)
-	sc := scope{in: root, trail: (*trail)(nil).push(nameOr(root, "root"), callsite{})}
+	sc := scope{in: root, trail: (*trail)(nil).push(root, nameOr(root, "root"), callsite{})}
 	if err := descend(root, sc, nil, &out); err != nil {
 		return nil, err
 	}
@@ -261,7 +275,7 @@ func descend(a *App, sc scope, ancestors []*App, out *[]occurrence) error {
 				in:     n,
 				prefix: sc.prefix + n.prefix,
 				mw:     mw,
-				trail:  sc.trail.push(n.label(), e.site),
+				trail:  sc.trail.push(n, n.label(), e.site),
 				depth:  sc.depth + 1,
 			}
 			*out = append(*out, occurrence{n: n, site: e.site,
@@ -276,8 +290,9 @@ func descend(a *App, sc scope, ancestors []*App, out *[]occurrence) error {
 
 // structural is validation stage ONE: everything decidable from the shape of the
 // composition alone — cycles (already caught by the traversal), duplicated
-// addresses, MCP tool-name collisions, two open catalogues, and middleware with
-// nothing beneath it.
+// addresses, MCP tool-name collisions, two open catalogues, middleware with
+// nothing beneath it, and a handler that ANSWERS an address composed in Use
+// position.
 //
 // It reports EVERY problem, not the first. Failing fast would mean composing two
 // apps that disagree about three addresses takes three builds to learn three
@@ -301,6 +316,14 @@ func structural(occ []occurrence) error {
 	mwOnly := map[*App]*inert{}
 	var mwOrder []*App
 	seenDef := map[*App]bool{}
+
+	// Keyed by the LINE, not the definition: one message per offending Use,
+	// however many times the definition holding it is included.
+	type useSite struct {
+		def *App
+		at  callsite
+	}
+	badUse := map[useSite]bool{}
 	var errs []error
 
 	for _, o := range occ {
@@ -335,8 +358,56 @@ func structural(occ []occurrence) error {
 			at[method] = mine
 
 		case kindMiddleware:
+			// TERMINALITY IS ASKED FIRST, AND AT EVERY DEPTH.
+			//
+			// "A Handler may never terminate a request" is the rule the three
+			// node kinds encode, and until now nothing enforced it: the inert
+			// check below is strictly weaker — it asks whether a definition
+			// carrying middleware has routes beneath it — so
+			// `app.Use(zip.Static(assets))` passed on any app with a route, and
+			// then the static handler ran BEFORE every route in the composition
+			// and answered each one with a file, or a 404 where no file existed.
+			// The most literal spelling of the failure the whole rule exists to
+			// stop, accepted in silence.
+			//
+			// Use cannot say WHERE a handler answers. That is not a missing
+			// feature, it is what Use MEANS: a handler registered there runs for
+			// everything beneath it, so a handler that terminates terminates
+			// everything. The address belongs on the route method, where it is
+			// written down and where the router can resolve it against every
+			// other pattern by specificity.
+			//
+			// Terminality is a PROPERTY and never a name match. A constructor
+			// that builds a leaf says so once, at the only place that can know,
+			// by returning its handler through [Terminal] — so zip's own leaves
+			// and a third party's are refused by the same rule, and renaming a
+			// function changes nothing.
+			if h, isMw := o.middleware(); isMw {
+				if what, terminal := terminalOf(h); terminal {
+					k := useSite{o.ctx.in, o.site}
+					if !badUse[k] {
+						badUse[k] = true
+						errs = append(errs, fmt.Errorf("zip: %s composes %s as middleware at %s (via %s) — that handler ANSWERS "+
+							"an address, and Use is for handlers that WRAP.\n\tIn Use position it runs before every route beneath "+
+							"this definition and terminates the request there, so nothing composed after it is ever reached.\n\t"+
+							"Register it at the address it serves: app.Get(\"/assets/*\", h) rather than app.Use(h)",
+							o.ctx.in.who(), what, o.site, o.ctx.trail.String()))
+					}
+				}
+			}
+			// Depth 0 is the app being SERVED, and its middleware is never
+			// inert: materialisation registers it as ROUTER middleware (see
+			// [App.materialise]), so it runs for every request the process
+			// answers — including ones that match no route at all, which is what
+			// 404 logging, CORS preflight and recovery are for. A root that
+			// declares a logger and composes its routes from children has
+			// nothing wrong with it. The exemption is exactly this: middleware
+			// whose coverage does not come from routes beneath it. It is NOT an
+			// exemption from the terminal check above, which asks a different
+			// question — whether the handler wraps at all — and asks it of the
+			// served app too.
 			if o.ctx.depth == 0 {
-				continue // the app being served IS the server; its middleware is global
+				continue
 			}
 			if _, ok := mwOnly[o.ctx.in]; !ok {
 				mwOnly[o.ctx.in] = &inert{mw: o.site, trail: o.ctx.trail.String()}
@@ -375,17 +446,21 @@ func structural(occ []occurrence) error {
 		}
 	}
 
+	// The SUBTREE, not the definition's own entries. A group's routes usually
+	// come from the definitions it includes, and its middleware legitimately
+	// wraps those — that is what a scoped Group is for.
+	has := routesUnder(occ)
 	for _, def := range mwOrder {
-		if routesUnder(def, map[*App]bool{}) {
+		if has[def] {
 			continue
 		}
 		st := mwOnly[def]
 		errs = append(errs, fmt.Errorf("zip: %s declares middleware at %s and no routes anywhere beneath it (via %s) — "+
 			"a definition's middleware wraps the routes in its OWN subtree, so with none it would "+
 			"silently never run.\n\tIf it WRAPS: compose the routes it guards beneath this definition, "+
-			"or move it to the app that has them.\n\tIf it ANSWERS an address (zip.Static and friends), "+
-			"register it at that address instead: app.Get(\"/assets/*\", h) rather than app.Use(h) — "+
-			"Use cannot say WHERE a handler answers, which is why it is only for handlers that wrap",
+			"or move it to the app that has them.\n\tIf it ANSWERS an address, register it at that address "+
+			"instead: app.Get(\"/assets/*\", h) rather than app.Use(h) — Use cannot say WHERE a handler "+
+			"answers, which is why it is only for handlers that wrap",
 			def.who(), st.mw, st.trail))
 	}
 	return errors.Join(errs...)
@@ -438,23 +513,28 @@ func verify(root *App) error {
 	return derived(occ)
 }
 
-// routesUnder reports whether anything in def's subtree answers an address.
-func routesUnder(def *App, seen map[*App]bool) bool {
-	if seen[def] {
-		return false // a cycle is reported elsewhere; do not spin here
-	}
-	seen[def] = true
-	for _, e := range def.entries {
-		switch n := e.n.(type) {
-		case route:
-			return true
-		case *App:
-			if routesUnder(n, seen) {
-				return true
-			}
+// routesUnder is the set of definitions with a route ANYWHERE beneath them.
+//
+// One pass over the occurrences, no traversal: a route occurrence's trail IS
+// its ancestor chain (see [trail]), so every definition it sits beneath is the
+// cells above it. This used to recurse over `def.entries` per definition, which
+// made it a SECOND interpreter of the same program — one that needed its own
+// cycle guard, could disagree with the walk about what a composition contains,
+// and read a definition's live entry list rather than the one the generation
+// was built from. Reducing the slice needs no cycle guard at all: a cyclic
+// composition never reaches a reducer, because [descend] returns the error and
+// [walk] stops.
+func routesUnder(occ []occurrence) map[*App]bool {
+	has := map[*App]bool{}
+	for _, o := range occ {
+		if o.kind() != kindRoute {
+			continue
+		}
+		for t := o.ctx.trail; t != nil; t = t.up {
+			has[t.def] = true
 		}
 	}
-	return false
+	return has
 }
 
 // addrKey is one path as the conflict check sees it: the router's own spelling,
@@ -535,6 +615,12 @@ func dotted(prefix string) string {
 // A handler that ANSWERS an address is registered at that address; Use is for
 // handlers that WRAP. app.Use(static) cannot say WHERE it answers, which is the
 // same "structure encodes the semantics" argument that made Group the way to
-// express a middleware scope rather than line position. This is why the inert
-// check above condemns no form anyone writes: every zip.Static in the fleet is
-// already registered at an address.
+// express a middleware scope rather than line position.
+//
+// That rule is now CHECKED rather than merely stated. [structural] refuses a
+// terminal handler in Use position — at any depth, including on the app being
+// served, which is exactly where a wiring file puts app.Use(zip.Static(assets))
+// — and it decides terminality by the property a constructor declares through
+// [Terminal], never by the name of the function that built the handler. A name
+// match would bless zip's three leaves and miss every leaf anyone else writes,
+// which is the wrong half of the fleet.

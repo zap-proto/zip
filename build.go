@@ -173,7 +173,8 @@ func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
 		switch o.kind() {
 		case kindMiddleware:
 			if o.ctx.depth == 0 {
-				f.Use(toFiberHandler(a, o.n.(Handler)))
+				h, _ := o.middleware()
+				f.Use(toFiberHandler(a, h))
 			}
 		case kindRoute:
 			r, _ := o.route()
