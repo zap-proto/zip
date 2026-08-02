@@ -164,15 +164,25 @@ func (a *App) Listen(addrs ...string) error {
 		return fmt.Errorf("zip: Listen needs at least one address")
 	}
 	a.prepare()
-	// Composition ends HERE — at the one call that begins runtime execution, and
-	// nowhere else. Sealing propagates across the whole reachable graph, so a
-	// child cannot be edited out from under a server that has already published
-	// what it serves. Everything up to this line was inspection; nothing before
-	// it sealed anything.
-	if err := a.seal(here(1)); err != nil {
+	// Generation 0 is built HERE — at the one call that begins runtime
+	// execution, and nowhere else. A failed build never becomes live, and
+	// installing freezes every definition the walk reached, so a child cannot be
+	// edited out from under a server that has already published what it serves.
+	// Everything above this line was inspection; nothing before it froze
+	// anything.
+	a.buildMu.Lock()
+	g, err := a.build()
+	if err == nil {
+		a.install(g)
+	}
+	a.buildMu.Unlock()
+	if err != nil {
 		return err
 	}
-	h := a.router().Handler()
+	// The handler resolves the generation PER REQUEST, so a later Include or
+	// Drop is picked up without re-binding a listener, and a request that has
+	// already arrived finishes on the generation it arrived under.
+	h := a.pinned()
 
 	servers := make([]Server, 0, len(addrs))
 	for _, raw := range addrs {
@@ -302,8 +312,15 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	// runtimeEntry, because a plugin may be loaded AFTER Listen: a runtime mount
 	// is a deployment event, not a program edit, so it goes onto the live router
 	// without reopening a sealed program.
-	a.runtimeEntry(entry{n: route{method: methodAll, path: prefix, chain: []Handler{h}}, site: site})
-	a.runtimeEntry(entry{n: route{method: methodAll, path: prefix + "/*", chain: []Handler{h}}, site: site})
+	// A plugin may be mounted AFTER Listen, so this goes through a generation
+	// when one is live: build the new route set, validate it, swap or keep
+	// serving the old one.
+	if err := a.includeRoutes(site,
+		route{method: methodAll, path: prefix, chain: []Handler{h}},
+		route{method: methodAll, path: prefix + "/*", chain: []Handler{h}},
+	); err != nil {
+		a.logger.Error("zip mount refused", "prefix", prefix, "err", err)
+	}
 }
 
 // forward is THE proxy hop: the inbound fasthttp request object is handed to the

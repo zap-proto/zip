@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -26,11 +27,23 @@ func remoteService(t *testing.T) (string, Declaration) {
 	sock := filepath.Join(t.TempDir(), "ledger.sock")
 	go func() { _ = svc.Listen(sock) }()
 	t.Cleanup(func() { _ = svc.Shutdown() })
-	for i := 0; i < 200; i++ {
-		if svc.listening.Load() > 0 {
+
+	// Wait for the SOCKET, not for App.listening. Listen increments that counter
+	// as soon as it has constructed the servers and before the goroutines it
+	// spawns have bound anything, so a reader that trusts it races the bind and
+	// gets ECONNREFUSED from a mount that is perfectly correct. Dialling is the
+	// only question whose answer means the service is reachable.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.Dial("unix", sock)
+		if err == nil {
+			_ = c.Close()
 			break
 		}
-		time.Sleep(2 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("service never bound %s: %v", sock, err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	return sock, svc.Declaration()
 }
@@ -56,8 +69,8 @@ func TestMount_DeclarationIsAnInputNotAFetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if err := host.seal(here(0)); err != nil {
-		t.Fatalf("seal: %v", err)
+	if err := build(host); err != nil {
+		t.Fatalf("build: %v", err)
 	}
 
 	reg := host.Registry()

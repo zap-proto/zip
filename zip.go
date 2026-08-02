@@ -161,28 +161,26 @@ type App struct {
 	prefix  string
 	entries []entry
 
-	// The BUILD. fiber is materialised from entries, lazily, and rebuilt when
-	// the program has moved since builtAt. buildMu guards both: materialising is
-	// a WRITE performed on a read path, and inspecting a router is something
-	// several goroutines legitimately do at once.
-	fiber   *fiber.App
-	builtAt uint64
+	// The GENERATIONS. live is the sealed, immutable program currently serving,
+	// swapped whole and read without a lock; draft is the throwaway build that
+	// answers inspection before anything is live. buildMu serialises building —
+	// never reading. See generation.go.
+	live    atomic.Pointer[generation]
+	draft   *generation
+	draftAt uint64
 	buildMu sync.Mutex
-	// control_ is zip's own projection routes. They are part of the BUILD, not
-	// of the program — see [App.installControl].
-	control_ []route
+	// building is set while a transaction holds a private copy of the entry list,
+	// which is the one moment a frozen App legitimately grows.
+	building bool
+	// control is zip's own projection routes. They belong to the BUILD, not to
+	// the program — see [App.control].
+	ctl []route
 
-	// The SEAL. Mutable until execution begins, immutable forever after, across
-	// the whole reachable graph. planned/reg are the memoised projections, safe
-	// to read from serving goroutines precisely because the program can no
-	// longer change underneath them.
-	sealed   atomic.Bool
-	sealSite callsite
-	planOnce sync.Once
-	planned  []occurrence
-	planErr  error
-	regOnce  sync.Once
-	reg      []*registeredOp
+	// frozen: this definition has appeared in a built generation, so editing it
+	// in place is refused. Monotonic, and propagated across the whole reachable
+	// graph at install.
+	frozen     atomic.Bool
+	freezeSite callsite
 
 	// wrap is the Middleware a scoped [App.With] installed on this App (see
 	// wrapRouter.Group). nil for every ordinary App, and the common case pays

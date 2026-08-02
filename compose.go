@@ -293,30 +293,14 @@ func cleanPrefix(p string) string {
 // appendEntry is the ONE place an App's program grows, so it is the one place
 // the seal is enforced and the one place the version moves.
 func (a *App) appendEntry(e entry) {
-	if a.sealed.Load() {
-		panic(fmt.Sprintf("zip: %s: %s was sealed at %s — an App is immutable once execution begins, "+
-			"so this write would change what a running server already published; compose before serving",
-			e.site, a.who(), a.sealSite))
+	if a.frozen.Load() && !a.building {
+		panic(fmt.Sprintf("zip: %s: %s was frozen at %s — it appears in a built generation, so this "+
+			"write would change what a running server already published; go through a generation "+
+			"(App.Include / App.Drop), which validates and swaps or leaves the current one serving",
+			e.site, a.who(), a.freezeSite))
 	}
 	a.entries = append(a.entries, e)
 	version.Add(1)
-}
-
-// runtimeEntry appends past the seal, for the ONE plane that legitimately grows
-// after execution begins: a plugin loaded at run time ([App.Load]). It goes
-// straight onto the live router because the walk is frozen — a running server's
-// document is what it published, and a runtime mount is a deployment event, not
-// a program edit. It is internal by design; the public verbs all panic.
-func (a *App) runtimeEntry(e entry) {
-	if !a.sealed.Load() {
-		a.appendEntry(e)
-		return
-	}
-	a.buildMu.Lock()
-	defer a.buildMu.Unlock()
-	if r, ok := e.n.(route); ok && a.fiber != nil {
-		a.install(a.fiber, "", nil, r)
-	}
 }
 
 // who names this app for a diagnostic: its AppName if it has one, else the

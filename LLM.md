@@ -187,12 +187,30 @@ what it says. It is intentional co-located and a latent bug written far apart,
 and nothing can tell those apart, so it is `app.Lint()` — a report naming both
 call sites — and not an error at any tier.
 
-**Seal.** `seal()` is internal and called only from the one place runtime
-execution begins (`Listen`). It propagates across the whole reachable graph, so
-`root.Use(users); go root.Listen(); users.Use(admin)` cannot race. Monotonic:
-mount-after-seal is fine, mutate-after-seal panics naming both call sites.
-Reading NEVER seals — a codegen step must not turn the next legitimate `Use`
-into a panic about a seal nobody asked for.
+**Generations (replaces seal-forever).** A program is not mutable; it is
+VERSIONED. A generation is a sealed program plus everything projected from it,
+and the live system is one `atomic.Pointer` to the current one.
+
+- **Build then swap.** A composition change builds N+1 from the current entry
+  list ± the changed refs, runs the whole walk and every validation, and swaps
+  only on success. A colliding plugin fails the build with breadcrumbs and **the
+  old generation keeps serving** — load and reload are transactional, so a bad
+  plugin cannot take down routing.
+- **Requests are generation-pinned.** `Listen` serves a handler that loads the
+  pointer once on arrival; an in-flight request completes on its own generation.
+  Lock-free, no lock on the served path in any phase.
+- **Verbs.** `Use` pre-build (a declaration, cannot fail, returns the receiver);
+  `Include`/`Drop` against a live system (transactions, return an error, change
+  nothing on failure). Two names because one can fail and the other cannot.
+- **Freeze** happens at first appearance in a BUILT generation, propagates
+  across the reachable graph, and is monotonic. Direct edits panic with a
+  message that names both call sites and says to go through a generation.
+  Reading never freezes.
+- **`Drop` is receiver-local**, which answers the shared-definition question:
+  an entry belongs to the app that wrote it, so a host drops only what the host
+  included. `Drop(billing)` when a GROUP holds the reference is a no-op; drop
+  the group. Anything else would let one host reach into a definition another
+  host also serves.
 
 **Occurrence ids.** One definition included twice declares ONE id and needs TWO
 operations, or the document is invalid. Qualification is prefix-derived and
@@ -238,7 +256,10 @@ lets a declaration say which op answers which address.
    not at the second `app.Get`. Structural and not undoable: an App can be
    included after its routes are written, so at any single registration the set
    of patterns it must coexist with is not yet known.
-6. **ZAP cannot carry a free-form value.** The tidy symmetry — forward a mounted
+6. **A no-op transaction still installs a generation.** The number is a build
+   counter, not a change counter; detecting "nothing moved" would be a second
+   code path for one operation.
+7. **ZAP cannot carry a free-form value.** The tidy symmetry — forward a mounted
    op over the remote's own ZAP call plane — is impossible: ZAP encodes structs
    and this side has no struct, by construction. Mounted ops forward over the
    declared REST route with JSON, which is the boundary encoding anyway.

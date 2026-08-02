@@ -62,8 +62,8 @@ func (a *App) shutdown(ctx context.Context) error {
 	// 2. Drain in-flight requests (graceful; bounded by ctx).
 	// A program that was never served has no router to drain.
 	var errs []error
-	if a.fiber != nil {
-		errs = append(errs, a.fiber.ShutdownWithContext(ctx))
+	if g := a.live.Load(); g != nil {
+		errs = append(errs, g.router.ShutdownWithContext(ctx))
 	}
 	// 3. Tear subsystems down in reverse mount order (LIFO). Run ALL hooks
 	//    even if some fail; aggregate every error.

@@ -47,7 +47,18 @@ func (a *App) control(method, path string, h fiber.Handler) {
 		a.controls = map[string]bool{}
 	}
 	a.controls[method+" "+path] = true
-	a.installControl(route{method: method, path: path, serve: h})
+	a.buildMu.Lock()
+	a.ctl = append(a.ctl, route{method: method, path: path, serve: h})
+	// The build moved, so any draft taken before this line is stale. Control
+	// routes are not entries, so nothing else bumps the counter for them.
+	version.Add(1)
+	live := a.live.Load() != nil
+	a.buildMu.Unlock()
+	if live {
+		// A projection route added after something is serving still goes through
+		// a generation: there is no other way for the live router to change.
+		_ = a.transact(here(1), func() {})
+	}
 }
 
 // Declaration is what a plugin tells a host: who it is, whether it must be
