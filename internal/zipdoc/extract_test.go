@@ -357,6 +357,44 @@ func TestExtract_UnknownVisibilityIsAnError(t *testing.T) {
 	}
 }
 
+// A PRODUCT with no Backup line fails generation. Silence meaning "not backed
+// up" is how a product goes quietly unprotected until a restore; the grammar
+// accepts a store, or an explicit "none", and nothing in between.
+func TestExtract_ProductWithoutBackupIsAnError(t *testing.T) {
+	dir, err := filepath.Abs(filepath.Join("testdata", "nobackup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir, nil); err == nil {
+		t.Fatal("Load accepted a product with no Backup line")
+	} else if !strings.Contains(err.Error(), "Backup") {
+		t.Errorf("error = %v, want it to name Backup", err)
+	}
+}
+
+// "Backup: none" is a reviewed decision and passes; and the reading is one
+// function, so "declared none" cannot show as backed up anywhere.
+func TestCatalog_ExplicitNoneIsADecisionNotABackup(t *testing.T) {
+	m, err := parseMeta("Package p does a thing.\n\nProduct: Hanzo P\nBackup: none\n")
+	if err != nil {
+		t.Fatalf("an explicit \"Backup: none\" was refused: %v", err)
+	}
+	if m.BackedUp() {
+		t.Error(`BackedUp() = true for "none"; a dashboard would show green for a product that captures nothing`)
+	}
+	if (zip.Meta{}).BackedUp() {
+		t.Error("BackedUp() = true for a package that declared nothing")
+	}
+	if !(zip.Meta{Backup: "sqlite:/data/p.db retention=30d"}).BackedUp() {
+		t.Error("BackedUp() = false for a declared store")
+	}
+	// A non-product may stay silent: infrastructure that no customer buys has
+	// no posture to state.
+	if _, err := parseMeta("Package q is plumbing.\n"); err != nil {
+		t.Errorf("a non-product with no Backup line was refused: %v", err)
+	}
+}
+
 // The grammar is a function of zip.Meta and not a list beside it. A field added
 // to the type is a marker the parser accepts and a line the emitter writes, with
 // no second place to update — which is the only version of "one source" that

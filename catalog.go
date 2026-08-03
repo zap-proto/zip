@@ -40,6 +40,13 @@ import "fmt"
 // reading ([Meta.Public]) and the vocabulary ([Meta.Valid]) cannot drift apart.
 const public = "public"
 
+// noBackup is the one word of the Backup vocabulary this grammar knows: the
+// EXPLICIT statement that there is nothing to capture. The rest of the
+// vocabulary — stores, retention, delegation — belongs to the service that runs
+// backups, exactly as Category's words belong to the catalog. zip knows "none"
+// only because zip owns the difference between saying it and not saying it.
+const noBackup = "none"
+
 // Meta is what a package says about the product it implements.
 //
 // OMISSION HIDES. Every field is optional and the zero value is the honest
@@ -84,6 +91,12 @@ type Meta struct {
 	// Backup is what has to be captured for this subsystem to be restorable,
 	// stated by the code that owns the data rather than by whoever writes the
 	// runbook.
+	//
+	// FOR A PRODUCT, SILENCE IS REFUSED ([Meta.Valid]). "Backup: none" is a
+	// reviewed decision that there is nothing to capture; an absent line is
+	// nobody deciding, and nobody-deciding is how a product runs unprotected
+	// until the day of the restore. Same rule as the inert-middleware refusal:
+	// the difference between "off" and "never wired" must not read alike.
 	Backup string `json:"x-backup,omitempty"`
 }
 
@@ -93,6 +106,13 @@ type Meta struct {
 // tested `Visibility != "internal"` would put an undeclared package on the menu,
 // which is exactly the leak the default exists to prevent.
 func (m Meta) Public() bool { return m.Visibility == public }
+
+// BackedUp reports whether the product declares data that is captured.
+//
+// ONE function, like [Meta.Public], so "declared none" and "declared nothing"
+// cannot be conflated by a caller: a dashboard that instead tested
+// `Backup != ""` would show a product green for having SAID "none".
+func (m Meta) BackedUp() bool { return m.Backup != "" && m.Backup != noBackup }
 
 // Valid refuses a Visibility this grammar does not know.
 //
@@ -105,10 +125,20 @@ func (m Meta) Public() bool { return m.Visibility == public }
 func (m Meta) Valid() error {
 	switch m.Visibility {
 	case "", "internal", public:
-		return nil
+	default:
+		return fmt.Errorf("Visibility: %q is neither %q nor \"internal\"; an unrecognised value hides the product silently, "+
+			"so it is refused here instead", m.Visibility, public)
 	}
-	return fmt.Errorf("Visibility: %q is neither %q nor \"internal\"; an unrecognised value hides the product silently, "+
-		"so it is refused here instead", m.Visibility, public)
+	// A PRODUCT with no Backup line fails the build. This is the second field
+	// whose omission would be a silent decision: an unstated backup posture
+	// reads as "not backed up" to the machinery and as "surely somebody backs
+	// it up" to everyone else, and the two readings meet at a restore. A
+	// product must say either what is captured or, explicitly, "none".
+	if m.Product != "" && m.Backup == "" {
+		return fmt.Errorf("Product %q declares no Backup: a product must state its backup posture — what has to be captured, "+
+			"or explicitly \"Backup: none\" — because silence is how a product runs unprotected until the day of the restore", m.Product)
+	}
+	return nil
 }
 
 // catalog is the process-wide declaration, keyed by IMPORT PATH — the one name a
@@ -130,4 +160,18 @@ func Catalog(pkg string, m Meta) { catalog[pkg] = m }
 func Cataloged(pkg string) (Meta, bool) {
 	m, ok := catalog[pkg]
 	return m, ok
+}
+
+// Catalogs is every declaration linked into this process, as a copy.
+//
+// It exists for the projections that need the WHOLE set rather than one entry —
+// a backup planner deriving what to capture, a menu deriving what to sell. They
+// read the same registry the per-package lookup reads, so there is no second
+// list for a projection to fall out of step with.
+func Catalogs() map[string]Meta {
+	out := make(map[string]Meta, len(catalog))
+	for k, v := range catalog {
+		out[k] = v
+	}
+	return out
 }
