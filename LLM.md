@@ -535,6 +535,57 @@ If you add another projection that shows prose, read `docFor` — do not add a
 second prose field. (The op-call plane shows none: a service reads the schema,
 not the sentence, so it consumes `opName` and `op.invoke` only.)
 
+## The PACKAGE doc comment declares the product (v1.23.1)
+
+`zip.Doc` says what one operation means. `zip.Meta` (`catalog.go`) says what the
+**package** means — the product a customer buys, its menu section, its shape, and
+whether it belongs on the menu at all. `cmd/zipdoc` reads the package doc comment
+and emits `zip.Catalog("<import path>", zip.Meta{…})` beside the `Describe` calls,
+so the declaration is **compiled into the binary that serves the subsystem**.
+
+```go
+// Package vector is similarity search over your own embeddings.
+//
+// Product:    Hanzo Vector
+// Category:   data
+// Kind:       api
+// Visibility: public
+// Meters:     per-GB-month
+// Backup:     sqlite:/data/vector.db retention=30d
+package vector
+```
+
+Four things are load-bearing.
+
+- **Compiled in, not read off disk.** The reader this replaces resolved an import
+  path to a directory and parsed the source. That can only describe packages in
+  its own repo, so every subsystem shipped as its own module read as undeclared —
+  measured: `authz`, `licensing`, `metrics`, blank for a structural reason no doc
+  comment could fix.
+- **Omission hides.** `Visibility` absent means *internal*, and `Meta.Public()` is
+  the only reading of it. A default of public puts every health probe, dev bridge
+  and install hook on the customer menu the day the package is written.
+- **The grammar is a function of the type.** `catalogKeys` is derived from
+  `zip.Meta`'s fields by reflection and the emitter writes the literal the same
+  way; adding a field to `Meta` is the whole change. `Description` is excluded —
+  it is the package's own synopsis, read from the prose, not a marker.
+- **Only the declared keys match** (`mark`, shared with `Example:`/`Response:`).
+  Package docs are full of `Note:` and `Warning:` lines and a greedier matcher
+  would eat them silently.
+
+Refusals: an unknown `Visibility` (its failure is *silent* — `Public`, `pubic`
+and `yes` all read as internal, withholding a product nobody notices) and a key
+declared twice. `Category` and `Kind` are carried verbatim: those vocabularies
+belong to whatever service owns the catalog taxonomy, and it refuses an unknown
+word where that word is meaningful, loudly.
+
+The `x-` JSON names live on `Meta` itself rather than on each carrier, because a
+document embeds the value in more than one place (an app's `info`, a product's
+`tag`) and two spellings of one fact is how a consumer reads whichever it parsed.
+A package with a declaration and **no typed ops** still renders a
+`zipdoc_gen.go` — a subsystem whose routes are all raw is exactly the shape whose
+product facts have nowhere else to live.
+
 ## What lives elsewhere
 
 zip does not define a ZAP envelope, registry, dispatcher or listener.
