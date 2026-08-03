@@ -2,8 +2,11 @@ package zipdoc
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/zap-proto/zip"
 )
 
 // load runs the extraction over one testdata package, the way `go generate` runs
@@ -226,6 +229,157 @@ func TestStripSelf(t *testing.T) {
 		if got := stripSelf(tc.text, tc.name); got != tc.want {
 			t.Errorf("stripSelf(%q, %q) = %q, want %q", tc.text, tc.name, got, tc.want)
 		}
+	}
+}
+
+// A package says what PRODUCT it implements in the one place the fact already
+// belongs — its own doc comment — and the declaration reaches the generated file
+// so it is compiled into the binary that serves the subsystem.
+//
+// The alternative, and what this replaces, resolves an import path to a directory
+// and reads the source off disk. That can only describe packages living in its own
+// repo: every subsystem shipped as its own module reads as undeclared, and three
+// of them did.
+func TestExtract_PackageDeclaresItsProduct(t *testing.T) {
+	p := load(t, "catalog")
+	// The synopsis is the package's own first sentence, taken from the file
+	// whose comment opens "Package …" — NOT from the alphabetically-first file,
+	// which opens with a note about itself. A caller cannot tell an undescribed
+	// product from a misfiled one, so the convention is the whole test.
+	if want := "Package catalog is similarity search over your own embeddings."; p.Meta.Description != want {
+		t.Errorf("Description = %q, want %q", p.Meta.Description, want)
+	}
+	for _, tc := range []struct{ field, got, want string }{
+		{"Product", p.Meta.Product, "Hanzo Vector"},
+		{"Category", p.Meta.Category, "data"},
+		{"Kind", p.Meta.Kind, "api"},
+		{"Visibility", p.Meta.Visibility, "public"},
+		{"Meters", p.Meta.Meters, "per-GB-month"},
+		{"Backup", p.Meta.Backup, "sqlite:/data/vector.db retention=30d"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+	if !p.Meta.Public() {
+		t.Error("Public() = false for a package that declared itself public")
+	}
+	// The declaration has to REACH the generated file, or it is a fact the
+	// binary does not carry.
+	src, err := p.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`zip.Catalog("github.com/zap-proto/zip/internal/zipdoc/testdata/catalog", zip.Meta{`,
+		`Product:     "Hanzo Vector"`,
+		`Visibility:  "public"`,
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("rendered file does not contain %q:\n%s", want, src)
+		}
+	}
+}
+
+// Omission HIDES. A package that declares nothing is internal, and the reading is
+// one function so no caller can arrive at a different default: a subsystem's
+// health probe, dev bridge and install hook are all real operations that no
+// customer buys, and a default of public puts every one of them on the menu.
+func TestCatalog_OmissionHides(t *testing.T) {
+	if (zip.Meta{}).Public() {
+		t.Error("an undeclared package is public; omission must hide")
+	}
+	if !(zip.Meta{Visibility: "public"}).Public() {
+		t.Error("a package that declared itself public is not")
+	}
+	// Prose alone is not a claim to the menu.
+	if load(t, "fixture").Meta.Public() {
+		t.Error("a package with only a doc sentence reads as public")
+	}
+}
+
+// A Visibility this grammar does not know fails generation, because its failure
+// mode is SILENT: "Public", "pubic" and "yes" all read as internal, so a typo
+// withholds a product that was meant to be sold and nothing downstream can say
+// so. Category and Kind are not checked here — an unknown word in either reaches
+// the document and is refused by whatever owns that taxonomy, loudly.
+func TestExtract_UnknownVisibilityIsAnError(t *testing.T) {
+	dir, err := filepath.Abs(filepath.Join("testdata", "badvisibility"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir, nil); err == nil {
+		t.Fatal("Load accepted an unknown Visibility")
+	} else if !strings.Contains(err.Error(), "Visibility") {
+		t.Errorf("error = %v, want it to name Visibility", err)
+	}
+}
+
+// The grammar is a function of zip.Meta and not a list beside it. A field added
+// to the type is a marker the parser accepts and a line the emitter writes, with
+// no second place to update — which is the only version of "one source" that
+// survives a shape whose whole job is to cross a closed-struct round trip.
+func TestCatalog_GrammarFollowsTheType(t *testing.T) {
+	t.Run("keys", func(t *testing.T) {
+		typ := reflect.TypeOf(zip.Meta{})
+		if len(catalogKeys) != typ.NumField()-1 {
+			t.Fatalf("catalogKeys = %v, want every zip.Meta field but Description", catalogKeys)
+		}
+		for _, k := range catalogKeys {
+			if _, ok := typ.FieldByName(k); !ok {
+				t.Errorf("catalogKeys names %q, which zip.Meta does not have", k)
+			}
+		}
+	})
+	t.Run("every key parses", func(t *testing.T) {
+		var lines []string
+		for _, k := range catalogKeys {
+			lines = append(lines, k+": internal")
+		}
+		m, err := parseMeta("Package p does a thing.\n\n" + strings.Join(lines, "\n") + "\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := reflect.ValueOf(m)
+		for _, k := range catalogKeys {
+			if got := v.FieldByName(k).String(); got != "internal" {
+				t.Errorf("%s = %q after parsing its own marker", k, got)
+			}
+		}
+	})
+}
+
+// Only the declared keys are markers. A package doc is full of lines that open
+// with a capitalised word and a colon, and a matcher that claimed them would eat
+// somebody's sentence — silently, since what reaches the document is a synopsis
+// that would look fine either way.
+func TestMark_ClaimsOnlyTheDeclaredKeys(t *testing.T) {
+	for _, line := range []string{
+		"Note: only the declared keys are markers.",
+		"Warning: this is prose.",
+		"Prodcut: Hanzo Vector",
+		"See: the other package.",
+	} {
+		if k, _, ok := mark(line, catalogKeys...); ok {
+			t.Errorf("mark(%q) claimed it as %q; it is prose", line, k)
+		}
+	}
+	// Alignment is not a second dialect.
+	if k, v, ok := mark("// Product:    Hanzo Vector", "Product"); ok || k != "" || v != "" {
+		t.Errorf("mark read a line that still carries its comment slashes: %q %q %v", k, v, ok)
+	}
+	if k, v, ok := mark("  Product:    Hanzo Vector  ", catalogKeys...); !ok || k != "Product" || v != "Hanzo Vector" {
+		t.Errorf("mark = %q, %q, %v; want Product, Hanzo Vector, true", k, v, ok)
+	}
+}
+
+// One question has one answer. A key stated twice is refused rather than resolved,
+// because whichever the parser kept would become the fact and nothing downstream
+// could see the other.
+func TestParseMeta_RefusesADuplicateKey(t *testing.T) {
+	_, err := parseMeta("Package p does a thing.\n\nProduct: A\nProduct: B\n")
+	if err == nil || !strings.Contains(err.Error(), "Product") {
+		t.Errorf("err = %v, want a refusal naming Product", err)
 	}
 }
 
