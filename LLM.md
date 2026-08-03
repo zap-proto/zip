@@ -929,6 +929,26 @@ response carries a whole JSON-RPC envelope and there is no per-op
 response to put them on — the declared set still appears in the schema,
 and the answer's value is identical on every transport.
 
+**A failure with a body.** A declared status may be non-2xx, for an op
+whose failure carries a TYPED BODY the error envelope cannot express — a
+409 with the conflicting record, a 404 with what was searched for. An
+error RETURN still renders the standard `{status, code, error}` envelope
+and is still the way to answer a failure that has nothing extra to say.
+
+**A verbatim body.** A passthrough that forwards bytes to an upstream
+owning the contract takes `json.RawMessage` as its input: every unnamed
+field survives, and it needs no raw-request accessor. The opaque type IS
+the declaration.
+
+**Acting for another org.** `zip.ActingAs(ctx, org)` derives a caller
+acting on another org's behalf. It cannot invent one — with nothing
+authenticated it refuses — so stating an identity still cannot override
+an authenticated one. The derived caller carries BOTH facts: `Org` is
+whose data the call is for, `ActedBy` is who chose to touch it, and both
+travel on the wire so an impersonation is distinguishable at every hop
+and in every audit row. It does not authorise; whether a principal may
+act for an org is policy, and policy lives in an Authorizer.
+
 **The caller's address.** `zip.CallerOf(ctx).IP` is ambient rather than
 declared — it is what the connection says, not something the caller
 states about itself, so it does not belong in the op's input shape. It is

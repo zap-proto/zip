@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"cmp"
 	"context"
 	"strconv"
 
@@ -40,12 +41,16 @@ import (
 // read "holds an org" as "administers it", or worse, as "administers the
 // fleet".
 const (
-	HeaderOrg          = "X-Org-Id"
-	HeaderProject      = "X-Project-Id"
-	HeaderUser         = "X-User-Id"
-	HeaderUserName     = "X-User-Name"
-	HeaderUserEmail    = "X-User-Email"
-	HeaderUserOwner    = "X-User-Owner"
+	HeaderOrg       = "X-Org-Id"
+	HeaderProject   = "X-Project-Id"
+	HeaderUser      = "X-User-Id"
+	HeaderUserName  = "X-User-Name"
+	HeaderUserEmail = "X-User-Email"
+	HeaderUserOwner = "X-User-Owner"
+	// HeaderActedBy names the principal ACTING when a call is made on another
+	// org's behalf. Present only for an impersonation ([ActingAs]); its absence
+	// is the ordinary case and means the caller is acting as itself.
+	HeaderActedBy      = "X-Acted-By"
 	HeaderUserAdmin    = "X-User-IsAdmin"
 	HeaderUserOrgAdmin = "X-User-IsOrgAdmin"
 	HeaderRequestID    = "X-Request-Id"
@@ -68,6 +73,10 @@ var identityHeaders = [...]string{
 	HeaderUser, HeaderUserName, HeaderUserEmail, HeaderUserOwner,
 	HeaderUserAdmin, HeaderUserOrgAdmin,
 	HeaderRequestID,
+	// The impersonation travels WITH the identity it re-points, or the next hop
+	// sees a clean call from the target org and the audit trail ends at this
+	// process. That is precisely the failure this exists to close.
+	HeaderActedBy,
 }
 
 // callerKey carries the live request into a handler's context. The REQUEST is
@@ -152,6 +161,11 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 // statedKey carries an explicitly stated caller — see [WithCaller].
 type statedKey struct{}
 
+// actingKey carries a caller DERIVED from an authenticated one — see [ActingAs].
+// Unexported and written in exactly one place, which is what keeps the
+// derivation the only way to obtain one.
+type actingKey struct{}
+
 // WithCaller states who a [Call] made with this context acts for, for a caller
 // that has no inbound request to propagate.
 //
@@ -175,6 +189,54 @@ func WithCaller(ctx context.Context, c Caller) context.Context {
 	return context.WithValue(ctx, statedKey{}, c)
 }
 
+// ActingAs derives a caller acting on ANOTHER org's behalf, and is the one way
+// to re-point the principal on a context that has a request behind it.
+//
+//	ctx, err := zip.ActingAs(ctx, targetOrg)
+//
+// # Why this is not the laundering hole
+//
+// [WithCaller] is read only where there is no request, deliberately, so that
+// stating an identity can never override an authenticated one. ActingAs does not
+// weaken that: it cannot INVENT a caller, only re-point one that is already
+// there. Called on a context with no authenticated principal it refuses, so the
+// floor is unchanged — you can still only act with authority you arrived with.
+//
+// What it adds is that the derived caller carries BOTH facts. Org becomes the
+// org being acted upon; [Caller.ActedBy] records who is acting, and travels on
+// the wire with the rest of the identity. An impersonation is therefore
+// distinguishable from an identity at every hop and in every audit row, which
+// is the property that makes it safe to allow at all.
+//
+// # What it does NOT do
+//
+// It does not authorise. Whether this principal may act for that org is a policy
+// question about roles and tenancy that belongs to the application, and zip has
+// no view on it — an [Authorizer] is where that decision goes. ActingAs supplies
+// the vocabulary and the audit trail; it does not grant anything.
+func ActingAs(ctx context.Context, org string) (context.Context, error) {
+	if org == "" {
+		return ctx, ErrBadRequest("zip: ActingAs needs the org being acted for")
+	}
+	base := CallerOf(ctx)
+	if base.User == "" && base.Org == "" {
+		// Nothing authenticated to derive from. Refusing here is what keeps this
+		// from becoming a way to state an identity out of nothing.
+		return ctx, ErrUnauthorized("zip: ActingAs needs an authenticated caller to derive from")
+	}
+	acting := base
+	acting.Org = org
+	acting.Project = "" // a project is scoped to the original org, never to the target
+	if base.ActedBy != "" {
+		// Already an impersonation: the ORIGINAL actor stays the actor, so a
+		// chain of hops cannot quietly reassign who is responsible.
+		acting.ActedBy = base.ActedBy
+	} else {
+		acting.ActedBy = cmp.Or(base.User, base.Org)
+	}
+	return context.WithValue(ctx, actingKey{}, acting), nil
+}
+
 // Caller is the gateway's assertion about who a request is for, read as one
 // value. It is what [Ctx.Forward] propagates and what [Call] carries.
 //
@@ -195,6 +257,15 @@ type Caller struct {
 	Admin     bool
 	OrgAdmin  bool
 	RequestID string
+
+	// ActedBy is the principal ACTING when this call is made on another org's
+	// behalf, and empty in the ordinary case where the caller acts as itself.
+	//
+	// It is what makes an impersonation distinguishable from an identity: Org
+	// says whose data this call is for, ActedBy says who chose to touch it. A
+	// gate that must not be reachable by impersonation reads this; an audit row
+	// that omits it records the wrong actor.
+	ActedBy string
 
 	// IP is where this call came FROM, and it is the one field here that is not
 	// a header the caller stated about itself — it is what the connection says.
@@ -229,6 +300,7 @@ func (c Caller) headers() map[string]string {
 		HeaderUserEmail: c.Email,
 		HeaderUserOwner: c.Owner,
 		HeaderRequestID: c.RequestID,
+		HeaderActedBy:   c.ActedBy,
 	} {
 		if v != "" {
 			h[k] = v
@@ -260,6 +332,13 @@ func (c Caller) headers() map[string]string {
 // under that context sees — one value, written and read the same way, rather
 // than a statement that only becomes visible one hop later.
 func CallerOf(ctx context.Context) Caller {
+	// A DERIVED caller wins over the request, and nothing else does. It can only
+	// exist where [ActingAs] made one, and ActingAs can only re-point an
+	// identity that was already authenticated — so this is not a door a stated
+	// caller can walk through. See the laundering note on [WithCaller].
+	if acting, ok := ctx.Value(actingKey{}).(Caller); ok {
+		return acting
+	}
 	rc := requestOf(ctx)
 	if rc == nil {
 		stated, _ := ctx.Value(statedKey{}).(Caller)
@@ -276,6 +355,7 @@ func CallerOf(ctx context.Context) Caller {
 		Admin:     string(h.Peek(HeaderUserAdmin)) == "true",
 		OrgAdmin:  string(h.Peek(HeaderUserOrgAdmin)) == "true",
 		RequestID: string(h.Peek(HeaderRequestID)),
+		ActedBy:   string(h.Peek(HeaderActedBy)),
 		IP:        callerIP(ctx),
 	}
 }

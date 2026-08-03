@@ -117,15 +117,38 @@ func TestWithStatus_DefaultsAreUnchanged(t *testing.T) {
 	}
 }
 
-// A status is the SUCCESS status. An error status comes from the error a handler
-// returns, and letting both say it would be two places for one fact — so a
-// non-2xx is refused at declaration, at boot, not at request time.
-func TestWithStatus_RefusesANonSuccessCode(t *testing.T) {
-	for _, code := range []int{404, 500, 302, 199} {
+// DOCTRINE CHANGED. WithStatus used to refuse every non-2xx at declaration, on
+// the grounds that an error status is the error a handler returns and two places
+// for one fact are free to disagree.
+//
+// That held while an op's only way to answer a failure was the standard
+// {status, code, error} envelope. It stopped holding for an op whose failure
+// carries a TYPED BODY the envelope cannot express — a 409 with the conflicting
+// record, a 404 with what was searched for. Refusing those forced a hand-rolled
+// middleware to write the status, which is the invisible side channel this
+// package keeps closing.
+//
+// So a declared non-2xx is now accepted, and the doctrine survives where it was
+// actually load-bearing: an error RETURN still renders the envelope, and that is
+// still the way to answer a failure that has nothing extra to say. What is
+// refused is only what was never an HTTP status.
+func TestWithStatus_AcceptsADeclaredNonSuccessCode(t *testing.T) {
+	for _, code := range []int{404, 409, 302} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("WithStatus(%d) was refused: %v — an op may answer a failure with its own typed body", code, r)
+				}
+			}()
+			zip.WithStatus(code)
+		}()
+	}
+	// Still refused: not an HTTP status at all.
+	for _, code := range []int{0, 99, 600} {
 		func() {
 			defer func() {
 				if recover() == nil {
-					t.Errorf("WithStatus(%d) was accepted; a non-2xx must be refused at declaration", code)
+					t.Errorf("WithStatus(%d) was accepted; that is not an HTTP status", code)
 				}
 			}()
 			zip.WithStatus(code)
