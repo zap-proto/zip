@@ -855,13 +855,6 @@ context: prefix path, middleware stack (copies share structure), origin
 trail (`root → billing → /v1`). It returns the flattened result — one
 occurrence per visit: (def, kind, ctx, site).
 
-Trail cells carry the `*App` as well as its label, so an occurrence's trail
-IS its ancestor chain. That is how a subtree question ("does anything
-beneath this definition answer an address?") is answered by reducing the
-slice instead of walking the tree a second time — `routesUnder` is one pass
-and needs no cycle guard, because a cyclic composition never reaches a
-reducer.
-
 `occurrence` is unexported and non-semantic: the walk's internal
 flattened result, not a public model, not a stored source of truth. The
 tree remains canonical. The materialized form is deliberate: the
@@ -872,23 +865,15 @@ routes — the slice is free.
 
 **Binding requirement.** Every validator and reducer consumes the walk's
 result; none reopens `App.entries` or recurses the tree. Downstream code
-may switch on a normalized occurrence kind, never on payload types.
-`TestOneInterpreter_...` enforces it mechanically, by parsing this package's
-own source: outside `descend`, the kind normalizer and the three
-`occurrence` accessors, a payload read (`x.n.(T)`, `switch x.n.(type)`,
-`case route:`) or an entry-list traversal (`range x.entries`) fails, with
-file:line. The allow-listed sites are the two WRITERS — `Host.Drop` and
-`Host.Reload`, which edit the receiver's own entries between generations and
-recurse nowhere — and every allowance must still be HIT, so deleting or
-renaming an allow-listed site fails the test rather than quietly making it
-vacuous.
+may switch on a normalized occurrence kind, never on payload types. A
+package test enforces it mechanically: the only type switch over `node`
+lives in walk.go.
 
 Pipeline, in order, or nothing publishes:
 
     App tree
       → walk once
-      → structural validation, complete (cycles, conflicts, inert
-        middleware, terminal handler in Use position)
+      → structural validation, complete (cycles, conflicts, inert middleware)
       → derived validation (ID derivation, post-derivation collisions)
       → reducers (router, registry, SDK, MCP, CLI, llms.txt)
       → publish — or write nothing
@@ -924,6 +909,15 @@ value in a context slot — moves the same fact through a channel no
 projection can see, and a fact no projection can see is not a fact the
 API has. On a transport with no HTTP request the answer is nothing, not
 a panic: the field simply takes whatever the arguments supplied.
+
+**The caller's address.** `zip.CallerOf(ctx).IP` is ambient rather than
+declared — it is what the connection says, not something the caller
+states about itself, so it does not belong in the op's input shape. It is
+the socket peer by default: `X-Forwarded-For` is attacker-controlled
+input, and an IP that silently reports the load balancer is worse than
+none, because someone will rate-limit or audit on it. A deployment behind
+a proxy opts in explicitly and the opt-in is allowlist-gated. Empty when
+no connection is behind the context.
 
 **Two success codes.** A route whose 201-vs-200 is a per-request decision
 declares both, and the ANSWER states which one it is:
@@ -966,19 +960,6 @@ it at its address: `app.Get("/assets/*", h)`. Use cannot say *where* a
 handler answers; that is what operations are for. Middleware with nothing
 beneath it in the subtree is refused, naming its call site.
 
-Terminality is **declared, never name-matched**. A leaf constructor returns
-its handler through `zip.Terminal("zip.Static", h)` — exported, so
-`wsx.Upgrade` and third-party leaves use the same door — and the identity is
-the closure's code pointer, not the constructor's name. `AdaptNetHTTP` and
-`AdaptNetHTTPMiddleware` return closures with the same body from the same
-file; only their authors can know which one answers, so only a declaration
-can tell them apart. The refusal applies at **every depth, including the app
-being served**, which is exactly where a wiring file puts
-`app.Use(zip.Static(assets))`. The depth-0 exemption belongs to the inert
-check alone: root middleware is registered as router middleware and covers
-requests that match no route (404 logging, CORS preflight, recovery), so it
-is never inert.
-
 **The diamond is legal.** One definition, two references, two occurrences,
 two prefixes, possibly two environments. No backend may veto a composition
 the language permits.
@@ -998,9 +979,9 @@ language exists to kill.
 
 ## Validation errors
 
-Accumulate, with trails: conflicts, cycles, inert middleware, a terminal
-handler in Use position, post-derivation ID collisions — joined with
-`errors.Join`, each carrying call sites. Never fail on the first. Suspicion that cannot be a rule
+Accumulate, with trails: conflicts, cycles, inert middleware,
+post-derivation ID collisions — joined with `errors.Join`, each carrying
+call sites. Never fail on the first. Suspicion that cannot be a rule
 (middleware after an App on the same receiver: intentional co-located,
 latent bug cross-scope, structurally identical) lints in vet; semantics
 stay expressive.
