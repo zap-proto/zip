@@ -33,6 +33,12 @@ type registeredOp struct {
 	Path        string
 	OperationID string
 	Summary     string
+	// ResponseHeaders are the header names this op may set on its answer,
+	// declared. A name not in this set is refused rather than written — the
+	// document publishes exactly this list, and a header a client relies on is
+	// part of the contract. See [HeaderCoder].
+	ResponseHeaders []string
+
 	// readsHeaders is whether the input declares any `header:` field, computed
 	// ONCE at registration. Without it every request would walk the input type
 	// by reflection to discover that it declares none, which is the answer for
@@ -184,6 +190,78 @@ func statusOf(op *registeredOp, out any) (int, error) {
 		return op.Statuses[0], nil
 	}
 	return 0, nil
+}
+
+// WithResponseHeader declares the headers this op may set on its answer.
+//
+//	zip.Get(app, "/v1/report", report,
+//	    zip.WithResponseHeader("Cache-Control"))
+//
+// It is the response half of [WithStatus], and it exists for the same reason: a
+// response header a caller can rely on — a cache directive, a payment challenge,
+// a Set-Cookie — is part of the contract, so it belongs in the document rather
+// than in a context slot some middleware writes on the way out. That slot is
+// invisible to OpenAPI, to generated SDKs and to the tool schema, which is
+// exactly how a browser session cookie came to be set by a route no projection
+// described.
+//
+// The VALUE is stated by the answer, via [HeaderCoder].
+func WithResponseHeader(names ...string) OpOption {
+	if len(names) == 0 {
+		panic("zip: WithResponseHeader needs at least one header name")
+	}
+	return func(op *registeredOp) { op.ResponseHeaders = append(op.ResponseHeaders, names...) }
+}
+
+// HeaderCoder is how an answer states the response headers it carries. The
+// headers ride the value the handler already returns, so there is no mutable
+// slot on the request:
+//
+//	func (r *ReportOut) ResponseHeaders() map[string]string {
+//	    return map[string]string{"Cache-Control": "no-store"}
+//	}
+//
+// A name the op did not declare is refused at the seam. The document publishes
+// the declared set, so writing anything else tells a caller one thing and sends
+// another — the same rule an undeclared status obeys.
+//
+// # Transports without a response of their own
+//
+// The headers are written wherever the op OWNS the response: over REST, and over
+// the by-name call plane, where one request carries one op. They are NOT written
+// over MCP, because one HTTP response there carries a whole JSON-RPC envelope
+// that may hold several results, and there is no per-op response to put them on.
+// That is a defined meaning, not an oversight: the declared set still appears in
+// the tool schema, so an agent can see what the op says about itself, and the
+// answer's value is identical on every transport.
+type HeaderCoder interface{ ResponseHeaders() map[string]string }
+
+// responseHeadersOf is the header set an answer carries, checked against what
+// the op declared.
+func responseHeadersOf(op *registeredOp, out any) (map[string]string, error) {
+	hc, ok := out.(HeaderCoder)
+	if !ok {
+		return nil, nil
+	}
+	got := hc.ResponseHeaders()
+	if len(got) == 0 {
+		return nil, nil
+	}
+	for name := range got {
+		declared := false
+		for _, d := range op.ResponseHeaders {
+			if strings.EqualFold(d, name) {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			return nil, ErrInternal(fmt.Sprintf("%s %s set response header %q, which it does not declare — "+
+				"declare it with zip.WithResponseHeader(%q) so the document, the SDKs and the tool schema publish it",
+				op.Method, op.Path, name, name))
+		}
+	}
+	return got, nil
 }
 
 // bindURL copies URL-borne values onto the decoded input, matching a name to the
@@ -432,6 +510,13 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 			}
 			c.Status(cmp.Or(code, 204))
 			return nil
+		}
+		hdrs, herr := responseHeadersOf(op, out)
+		if herr != nil {
+			return herr
+		}
+		for name, v := range hdrs {
+			c.Set(name, v)
 		}
 		code, serr := statusOf(op, out)
 		if serr != nil {
