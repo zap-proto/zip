@@ -212,9 +212,31 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 	// leaf alone is how a doc comment on a group-declared op vanished from both
 	// the document and the MCP tool list: docFor looks up the composed path and
 	// never matched.
+	//
+	// A router that ARRIVED as a parameter — `func Mount(app zip.Router, …)`, the
+	// shape a subsystem uses to be mounted by its host — cannot be resolved here:
+	// only the caller knows the prefix, and that call is in another package. Read
+	// as mounted at the root, and ONLY for a path already written ABSOLUTE, which
+	// is the same rule and the same justification the raw case has always used:
+	// zip.Describe is keyed by "METHOD /path" and renders only where a router
+	// carries that key, so a guess that is wrong renders NOWHERE — the same
+	// silence as not lifting it, never a sentence on the wrong operation.
+	//
+	// Refusing instead cost the whole prose surface of every subsystem written
+	// that way. Measured on hanzoai/cloud: 46 of 93 packages could not run this
+	// pass at all, so each published operationIds and silence in the document, the
+	// MCP tool list, the CLI's help and eight SDKs — and the sentences were sitting
+	// in the source the whole time.
+	//
+	// A RELATIVE path with an unresolvable router is still an error. There the
+	// address genuinely cannot be composed, and a typed op filed under an identity
+	// this pass invented is the hole in the schema surface the strictness is for.
 	prefix, perr := routerPrefix(info, prefixes, call.Args[0])
 	if perr != nil {
-		return Op{}, false, fmt.Errorf("%s: zip.%s: %w", e.load.Position(call.Args[0].Pos()), fn.Name(), perr)
+		if !strings.HasPrefix(path, "/") {
+			return Op{}, false, fmt.Errorf("%s: zip.%s: %w", e.load.Position(call.Args[0].Pos()), fn.Name(), perr)
+		}
+		prefix = ""
 	}
 	path = joinPath(prefix, path)
 
@@ -448,8 +470,12 @@ func groupCallPrefix(info *types.Info, known map[types.Object]string, e ast.Expr
 // routerPrefix is the prefix an op registered on this router sits under. An *App
 // is the root and has none; a group must be one this pass RESOLVED, because a
 // prefix it cannot see is prose filed under the wrong identity — which is
-// exactly the silent drop this resolution exists to end. So an unresolvable
-// router is an error naming the call, never an assumed empty prefix.
+// exactly the silent drop this resolution exists to end.
+//
+// So it never ASSUMES a prefix: an unresolvable router is an error naming the
+// call. What the caller does with that error is the caller's rule, and both
+// callers make the same one — a path already written absolute is read as
+// root-mounted, a relative one is refused (see [extractor.call]).
 func routerPrefix(info *types.Info, prefixes map[types.Object]string, arg ast.Expr) (string, error) {
 	if isZipApp(info.Types[arg].Type) {
 		return "", nil
