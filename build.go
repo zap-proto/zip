@@ -296,6 +296,13 @@ func (a *App) fiberConfig() fiber.Config {
 	if a.cfg.ServerHeader != "-" {
 		fcfg.ServerHeader = a.cfg.ServerHeader
 	}
+	// The proxy-trust knobs reach the router or they mean nothing: c.IP() is
+	// where fiber applies the allowlist, and it reads them off this config.
+	fcfg.TrustProxy = a.cfg.TrustProxy
+	fcfg.ProxyHeader = a.cfg.ProxyHeader
+	if len(a.cfg.TrustedProxies) > 0 {
+		fcfg.TrustProxyConfig = fiber.TrustProxyConfig{Proxies: a.cfg.TrustedProxies}
+	}
 	if a.cfg.ErrorHandler != nil {
 		fcfg.ErrorHandler = a.cfg.ErrorHandler
 	} else {

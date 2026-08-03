@@ -137,6 +137,31 @@ type Config struct {
 	// (DefaultScheme), which those two clients cannot speak.
 	OpsAddr string
 
+	// TrustProxy says this app sits behind a proxy whose forwarded headers may
+	// be believed — and it is OFF by default, deliberately.
+	//
+	// [Caller.IP] is the socket peer unless this is set, because X-Forwarded-For
+	// is attacker-controlled input: anyone can send one. An IP that silently
+	// reports the load balancer is worse than no IP at all, since someone will
+	// rate-limit or audit on it.
+	//
+	// The opt-in is allowlist-gated rather than a boolean promise: with
+	// TrustedProxies naming the proxies (IPs or CIDRs), the value in ProxyHeader
+	// is honoured ONLY when the peer is one of them, and falls back to the peer
+	// anywhere else. Setting TrustProxy with no TrustedProxies trusts nothing —
+	// fiber skips every spoofable header — which is the safe reading of an
+	// incomplete configuration.
+	TrustProxy bool
+
+	// TrustedProxies is the allowlist TrustProxy consults: proxy IPs or CIDR
+	// ranges whose forwarded headers this app will believe.
+	TrustedProxies []string
+
+	// ProxyHeader names the header a trusted proxy states the caller's address
+	// in — "X-Forwarded-For" for most ingress, "X-Real-IP" for some. Read only
+	// when TrustProxy is set and the peer is in TrustedProxies.
+	ProxyHeader string
+
 	// OpenAPI configures the auto-generated /.well-known/openapi.json
 	// served when typed handlers are registered.
 	OpenAPI OpenAPIConfig

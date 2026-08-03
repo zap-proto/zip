@@ -89,13 +89,28 @@ func callerContext(fc fiber.Ctx) context.Context {
 	if rc == nil {
 		return fc.Context()
 	}
-	return context.WithValue(fc.Context(), callerKey{}, rc)
+	// ONE value carrying both facts, because this is the only place that holds
+	// the fiber Ctx and therefore the only place that can resolve the caller's
+	// IP under the app's trust configuration. Two WithValue calls would double
+	// the per-request cost of a path whose allocation count is measured.
+	return context.WithValue(fc.Context(), callerKey{}, &inflight{rc: rc, ip: fc.IP()})
+}
+
+// inflight is what a handler's context carries about the call in progress: the
+// request itself, and the caller's IP as fiber resolved it — which honours a
+// proxy header only where the app trusts one. See [Caller.IP].
+type inflight struct {
+	rc *fasthttp.RequestCtx
+	ip string
 }
 
 // requestOf recovers the in-flight request from a handler's context.
 func requestOf(ctx context.Context) *fasthttp.RequestCtx {
-	rc, _ := ctx.Value(callerKey{}).(*fasthttp.RequestCtx)
-	return rc
+	in, _ := ctx.Value(callerKey{}).(*inflight)
+	if in == nil {
+		return nil
+	}
+	return in.rc
 }
 
 // Forward returns a context that carries this request's identity onward, so a
@@ -180,6 +195,25 @@ type Caller struct {
 	Admin     bool
 	OrgAdmin  bool
 	RequestID string
+
+	// IP is where this call came FROM, and it is the one field here that is not
+	// a header the caller stated about itself — it is what the connection says.
+	//
+	// By default it is the socket peer, which cannot be spoofed and, behind a
+	// load balancer, is the load balancer. zip does not silently believe
+	// X-Forwarded-For: an IP that quietly reports the proxy is worse than none,
+	// because someone will rate-limit or audit on it, and an XFF that anyone can
+	// set is attacker-controlled input wearing the costume of a fact.
+	//
+	// A deployment that IS behind a proxy opts in explicitly, and the opt-in is
+	// allowlist-gated: set [Config.TrustProxy] with [Config.TrustedProxies] and
+	// [Config.ProxyHeader], and the forwarded value is honoured only when the
+	// peer is one of the named proxies. Anywhere else it falls back to the peer.
+	//
+	// Empty when there is no connection behind the context — a background
+	// caller, or a command — for the same reason every other field here is:
+	// nothing is known, so nothing is claimed.
+	IP string
 }
 
 // headers renders a stated caller onto the wire. Empty fields are omitted
@@ -242,7 +276,18 @@ func CallerOf(ctx context.Context) Caller {
 		Admin:     string(h.Peek(HeaderUserAdmin)) == "true",
 		OrgAdmin:  string(h.Peek(HeaderUserOrgAdmin)) == "true",
 		RequestID: string(h.Peek(HeaderRequestID)),
+		IP:        callerIP(ctx),
 	}
+}
+
+// callerIP is what the connection said, resolved once at the seam. Empty when
+// no connection is behind the context — a background caller, or a command.
+func callerIP(ctx context.Context) string {
+	in, _ := ctx.Value(callerKey{}).(*inflight)
+	if in == nil {
+		return ""
+	}
+	return in.ip
 }
 
 // Peer is the kernel's attestation of the process at the other end of a unix

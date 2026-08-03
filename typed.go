@@ -33,6 +33,12 @@ type registeredOp struct {
 	Path        string
 	OperationID string
 	Summary     string
+	// readsHeaders is whether the input declares any `header:` field, computed
+	// ONCE at registration. Without it every request would walk the input type
+	// by reflection to discover that it declares none, which is the answer for
+	// almost every op.
+	readsHeaders bool
+
 	// Statuses are the success codes this op may answer with, declared. Empty
 	// means the default (200, or 204 for a nil Out). More than one means the
 	// handler CHOOSES per request — see [WithStatus] and [StatusCoder].
@@ -333,6 +339,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	for _, o := range opts {
 		o(op)
 	}
+	op.readsHeaders = len(headerFields(op.InType)) > 0
 
 	// The op's stable identity, resolved once (after opts) and handed to the
 	// authorizer on every invoke — REST and MCP alike.
@@ -358,8 +365,11 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		// authorized is the target the URL named, and a body cannot smuggle a
 		// different one past it.
 		// Headers first, then the URL: the URL is the addressing authority and
-		// must win, exactly as it does over the body.
-		bindHeaders(&in, header)
+		// must win, exactly as it does over the body. Skipped entirely unless
+		// the input declares one, so an op that reads no header pays nothing.
+		if op.readsHeaders {
+			bindHeaders(&in, header)
+		}
 		bindURL(&in, query)
 		bindURL(&in, path)
 		if err := validate(&in); err != nil {
@@ -402,7 +412,14 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		// API — so every route that carries `?q=` had to stay an untyped handler,
 		// invisible to OpenAPI and MCP. Reading it here is what makes those routes
 		// expressible as ops.
-		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path, func(k string) string { return c.Get(k) })
+		// The header reader is built only for an op that declares one: the
+		// closure captures c, so it is per-request, and almost every op reads no
+		// header at all.
+		var header func(string) string
+		if op.readsHeaders {
+			header = func(k string) string { return c.Get(k) }
+		}
+		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path, header)
 		if err != nil {
 			return err
 		}
