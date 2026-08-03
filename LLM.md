@@ -684,6 +684,22 @@ If you add another projection that shows prose, read `docFor` — do not add a
 second prose field. (The op-call plane shows none: a service reads the schema,
 not the sentence, so it consumes `opName` and `op.invoke` only.)
 
+### A mounted subsystem's typed ops are filable (v1.23.1)
+
+`zipdoc` used to REFUSE a typed op registered on a router it could not resolve —
+`func Mount(app zip.Router, …)`, which is how every plugin in a fleet is written.
+Measured on hanzoai/cloud: **46 of 93 packages could not run the pass at all**, so
+each published operationIds and silence in the document, the MCP tool list, the
+CLI's help and eight SDKs, with the sentences sitting in the source.
+
+The rule is now the one the raw case has always used, in both callers: an
+unresolvable router with an **absolute** path is read as root-mounted. A guess
+that is wrong renders nowhere — `zip.Describe` is keyed by `METHOD /path` and only
+renders where a router carries that key — so the failure mode is the same silence,
+never a sentence on the wrong operation. A **relative** path is still an error:
+there the address genuinely cannot be composed. `routerPrefix` itself still
+assumes nothing; the fallback is the caller's, stated once per caller.
+
 ## The PACKAGE doc comment declares the product (v1.23.1)
 
 `zip.Doc` says what one operation means. `zip.Meta` (`catalog.go`) says what the
