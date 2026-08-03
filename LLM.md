@@ -905,6 +905,42 @@ Pipeline, in order, or nothing publishes:
   previously composed subtrees. Order only: a new entry can still create
   a conflict that fails validation.
 
+## What an operation can express
+
+An operation's input is its whole contract. Three sources bind it, in
+increasing authority — body, then declared headers, then the URL — because
+the URL is the addressing authority and a body must not be able to
+contradict the address it was sent to.
+
+    type ListIn struct {
+        Tenant string `json:"tenant" header:"X-Tenant"`
+        ID     string `json:"id"`
+    }
+
+A `header:` tag makes a request fact part of the contract, so it appears
+as a header parameter in the document, a flag on the command, and a
+property in the tool schema. The alternative — a middleware parking the
+value in a context slot — moves the same fact through a channel no
+projection can see, and a fact no projection can see is not a fact the
+API has. On a transport with no HTTP request the answer is nothing, not
+a panic: the field simply takes whatever the arguments supplied.
+
+**Two success codes.** A route whose 201-vs-200 is a per-request decision
+declares both, and the ANSWER states which one it is:
+
+    func (r *CreateOut) StatusCode() int {
+        if r.Existed { return 200 }
+        return 201
+    }
+
+    zip.Post(app, "/v1/things", create, zip.WithStatus(200, 201))
+
+The status rides the value the handler already returns, so there is no
+mutable slot on the request — a slot is a side channel, and the document
+publishes exactly the declared set. A code the op did not declare is
+refused at the seam rather than written to the wire.
+
+
 ## Semantics
 
 **Snapshot scope.** A thing sees the middleware written before it:

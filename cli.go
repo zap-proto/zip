@@ -426,9 +426,12 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 	if c.op == nil || c.op.invoke == nil {
 		return nil, fmt.Errorf("%s %s is not registered in this process — give the CLI a Remote invoker", c.Service, c.Name)
 	}
-	// No query map: a command's arguments are named, so they bind as path
-	// values. A CLI has no URL for the "?a=b" half to have come from.
-	return c.op.invoke(ctx, jsonenc.Unmarshal, body, nil, path)
+	// No query map and no headers: a command's arguments are named, so they bind
+	// as path values, and a CLI has neither a URL for the "?a=b" half nor a
+	// request to read headers from. A declared header field is simply supplied
+	// as an argument here — which is why the honest answer on a transport with
+	// no request is "nothing", not a panic.
+	return c.op.invoke(ctx, jsonenc.Unmarshal, body, nil, path, nil)
 }
 
 // Remote executes a command against a running zip service, and reads that

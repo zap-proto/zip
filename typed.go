@@ -3,6 +3,7 @@ package zip
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -32,10 +33,13 @@ type registeredOp struct {
 	Path        string
 	OperationID string
 	Summary     string
-	Status      int // the success status; 0 means the default (200, or 204 for a nil Out)
-	Tags        []string
-	InType      reflect.Type
-	OutType     reflect.Type
+	// Statuses are the success codes this op may answer with, declared. Empty
+	// means the default (200, or 204 for a nil Out). More than one means the
+	// handler CHOOSES per request — see [WithStatus] and [StatusCoder].
+	Statuses []int
+	Tags     []string
+	InType   reflect.Type
+	OutType  reflect.Type
 	// Origin names the app this op was DECLARED in when it arrived here through
 	// Graft — empty for an op this app registered itself. It qualifies the
 	// op's named types in the composed document (see schemaRegistry.origin), so
@@ -43,7 +47,7 @@ type registeredOp struct {
 	// other. It is the child's own AppName, never a prefix or a deployment
 	// choice: it says WHO declared the type, which is a property of the code.
 	Origin string
-	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error)
+	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error)
 }
 
 // decoder reads a request body into an op's In. It is a PARAMETER rather than a
@@ -114,11 +118,66 @@ func WithOperationID(id string) OpOption {
 // error status comes from the error a handler returns ([ErrNotFound] and
 // friends); letting a declaration state one too would be two places for one
 // fact, free to disagree.
-func WithStatus(code int) OpOption {
-	if code < 200 || code > 299 {
-		panic("zip: WithStatus wants a 2xx success status — an error status is the error a handler returns")
+func WithStatus(codes ...int) OpOption {
+	if len(codes) == 0 {
+		panic("zip: WithStatus needs at least one status")
 	}
-	return func(op *registeredOp) { op.Status = code }
+	seen := map[int]bool{}
+	for _, code := range codes {
+		if code < 200 || code > 299 {
+			panic("zip: WithStatus wants 2xx success statuses — an error status is the error a handler returns")
+		}
+		if seen[code] {
+			panic("zip: WithStatus: duplicate status")
+		}
+		seen[code] = true
+	}
+	return func(op *registeredOp) { op.Statuses = append([]int(nil), codes...) }
+}
+
+// StatusCoder is how an op with MORE THAN ONE declared success status says which
+// one this answer is. The OUTPUT VALUE states it:
+//
+//	func (r *CreateOut) StatusCode() int {
+//	    if r.Existed { return 200 }
+//	    return 201
+//	}
+//
+//	zip.Post(app, "/v1/things", create, zip.WithStatus(200, 201))
+//
+// The status is a property of the ANSWER, so it rides the value the handler
+// already returns. It is deliberately not a mutable slot on the request: a slot
+// is a side channel, and a side channel is invisible to every projection, which
+// is the whole defect this closes.
+//
+// A code the op did not declare is refused at the seam rather than written to
+// the wire, because the document publishes exactly the declared set and a
+// generated client expects nothing else.
+type StatusCoder interface{ StatusCode() int }
+
+// statusOf is the code an answer carries: what the value states if it states
+// anything, else the op's first declared status, else the default.
+func statusOf(op *registeredOp, out any) (int, error) {
+	if sc, ok := out.(StatusCoder); ok {
+		got := sc.StatusCode()
+		for _, declared := range op.Statuses {
+			if declared == got {
+				return got, nil
+			}
+		}
+		// An ERROR, not a panic: this is a runtime value, so it cannot be caught
+		// at boot, and a panic on a serving goroutine is a worse answer than a
+		// refusal the error chain renders. The document publishes exactly the
+		// declared set, so sending anything else tells the caller one thing and
+		// hands them another.
+		return 0, ErrInternal(fmt.Sprintf("%s %s answered %d, which it does not declare — "+
+			"declare it with zip.WithStatus(%d) so the document, the SDKs and the CLI publish it",
+			op.Method, op.Path, got, got))
+	}
+	if len(op.Statuses) > 0 {
+		return op.Statuses[0], nil
+	}
+	return 0, nil
 }
 
 // bindURL copies URL-borne values onto the decoded input, matching a name to the
@@ -149,6 +208,46 @@ func WithStatus(code int) OpOption {
 // A field names itself for the URL with `url:` and opts out with `url:"-"` — see
 // [urlFieldName]. That is what makes a route typable when its path parameter and
 // one of its body fields are the same word for two different things.
+// bindHeaders copies declared header values onto the decoded input. Only fields
+// carrying a `header:` tag are eligible: an op reads the headers it DECLARES and
+// no others, so the document and the input can never disagree about which ones
+// matter.
+//
+// get is a function rather than a map because the transports answer differently
+// and all of them answer honestly: over HTTP it reads the request's headers;
+// over MCP and the call plane, where the op's arguments arrived as a JSON object
+// and there is no per-op request, it reads nothing and the field keeps whatever
+// the arguments supplied. That is the same shape [CallerOf] uses, and the reason
+// neither of them panics on a transport that has no HTTP request.
+func bindHeaders(in any, get func(string) string) {
+	if get == nil {
+		return
+	}
+	v := reflect.ValueOf(in)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	for _, f := range wireFields(v.Type()) {
+		name := headerFieldName(f)
+		if name == "" {
+			continue
+		}
+		fv := v.FieldByIndex(f.Index)
+		if !fv.CanSet() {
+			continue
+		}
+		if got := get(name); got != "" {
+			setScalar(fv, got)
+		}
+	}
+}
+
 func bindURL(in any, values map[string]string) {
 	if len(values) == 0 {
 		return
@@ -242,7 +341,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// The transport-agnostic core: decode raw JSON args → In, validate, authorize,
 	// run fn, return Out (or a literal nil for a void result). REST and MCP both
 	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
-	op.invoke = func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error) {
+	op.invoke = func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error) {
 		var in In
 		if len(rawIn) > 0 {
 			if err := dec(rawIn, &in); err != nil {
@@ -258,6 +357,9 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		// honest — it runs below on this same decoded value, so the target
 		// authorized is the target the URL named, and a body cannot smuggle a
 		// different one past it.
+		// Headers first, then the URL: the URL is the addressing authority and
+		// must win, exactly as it does over the body.
+		bindHeaders(&in, header)
 		bindURL(&in, query)
 		bindURL(&in, path)
 		if err := validate(&in); err != nil {
@@ -300,18 +402,26 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		// API — so every route that carries `?q=` had to stay an untyped handler,
 		// invisible to OpenAPI and MCP. Reading it here is what makes those routes
 		// expressible as ops.
-		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path)
+		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path, func(k string) string { return c.Get(k) })
 		if err != nil {
 			return err
 		}
 		if out == nil {
 			// A void op answers with the status it DECLARED, else the 204 a nil
 			// Out has always meant.
-			c.Status(cmp.Or(op.Status, 204))
+			code, serr := statusOf(op, nil)
+			if serr != nil {
+				return serr
+			}
+			c.Status(cmp.Or(code, 204))
 			return nil
 		}
-		if op.Status != 0 {
-			c.Status(op.Status)
+		code, serr := statusOf(op, out)
+		if serr != nil {
+			return serr
+		}
+		if code != 0 {
+			c.Status(code)
 		}
 		return c.JSON(out)
 	}

@@ -1,7 +1,6 @@
 package zip
 
 import (
-	"cmp"
 	"encoding/json"
 	"maps"
 	"net/http"
@@ -186,6 +185,21 @@ func (a *App) buildOpenAPI() map[string]any {
 				"schema": url.paramSchema(p),
 			}, p))
 		}
+		// Header parameters. A field carrying `header:"X-Foo"` is a REQUEST FACT
+		// the op declared, so the document names it — that is what makes reading
+		// a header part of the contract instead of something a middleware does
+		// off to the side where no projection can see it. Declared for every
+		// method, because a header rides a POST as readily as a GET, and excluded
+		// from the query list below so one field is never described twice.
+		hdr := headerFields(op.InType)
+		for _, h := range hdr {
+			named[strings.ToLower(h.field)] = true
+			decls = append(decls, describe(map[string]any{
+				"name": h.header, "in": "header", "required": h.required,
+				"schema": h.schema,
+			}, h.field))
+		}
+
 		// Query parameters. A bodyless method binds its input from the URL
 		// (typed.go bindURL), so every In field that is NOT already a path
 		// segment is reachable as `?field=` — and the document has to say so, or
@@ -216,18 +230,20 @@ func (a *App) buildOpenAPI() map[string]any {
 			if hasDoc && len(doc.Response) > 0 {
 				respMedia["example"] = json.RawMessage(doc.Response)
 			}
-			code := cmp.Or(op.Status, 200)
-			opObj["responses"] = map[string]any{
-				strconv.Itoa(code): map[string]any{
+			resp := map[string]any{}
+			for _, code := range declaredStatuses(op, 200) {
+				resp[strconv.Itoa(code)] = map[string]any{
 					"description": statusText(code),
 					"content":     map[string]any{"application/json": respMedia},
-				},
+				}
 			}
+			opObj["responses"] = resp
 		} else {
-			code := cmp.Or(op.Status, 204)
-			opObj["responses"] = map[string]any{
-				strconv.Itoa(code): map[string]any{"description": statusText(code)},
+			resp := map[string]any{}
+			for _, code := range declaredStatuses(op, 204) {
+				resp[strconv.Itoa(code)] = map[string]any{"description": statusText(code)}
 			}
+			opObj["responses"] = resp
 		}
 
 		paths[path][strings.ToLower(op.Method)] = opObj
@@ -765,6 +781,22 @@ func jsonFieldName(f reflect.StructField) string {
 //
 //	Name   string `json:"-"      url:"script"` // the URL's, and only the URL's
 //	Script string `json:"script" url:"-"`      // the body's, and only the body's
+//
+// headerFieldName is the header a field reads, or "" when it reads none.
+//
+// A `header:"X-Tenant"` tag is what makes a REQUEST FACT part of the op's
+// contract instead of something a middleware smuggles through a context slot.
+// Declared here, it appears as a header parameter in the document, a flag on the
+// command, and a property in the MCP tool schema — which is the whole test a
+// replacement for that middleware has to pass: a fact no projection can see is
+// not a fact the API has.
+func headerFieldName(f reflect.StructField) string {
+	if tag, ok := f.Tag.Lookup("header"); ok {
+		return jsontag.Name(f.Name, tag)
+	}
+	return ""
+}
+
 func urlFieldName(f reflect.StructField) string {
 	if tag, ok := f.Tag.Lookup("url"); ok {
 		return jsontag.Name(f.Name, tag)
@@ -884,3 +916,66 @@ const swaggerHTML = `<!doctype html>
 // generated any other way is a second source of truth, and the whole point of
 // deriving it here is that there is only one.
 func (a *App) OpenAPISpec() map[string]any { return a.buildOpenAPI() }
+
+// primaryStatus is the code an op answers with when its output states nothing —
+// the first it declared. The document keys the success response on it, and every
+// OTHER declared status gets its own entry beside it (see multiStatus), because
+// a code the service can send and the document omits is a code no generated
+// client will handle.
+// declaredStatuses is every success code an op may answer with — all of them,
+// not just the first. An op that declares 200 and 201 can send either, so the
+// document says both; publishing one would leave a generated client with no
+// branch for the other, which is precisely the hole a per-request status slot
+// left open.
+func declaredStatuses(op *registeredOp, dflt int) []int {
+	if len(op.Statuses) == 0 {
+		return []int{dflt}
+	}
+	return op.Statuses
+}
+
+func primaryStatus(op *registeredOp) int {
+	if len(op.Statuses) == 0 {
+		return 0
+	}
+	return op.Statuses[0]
+}
+
+// headerField is one declared header parameter: the header it reads, the field
+// it lands on, and the shape it carries.
+type headerField struct {
+	header   string
+	field    string
+	required bool
+	schema   map[string]any
+}
+
+// headerFields is every `header:`-tagged field of an input type. It walks the
+// same wireFields the decoder does, so a promoted field of an embedded struct
+// declares its header exactly as an own field would — the document and the
+// binder cannot disagree about which fields exist.
+func headerFields(t reflect.Type) []headerField {
+	if t == nil {
+		return nil
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	var out []headerField
+	for _, f := range wireFields(t) {
+		name := headerFieldName(f)
+		if name == "" {
+			continue
+		}
+		out = append(out, headerField{
+			header:   name,
+			field:    jsonFieldName(f),
+			required: strings.Contains(f.Tag.Get("validate"), "required"),
+			schema:   schemaOf(f.Type, nil, nil),
+		})
+	}
+	return out
+}
