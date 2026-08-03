@@ -56,8 +56,10 @@ type OpTarget interface {
 // was. It lives on the concrete [App] — see [App.Fiber] — where a caller that
 // genuinely needs the underlying router still reaches it, and where wanting it
 // forces you to hold an *App rather than quietly widening every Router in the
-// estate. Prefer [App.Routes] and [App.Test], which serve the two things
-// callers actually reached through Fiber() for.
+// estate. Prefer [App.Routes] and [App.Test], which serve the two things callers
+// actually reached through Fiber() for — enumerating addresses and driving a
+// request — and which do it through the program rather than through whichever
+// generation's router happened to be current.
 type Router interface {
 	// Every Router is somewhere a typed op can be declared, so `zip.Get(v1, …)`
 	// takes a Group as readily as it takes the App.

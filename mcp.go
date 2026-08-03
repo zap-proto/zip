@@ -492,7 +492,7 @@ func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
 
 	// No URL over MCP: a tools/call carries every argument in its JSON arguments
 	// object, so the body IS the whole input — neither query nor path binds.
-	out, err := op.invoke(callerContext(fc), jsonenc.Unmarshal, params.Arguments, nil, nil)
+	out, err := op.invoke(callerContext(fc), jsonenc.Unmarshal, params.Arguments, nil, nil, func(k string) string { return fc.Get(k) })
 	return a.mcpAnswer(fc, req, out, err)
 }
 

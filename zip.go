@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -401,4 +402,24 @@ func asHTTPError(err error) (*HTTPError, bool) {
 		return he, true
 	}
 	return nil, false
+}
+
+// Routes is every address this program answers, as [Declaration] projects them:
+// the program's own entries, absolute, without fiber's HEAD and OPTIONS shadows
+// and without zip's control plane.
+//
+// It exists so that enumerating routes does not require reaching through
+// [App.Fiber]. That reach is now refused when it mutates (see checkForeignRoutes)
+// and was always wrong when it merely read, because fiber's own GetRoutes cannot
+// apply a doctrine zip owns — it reports shadows nobody declared and cannot tell
+// an explicit HEAD from a generated one.
+func (a *App) Routes() []Route { return a.Declaration().Routes }
+
+// Test drives one request against the program without binding a socket, which is
+// the other thing callers reached through [App.Fiber] for.
+//
+// It builds the program if nothing is live, exactly as serving would, so a test
+// exercises the same generation a request would — including every validation.
+func (a *App) Test(req *http.Request, cfg ...fiber.TestConfig) (*http.Response, error) {
+	return a.router().Test(req, cfg...)
 }
