@@ -910,6 +910,25 @@ projection can see, and a fact no projection can see is not a fact the
 API has. On a transport with no HTTP request the answer is nothing, not
 a panic: the field simply takes whatever the arguments supplied.
 
+**Response headers.** An answer states the headers it carries the way
+it states its code — declared on the op, valued by the returned value:
+
+    func (r *ReportOut) ResponseHeaders() map[string]string {
+        return map[string]string{"Cache-Control": "no-store"}
+    }
+
+    zip.Get(app, "/v1/report", report,
+        zip.WithResponseHeader("Cache-Control"))
+
+A header a caller relies on — a cache directive, a payment challenge, a
+`Set-Cookie` — is part of the contract, so the document names it under
+the response. An undeclared one is refused rather than written. They are
+written wherever the op OWNS the response: over REST, and over the
+by-name call plane. They are not written over MCP, where one HTTP
+response carries a whole JSON-RPC envelope and there is no per-op
+response to put them on — the declared set still appears in the schema,
+and the answer's value is identical on every transport.
+
 **The caller's address.** `zip.CallerOf(ctx).IP` is ambient rather than
 declared — it is what the connection says, not something the caller
 states about itself, so it does not belong in the op's input shape. It is

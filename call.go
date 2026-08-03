@@ -165,6 +165,15 @@ func (a *App) installCallPlane() {
 		if out == nil {
 			return fc.SendStatus(fiber.StatusNoContent)
 		}
+		// The call plane owns this response — one request, one op — so a declared
+		// response header is written here exactly as it is over REST.
+		hdrs, herr := responseHeadersOf(op, out)
+		if herr != nil {
+			return sendCallError(fc, herr)
+		}
+		for name, v := range hdrs {
+			fc.Set(name, v)
+		}
 		body, merr := zapenc.Marshal(out)
 		if merr != nil {
 			return sendCallError(fc, ErrInternal("zip: encode reply: "+merr.Error()))

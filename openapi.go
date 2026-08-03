@@ -232,16 +232,24 @@ func (a *App) buildOpenAPI() map[string]any {
 			}
 			resp := map[string]any{}
 			for _, code := range declaredStatuses(op, 200) {
-				resp[strconv.Itoa(code)] = map[string]any{
+				entry := map[string]any{
 					"description": statusText(code),
 					"content":     map[string]any{"application/json": respMedia},
 				}
+				if h := responseHeaderSchemas(op); h != nil {
+					entry["headers"] = h
+				}
+				resp[strconv.Itoa(code)] = entry
 			}
 			opObj["responses"] = resp
 		} else {
 			resp := map[string]any{}
 			for _, code := range declaredStatuses(op, 204) {
-				resp[strconv.Itoa(code)] = map[string]any{"description": statusText(code)}
+				entry := map[string]any{"description": statusText(code)}
+				if h := responseHeaderSchemas(op); h != nil {
+					entry["headers"] = h
+				}
+				resp[strconv.Itoa(code)] = entry
 			}
 			opObj["responses"] = resp
 		}
@@ -976,6 +984,27 @@ func headerFields(t reflect.Type) []headerField {
 			required: strings.Contains(f.Tag.Get("validate"), "required"),
 			schema:   schemaOf(f.Type, nil, nil),
 		})
+	}
+	return out
+}
+
+// responseHeaderSchemas is the `headers` object of a response, from what the op
+// declared with [WithResponseHeader].
+//
+// A response header a caller relies on — a cache directive, a payment challenge,
+// a Set-Cookie — is part of the contract, so the document names it. Without this
+// the header would be set on the wire and described nowhere, which is the same
+// invisibility that made a context slot the wrong home for it.
+func responseHeaderSchemas(op *registeredOp) map[string]any {
+	if len(op.ResponseHeaders) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(op.ResponseHeaders))
+	for _, name := range op.ResponseHeaders {
+		out[name] = map[string]any{
+			"description": "Set by " + op.Method + " " + op.Path + ".",
+			"schema":      map[string]any{"type": "string"},
+		}
 	}
 	return out
 }
