@@ -232,6 +232,48 @@ func TestStripSelf(t *testing.T) {
 	}
 }
 
+// A subsystem MOUNTED BY ITS HOST — `func Mount(app zip.Router, …)`, the shape
+// every plugin in a fleet is written in — registers on a router whose prefix only
+// the caller knows. Its typed ops are written at absolute paths, and those are
+// filable: zip.Describe renders only where a router carries the key, so reading
+// the router as root-mounted files the prose exactly where it belongs when the
+// host mounts at root, and NOWHERE when it does not — the same silence as not
+// lifting it, never a sentence on the wrong operation.
+//
+// Refusing instead was measured at 46 of 93 packages in one fleet unable to run
+// this pass at all. Every one of them published operationIds and silence in the
+// document, the MCP tool list, the CLI's help and eight SDKs, with the sentences
+// sitting in the source the whole time.
+func TestExtract_MountedSubsystemFilesItsAbsolutePaths(t *testing.T) {
+	p := load(t, "mounted")
+	typed := opByKey(t, p, "GET /v1/mounted/things/:id")
+	if !strings.HasPrefix(typed.Description, "Returns one thing by id") {
+		t.Errorf("description = %q", typed.Description)
+	}
+	if got := typed.Fields["In.id"]; got != "ID of the thing." {
+		t.Errorf("Fields[In.id] = %q — a typed op filed this way still carries its schema prose", got)
+	}
+	// The raw case had this rule already; both callers now make the same one.
+	if got := opByKey(t, p, "GET /v1/mounted/health").Path; got != "/v1/mounted/health" {
+		t.Errorf("raw path = %q", got)
+	}
+}
+
+// A RELATIVE path on an unresolvable router is still refused. There the address
+// genuinely cannot be composed, and a typed op filed under an identity this pass
+// invented is the hole in the schema surface the strictness exists for.
+func TestExtract_RelativePathOnAnUnresolvableRouterIsAnError(t *testing.T) {
+	dir, err := filepath.Abs(filepath.Join("testdata", "badrelative"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir, nil); err == nil {
+		t.Fatal("Load filed a typed op whose address it could not compose")
+	} else if !strings.Contains(err.Error(), "prefix") {
+		t.Errorf("error = %v, want it to name the unresolvable prefix", err)
+	}
+}
+
 // A package says what PRODUCT it implements in the one place the fact already
 // belongs — its own doc comment — and the declaration reaches the generated file
 // so it is compiled into the binary that serves the subsystem.
