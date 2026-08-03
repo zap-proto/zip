@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/doc"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -27,6 +28,7 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
+	"github.com/zap-proto/zip"
 	"github.com/zap-proto/zip/internal/jsontag"
 )
 
@@ -63,12 +65,14 @@ type Op struct {
 // Key is the operation's identity, the same one zip's registry uses.
 func (o Op) Key() string { return o.Method + " " + o.Path }
 
-// Package is one loaded package and the operations registered in it.
+// Package is one loaded package, the operations registered in it, and what its
+// package doc comment says about the product it implements.
 type Package struct {
 	Dir  string // directory the generated file belongs in
 	Name string // package clause
 	Path string // import path, so a package inside zip itself skips the import
 	Ops  []Op
+	Meta zip.Meta
 }
 
 // Load type-checks the packages matched by patterns (relative to dir) and
@@ -119,11 +123,16 @@ func Load(dir string, patterns []string) ([]Package, error) {
 		if len(files) == 0 {
 			continue
 		}
+		meta, err := e.meta(p)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, Package{
 			Dir:  filepath.Dir(files[0]),
 			Name: p.Name,
 			Path: p.PkgPath,
 			Ops:  ops,
+			Meta: meta,
 		})
 	}
 	return out, nil
@@ -876,13 +885,104 @@ func splitDoc(text string) (prose, example, response string, err error) {
 }
 
 // marker recognises an "Example:" or "Response:" line and returns what follows.
-func marker(line string) (key, rest string, ok bool) {
-	for _, k := range [...]string{"Example", "Response"} {
-		if r, found := strings.CutPrefix(strings.TrimSpace(line), k+":"); found {
+func marker(line string) (key, rest string, ok bool) { return mark(line, "Example", "Response") }
+
+// mark recognises a "Key: value" line for one of keys. ONE matcher for both
+// grammars — the operation's Example/Response bodies and the package's product
+// facts — so a marker is recognised the same way wherever it is written, and
+// alignment (`Product:    Hanzo Vector`) is not a second dialect.
+//
+// Only the named keys match. Anything else is prose, exactly as it has always
+// been: a package doc is full of lines that open with a capitalised word and a
+// colon, and a matcher that claimed them would silently eat somebody's sentence.
+func mark(line string, keys ...string) (key, rest string, ok bool) {
+	line = strings.TrimSpace(line)
+	for _, k := range keys {
+		if r, found := strings.CutPrefix(line, k+":"); found {
 			return k, strings.TrimSpace(r), true
 		}
 	}
 	return "", "", false
+}
+
+// catalogKeys are the marker names a package doc may declare, derived from
+// [zip.Meta] itself rather than listed here — a field added to the type is a
+// marker the grammar accepts, with no second list to update and no way for the
+// two to disagree. Description is excluded: it is the package's own sentence,
+// read from the prose, and not something a marker states.
+var catalogKeys = func() []string {
+	t := reflect.TypeOf(zip.Meta{})
+	out := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		if f := t.Field(i); f.Name != "Description" {
+			out = append(out, f.Name)
+		}
+	}
+	return out
+}()
+
+// meta is what the package says about the product it implements: its synopsis
+// and its catalog markers.
+//
+// THE CONVENTION IS THE WHOLE TEST. Go's package doc is the leading comment that
+// opens "Package …", and only that comment is read — go/doc's fallback (the
+// first file in filename order carrying any leading comment) is wrong here often
+// enough to matter, because a file that opens with a note ABOUT THAT FILE would
+// then be published as the product's description. A caller cannot tell an
+// undescribed product from a misfiled one.
+func (e *extractor) meta(p *packages.Package) (zip.Meta, error) {
+	for _, f := range p.Syntax {
+		if f.Doc == nil {
+			continue
+		}
+		text := f.Doc.Text()
+		if !strings.HasPrefix(text, "Package ") {
+			continue
+		}
+		m, err := parseMeta(text)
+		if err != nil {
+			return zip.Meta{}, fmt.Errorf("%s: package %s: %w", e.load.Position(f.Doc.Pos()), p.PkgPath, err)
+		}
+		return m, nil
+	}
+	return zip.Meta{}, nil
+}
+
+// parseMeta splits a package doc comment into its product facts and its prose.
+//
+// The prose keeps its synopsis — the first sentence, which is what a menu, a tag
+// description and an app's `info` block each want — and the markers are lifted
+// out of it, so a declaration never reads back as part of the sentence.
+//
+// A key stated twice is refused. Two answers to one question is not a formatting
+// slip; whichever the parser happened to keep would become the fact, and nothing
+// downstream could see the other.
+func parseMeta(text string) (zip.Meta, error) {
+	var m zip.Meta
+	v := reflect.ValueOf(&m).Elem()
+	seen := map[string]bool{}
+	var keep []string
+	for _, line := range strings.Split(text, "\n") {
+		key, val, ok := mark(line, catalogKeys...)
+		if !ok {
+			keep = append(keep, line)
+			continue
+		}
+		if seen[key] {
+			return zip.Meta{}, fmt.Errorf("%s is declared twice; one question has one answer", key)
+		}
+		seen[key] = true
+		f := v.FieldByName(key)
+		if f.Kind() != reflect.String {
+			return zip.Meta{}, fmt.Errorf("%s is not a string field of zip.Meta, so this grammar cannot carry it", key)
+		}
+		f.SetString(val)
+	}
+	m.Description = doc.Synopsis(strings.TrimSpace(strings.Join(keep, "\n")))
+	if err := m.Valid(); err != nil {
+		return zip.Meta{}, err
+	}
+	return m, nil
 }
 
 // compactJSON validates and normalises one body. Compaction (rather than a
