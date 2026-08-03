@@ -126,18 +126,28 @@ func WithOperationID(id string) OpOption {
 // and to nothing else: an MCP tools/call, a CLI command and a zip.Call all carry
 // their own outcome and are untouched.
 //
-// A non-2xx is refused here, at declaration, rather than at request time. An
-// error status comes from the error a handler returns ([ErrNotFound] and
-// friends); letting a declaration state one too would be two places for one
-// fact, free to disagree.
+// # Declaring a non-2xx
+//
+// A declared non-2xx is for an op that answers a failure with its OWN TYPED
+// BODY — a 409 carrying the conflicting record, a 404 carrying what was
+// searched for. It is not a second way to spell an error: [ErrNotFound] and
+// friends remain how a handler returns a failure, and they render the standard
+// {status, code, error} envelope every client already parses.
+//
+// The difference is which body reaches the wire. An error returns the envelope;
+// a declared status returns the op's Out type, described in the document under
+// that code like any other response. Reach for the error unless the caller
+// genuinely needs a typed body it cannot get from the envelope — two ways to
+// spell the same failure is exactly the drift this package spends its doc
+// comments avoiding.
 func WithStatus(codes ...int) OpOption {
 	if len(codes) == 0 {
 		panic("zip: WithStatus needs at least one status")
 	}
 	seen := map[int]bool{}
 	for _, code := range codes {
-		if code < 200 || code > 299 {
-			panic("zip: WithStatus wants 2xx success statuses — an error status is the error a handler returns")
+		if code < 100 || code > 599 {
+			panic("zip: WithStatus wants an HTTP status")
 		}
 		if seen[code] {
 			panic("zip: WithStatus: duplicate status")
