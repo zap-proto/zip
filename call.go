@@ -2,10 +2,10 @@ package zip
 
 import (
 	"context"
-	"github.com/zap-proto/zip/internal/zapenc"
-	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/zap-proto/zip/internal/sock"
+	"github.com/zap-proto/zip/internal/zapenc"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
@@ -99,7 +99,7 @@ func sendCallError(fc fiber.Ctx, err error) error {
 
 // RuntimeDirEnv names the directory holding one socket per app. It is the one
 // knob in the socket-path scheme; see [SocketPath].
-const RuntimeDirEnv = "ZIP_RUNTIME_DIR"
+const RuntimeDirEnv = sock.DirEnv
 
 // RuntimeDir is the directory that holds the fleet's sockets, resolved in one
 // order:
@@ -110,15 +110,7 @@ const RuntimeDirEnv = "ZIP_RUNTIME_DIR"
 //
 // The middle case is what makes a dev box work without configuration: /run/zip
 // is not writable by a normal user and $XDG_RUNTIME_DIR is.
-func RuntimeDir() string {
-	if d := os.Getenv(RuntimeDirEnv); d != "" {
-		return d
-	}
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-		return filepath.Join(d, "zip")
-	}
-	return "/run/zip"
-}
+func RuntimeDir() string { return sock.Dir() }
 
 // SocketPath is the ONE canonical mapping from a service NAME to the unix
 // socket it is reachable at:
@@ -130,12 +122,12 @@ func RuntimeDir() string {
 // zip.DialApp("flags"). There is no registry, no discovery service and no
 // second spelling — the name IS the address, and one environment variable
 // moves the whole fleet.
-func SocketPath(name string) string { return socketIn(RuntimeDir(), name) }
+func SocketPath(name string) string { return sock.Path(name) }
 
 // socketIn is the shape of every zip socket path, in one place: the plugin
 // loader names a child's private socket with it too (see start), so "a
 // service's socket is <dir>/<name>.sock" is stated once.
-func socketIn(dir, name string) string { return filepath.Join(dir, name+".sock") }
+func socketIn(dir, name string) string { return sock.In(dir, name) }
 
 // installCallPlane mounts the by-name op plane when there are ops to call.
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.

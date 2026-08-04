@@ -228,10 +228,6 @@ func (a *App) listenOn(addrs []string) error {
 	// HIP-0106 §2(3): peer ops ride a SECOND app served only on the canonical
 	// socket, so an internal op is never reachable on the edge.
 	a.servePeer()
-	// The numbers start going out when the app starts answering, because before
-	// that there is nothing to report and a process that never serves should not
-	// hold a connection to the collector.
-	a.export()
 
 	// Serve every transport concurrently; return the first error (Shutdown
 	// closes the rest via closeServers).
