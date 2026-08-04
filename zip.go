@@ -440,11 +440,35 @@ func asHTTPError(err error) (*HTTPError, bool) {
 // an explicit HEAD from a generated one.
 func (a *App) Routes() []Route { return a.Declaration().Routes }
 
+// TestConfig bounds a [App.Test] request. It is zip's own type on purpose: Test
+// is what callers are told to use INSTEAD of reaching through [App.Fiber], and a
+// signature naming fiber sent them straight back to the escape hatch it replaces
+// — so every test that wanted a timeout imported the router this package exists
+// to keep out of its callers.
+//
+// Two fields because two are what the estate uses. A knob nobody turns is a
+// promise about the router underneath.
+type TestConfig struct {
+	// Timeout bounds the request. Zero means the underlying default (1s).
+	Timeout time.Duration
+
+	// FailOnTimeout returns an error when Timeout is exceeded, rather than a
+	// 408 response. Default true, matching the router.
+	FailOnTimeout bool
+}
+
 // Test drives one request against the program without binding a socket, which is
 // the other thing callers reached through [App.Fiber] for.
 //
 // It builds the program if nothing is live, exactly as serving would, so a test
 // exercises the same generation a request would — including every validation.
-func (a *App) Test(req *http.Request, cfg ...fiber.TestConfig) (*http.Response, error) {
-	return a.router().Test(req, cfg...)
+func (a *App) Test(req *http.Request, cfg ...TestConfig) (*http.Response, error) {
+	if len(cfg) == 0 {
+		return a.router().Test(req)
+	}
+	c := cfg[0]
+	return a.router().Test(req, fiber.TestConfig{
+		Timeout:       c.Timeout,
+		FailOnTimeout: c.FailOnTimeout,
+	})
 }

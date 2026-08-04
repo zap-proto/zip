@@ -2,8 +2,6 @@ package zip
 
 import (
 	"fmt"
-
-	"github.com/zap-proto/fiber/v3"
 )
 
 // Middleware is a composable request transformer in the classic wrapping form:
@@ -153,5 +151,3 @@ func (w *wrapRouter) Group(prefix string, handlers ...Handler) Router {
 	}
 	return g
 }
-
-func (w *wrapRouter) Fiber() *fiber.App { return w.inner.Fiber() }
