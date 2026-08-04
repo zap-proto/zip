@@ -550,5 +550,5 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// router and all five projections read the same value and cannot disagree
 	// about what exists — which is what makes composition a walk rather than a
 	// merge of a router and a registry that were written separately.
-	app.addRoute(here(2), route{method: method, path: path, serve: handler, op: op})
+	app.addRoute(here(2), route{method: method, path: path, serve: handler, op: op, shadow: scope.Shadow})
 }

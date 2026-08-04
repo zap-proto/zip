@@ -100,7 +100,7 @@ func TestGeneration_IncludeAdvancesAndServes(t *testing.T) {
 // serving in two places, and "stop serving billing" is not a question about one
 // of them.
 func TestGeneration_DropStopsServingEveryOccurrence(t *testing.T) {
-	billing := billingApp()
+	billing := unnamedApp() // no declared id, so it may occur twice
 	host := quiet("host")
 	host.Get("/v1/keep", func(c *Ctx) error { return c.String(200, "keep") })
 	host.Group("/a").Use(billing)

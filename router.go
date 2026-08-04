@@ -20,6 +20,15 @@ type OpScope struct {
 	// Middleware wraps the op's handler. nil means none — the common case, and
 	// the one that costs nothing.
 	Middleware Middleware
+
+	// Shadow says an op declared in this scope YIELDS its address: it is in the
+	// document and a handler registered ahead of it answers. See [App.Shadow].
+	//
+	// It is on the scope for the same reason Middleware is: a decorator that
+	// declares it and then delegates OpScope without carrying it would register
+	// the op unshadowed, and the composition would be refused for a conflict the
+	// author had already declared away.
+	Shadow bool
 }
 
 // OpTarget is a place a typed op can be declared: the [App], or any [Router] of

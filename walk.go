@@ -305,7 +305,13 @@ func structural(occ []occurrence) error {
 		site callsite
 		via  string
 	}
-	held := make(map[string]map[string]claim)
+	// held is every claim at an address, in walk order — which IS registration
+	// order, because [App.materialise] replays this same slice. It used to hold
+	// ONE claim per method and refuse the second on sight; keeping the whole list
+	// is what lets [addressErrors] reason about the SHAPE of the claims at an
+	// address rather than about whichever one happened to arrive first.
+	held := map[string][]addrClaim{}
+	var addrOrder []string
 	tools := map[string]claim{}
 	var openBy *App
 
@@ -332,30 +338,13 @@ func structural(occ []occurrence) error {
 			r, _ := o.route()
 			method := strings.ToUpper(r.method)
 			path := addrKey(o.abs(r.path))
-			mine := claim{by: o.ctx.in.label(), site: o.site, via: o.ctx.trail.String()}
-			at := held[path]
-			if at == nil {
-				at = map[string]claim{}
-				held[path] = at
+			if _, seen := held[path]; !seen {
+				addrOrder = append(addrOrder, path)
 			}
-			var prev claim
-			var dup bool
-			if method == methodAll {
-				for _, c := range at {
-					prev, dup = c, true
-					break
-				}
-			} else if c, ok := at[method]; ok {
-				prev, dup = c, true
-			} else if c, ok := at[methodAll]; ok {
-				prev, dup = c, true
-			}
-			if dup {
-				errs = append(errs, fmt.Errorf("zip: %s %s: declared by %q at %s (via %s) and by %q at %s (via %s)",
-					method, path, prev.by, prev.site, prev.via, mine.by, mine.site, mine.via))
-				continue
-			}
-			at[method] = mine
+			held[path] = append(held[path], addrClaim{
+				method: method, by: o.ctx.in.label(), site: o.site, via: o.ctx.trail.String(),
+				shadow: r.shadow, typed: r.op != nil, n: len(held[path]),
+			})
 
 		case kindMiddleware:
 			// TERMINALITY IS ASKED FIRST, AND AT EVERY DEPTH.
@@ -446,6 +435,8 @@ func structural(occ []occurrence) error {
 		}
 	}
 
+	errs = append(errs, addressErrors(held, addrOrder)...)
+
 	// The SUBTREE, not the definition's own entries. A group's routes usually
 	// come from the definitions it includes, and its middleware legitimately
 	// wraps those — that is what a scoped Group is for.
@@ -464,6 +455,157 @@ func structural(occ []occurrence) error {
 			def.who(), st.mw, st.trail))
 	}
 	return errors.Join(errs...)
+}
+
+// addrClaim is one registration's claim on one address, as the conflict check
+// sees it: who wrote it, where, how it got here, whether it YIELDS the address
+// ([App.Shadow]) and whether it carries an op.
+type addrClaim struct {
+	method string
+	by     string
+	site   callsite
+	via    string
+	shadow bool
+	typed  bool
+	// n is this claim's position among the claims at its address, so a claim
+	// that a catch-all makes conflict at five methods is still ONE registration
+	// and is reported once. Same doctrine as the Use-position check: one message
+	// per offending line, however many ways the walk reaches it.
+	n int
+}
+
+func (c addrClaim) where() string { return fmt.Sprintf("%q at %s (via %s)", c.by, c.site, c.via) }
+
+// addressErrors is the rule about who may answer one address.
+//
+// The rule used to be flat — a second claim at an address is a conflict, full
+// stop — and it was right about the accident it was written for and wrong about
+// two shapes the estate writes ON PURPOSE: a service that installs its own
+// published TABLE of operations onto the router its implementation already
+// answers on (hanzoai/o11y, 353 ops), and a second handler registered at an
+// address deliberately. Refusing those is refusing a program that is correct,
+// and the flat rule could not tell them apart from a genuine collision because
+// nothing in the program said which it was.
+//
+// [App.Shadow] is what says it, and it splits the flat rule into two narrower
+// ones that between them still refuse every accident:
+//
+//   - EXACTLY ONE claim may decline to yield, and it must be the FIRST. The
+//     router answers with the first registration and the rest chain behind it,
+//     so this is the rule that makes "order is the contract" a fact about the
+//     program rather than a comment above it. Two claims that both mean to
+//     answer is the accidental collision, and is still refused, in the same
+//     words as before.
+//   - AT MOST ONE claim may carry an op. A document keys an operation on its
+//     method and its path; there is one slot there, and two ops asking for it
+//     would publish one and silently drop the other.
+//
+// A single claim, shadowed or not, is always fine: one table mounted into a host
+// that HAS an implementation is shadowed and into one that does not is the
+// answer, and that is what lets it be one table.
+//
+// methodAll claims every method at its address, so it is folded into each
+// concrete method's list — in walk order, because the order is the whole point.
+func addressErrors(held map[string][]addrClaim, order []string) []error {
+	var errs []error
+	for _, path := range order {
+		all := held[path]
+		// One message per rule per offending pair of registrations, not per method
+		// a catch-all happens to collide at. Keyed on the rule too, because the
+		// two rules say different things and a pair can break both.
+		type pair struct {
+			rule string
+			a, b int
+		}
+		said := map[pair]bool{}
+		once := func(rule string, a, b addrClaim, err error) {
+			k := pair{rule, a.n, b.n}
+			if said[k] {
+				return
+			}
+			said[k] = true
+			errs = append(errs, err)
+		}
+		// The concrete methods claimed here, in first-appearance order, so the
+		// diagnostics come out in program order rather than map order.
+		var methods []string
+		seen := map[string]bool{}
+		for _, c := range all {
+			if c.method == methodAll || seen[c.method] {
+				continue
+			}
+			seen[c.method] = true
+			methods = append(methods, c.method)
+		}
+		if len(methods) == 0 {
+			methods = []string{methodAll} // only catch-alls answer here
+		}
+		for _, m := range methods {
+			var at []addrClaim
+			for _, c := range all {
+				if c.method == m || c.method == methodAll {
+					at = append(at, c)
+				}
+			}
+			if len(at) < 2 {
+				continue
+			}
+			addressRules(m, path, at, once)
+		}
+	}
+	return errs
+}
+
+// addressRules applies the two rules to the claims at ONE method and path, all
+// of which are already known to number more than one. It reports through once
+// so that N claims produce N-1 messages — every party named, none twice.
+func addressRules(method, path string, at []addrClaim, once func(rule string, a, b addrClaim, err error)) {
+	// Rule one: exactly one answerer, and it goes first.
+	var answerers []addrClaim
+	for _, c := range at {
+		if !c.shadow {
+			answerers = append(answerers, c)
+		}
+	}
+	switch {
+	case len(answerers) == 0:
+		for _, c := range at[1:] {
+			once("yield", at[0], c, fmt.Errorf("zip: %s %s: every registration here yields the address, so none of "+
+				"them answers it — %s and %s.\n\tOne registration has to be the handler: drop Shadow from "+
+				"the one that serves this address",
+				method, path, at[0].where(), c.where()))
+		}
+	case len(answerers) > 1:
+		// The accident the check has always existed for, reported in the words
+		// it has always used.
+		for _, c := range answerers[1:] {
+			once("answer", answerers[0], c, fmt.Errorf("zip: %s %s: declared by %q at %s (via %s) and by %q at %s (via %s)",
+				method, path, answerers[0].by, answerers[0].site, answerers[0].via, c.by, c.site, c.via))
+		}
+	case at[0].shadow:
+		once("order", at[0], answerers[0], fmt.Errorf("zip: %s %s: %s yields this address, but it is registered FIRST, "+
+			"so it is what answers — the handler it yields to, %s, is registered behind it and is never "+
+			"reached.\n\tOrder is the contract: compose the handler that ANSWERS ahead of the declaration "+
+			"that names it",
+			method, path, at[0].where(), answerers[0].where()))
+	}
+
+	// Rule two: one document slot.
+	var typed []addrClaim
+	for _, c := range at {
+		if c.typed {
+			typed = append(typed, c)
+		}
+	}
+	if len(typed) < 2 {
+		return
+	}
+	for _, c := range typed[1:] {
+		once("slot", typed[0], c, fmt.Errorf("zip: %s %s: two typed ops claim this address — %s and %s.\n\t"+
+			"A document holds ONE operation per method and path, so the second would be published nowhere; "+
+			"Shadow lets a declaration yield the address to another HANDLER, not to another op",
+			method, path, typed[0].where(), c.where()))
+	}
 }
 
 // derived is validation stage TWO: everything decidable only AFTER identities
@@ -487,9 +629,22 @@ func derived(occ []occurrence) error {
 		if !ok || r.op == nil {
 			continue
 		}
-		id := occurrenceID(o.ctx.prefix, opName(r.op))
+		id := occurrenceID(o.ctx.prefix, r.op)
 		mine := claim{path: o.abs(r.path), via: o.ctx.trail.String(), site: o.site}
 		if prev, dup := ids[id]; dup {
+			// A DECLARED id gets its own sentence, because the fix is different
+			// and because this is the case composition used to hide: the id was
+			// qualified by each occurrence's prefix, so the collision never
+			// surfaced and the author's published name was rewritten instead.
+			// See [occurrenceID].
+			if r.op.OperationID == id {
+				errs = append(errs, fmt.Errorf("zip: operation id %q is declared once and occurs twice: %s (via %s) and %s at %s (via %s) — "+
+					"a declared id is a published name (SDK method, operationId, MCP tool, command) and survives composition verbatim, "+
+					"so one declaration cannot be two operations.\n\tEither drop WithOperationID and take the shape-derived id, which "+
+					"qualifies each occurrence by its prefix, or include the definition once",
+					id, prev.path, prev.via, mine.path, mine.site, mine.via))
+				continue
+			}
 			errs = append(errs, fmt.Errorf("zip: operation id %q is derived twice: %s (via %s) and %s at %s (via %s) — "+
 				"an id is a published SDK method name, so two operations cannot share one",
 				id, prev.path, prev.via, mine.path, mine.site, mine.via))
@@ -558,28 +713,62 @@ func nameOr(a *App, fallback string) string {
 	return fallback
 }
 
-// occurrenceID is an op's id AT ONE OCCURRENCE: the declared id qualified by the
-// prefix that occurrence answers under.
+// occurrenceID is an op's id AT ONE OCCURRENCE, and it asks ONE question first:
+// did the author WRITE the id down?
 //
-// This is the landmine the lazy model steps on and the eager one never reached.
-// A definition included twice declares ONE id and produces TWO operations, and
-// an OpenAPI document with two operations under one operationId is invalid.
-// The qualification must therefore be deterministic and derived from the
-// composition's SHAPE:
+// # A declared id is the contract, and composition is not allowed to edit it
 //
-//	/v1/billing    + listInvoices -> v1.billing.listInvoices
-//	/admin/billing + listInvoices -> admin.billing.listInvoices
+// [WithOperationID] is a published name. It is the SDK method, the OpenAPI
+// operationId, the MCP tool an agent has cached, the CLI command a script
+// spells and the key the by-name call plane resolves. An author writing
+// `WithOperationID("CreateRole")` has made a promise to every one of those
+// surfaces, and that promise cannot be conditional on where a HOST later chose
+// to include the definition — a service embedded at /v1/o11y and the same
+// service deployed standalone publish the same operations, because they ARE the
+// same operations.
+//
+// Qualifying it anyway is what this function used to do, and the cost was
+// exact: including hanzoai/o11y under /v1/o11y renamed all 353 of its published
+// ops to v1.o11y.<id> — every tool, every operationId, every command, every
+// generated method — as a silent side effect of a wiring line. A declaration
+// silently overridden by the shape around it is not a declaration.
+//
+// So a declared id survives composition VERBATIM.
+//
+// # An UNDECLARED id is still qualified, and must be
+//
+// Without a declaration there is no promise to keep, and there IS a real
+// ambiguity to resolve: a definition included twice produces TWO operations
+// from one registration, and an OpenAPI document with two operations under one
+// operationId is invalid. So the default id — method+path, see [defaultOpID] —
+// is qualified by the prefix its occurrence answers under, deterministically and
+// from the composition's SHAPE:
+//
+//	/v1/billing    + get_invoices_id -> v1.billing.get_invoices_id
+//	/admin/billing + get_invoices_id -> admin.billing.get_invoices_id
 //
 // Never positional. "First occurrence wins" and "append -2" both make the
 // generated output a function of MOUNT ORDER, so reordering two Use calls in a
-// wiring file becomes a breaking change in every published SDK. This rule binds
-// every downstream artifact — document, tool name, command, call-plane name —
-// because they all read the same id.
+// wiring file becomes a breaking change in every published SDK.
 //
-// An occurrence at the root prefix is unqualified, so an app that composes
-// nothing publishes exactly the ids it declared, byte for byte.
-func occurrenceID(prefix, id string) string {
+// # The case the two rules meet
+//
+// A definition that DECLARES an id and is included TWICE is now a refused
+// program rather than a silent rename: one global name cannot be two
+// operations, and the qualification that used to paper over it was the very
+// override this rule exists to stop. [derived] reports it, names both
+// occurrences, and says what to do — drop the declaration and take the
+// shape-derived id, or include the definition once. The author chooses; zip
+// does not choose for them behind their back.
+//
+// An occurrence at the root prefix is unqualified either way, so an app that
+// composes nothing publishes exactly the ids it declared, byte for byte.
+func occurrenceID(prefix string, op *registeredOp) string {
+	if op.OperationID != "" {
+		return op.OperationID // declared: composition does not get a vote
+	}
 	d := dotted(prefix)
+	id := defaultOpID(op.Method, op.Path)
 	if d == "" {
 		return id
 	}

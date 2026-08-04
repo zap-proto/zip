@@ -125,7 +125,7 @@ func composeOps(occ []occurrence) []*registeredOp {
 		}
 		c := *r.op // a copy: composing never edits what a definition says about itself
 		c.Path = o.abs(r.path)
-		c.OperationID = occurrenceID(o.ctx.prefix, opName(r.op))
+		c.OperationID = occurrenceID(o.ctx.prefix, r.op)
 		if c.Origin == "" {
 			// Who DECLARED the type — a property of the code, never of where it
 			// was deployed. An op that already names its declarer keeps that

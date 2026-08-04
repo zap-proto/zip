@@ -15,7 +15,7 @@ import (
 // different questions.
 func TestToolNames_RideTheOperationIDRule(t *testing.T) {
 	// Half one: a definition's OWN typed ops, included twice.
-	billing := billingApp() // one op, declared id "listInvoices"
+	billing := unnamedApp() // one op, id UNDECLARED — see unnamedApp
 	host := quiet("host")
 	host.Group("/v1").Use(billing)
 	host.Group("/admin").Use(billing)
@@ -32,7 +32,7 @@ func TestToolNames_RideTheOperationIDRule(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("two occurrences produced %d tool names, want 2: %v", len(got), got)
 	}
-	for _, want := range []string{"v1.listInvoices", "admin.listInvoices"} {
+	for _, want := range []string{"v1.get_invoices_id", "admin.get_invoices_id"} {
 		if !names[want] {
 			t.Errorf("tool name %q missing — own-op tool names must be the occurrence's operation id: %v", want, got)
 		}
@@ -83,7 +83,7 @@ func TestToolNames_OnePluginDefinitionIsOneTool(t *testing.T) {
 
 func TestToolNames_AreNotPositional(t *testing.T) {
 	namesFor := func(a, b string) []string {
-		billing := billingApp()
+		billing := unnamedApp()
 		host := quiet("host")
 		host.Group(a).Use(billing)
 		host.Group(b).Use(billing)

@@ -104,7 +104,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 				prefix, rt.Method, rt.Pattern)
 		}
 		if rt.Op == "" {
-			r.method(rt.Method, rt.Pattern, []Handler{proxy})
+			r.method(rt.Method, rt.Pattern, []Handler{proxy}, r.shadow)
 			continue
 		}
 		r.addRoute(here(1), route{
