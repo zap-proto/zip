@@ -30,11 +30,35 @@ type invoiceOut struct {
 }
 
 // billingApp is one DEFINITION, written once, included wherever a test needs it.
+// Its op DECLARES its id, which is the shape every real service in the estate
+// has — and a declared id survives composition verbatim (see [occurrenceID]),
+// so this definition may be included exactly ONCE in any one program.
 func billingApp() *App {
 	b := quiet("billing")
 	Get(b, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 		return &invoiceOut{ID: in.ID, Total: 42}, nil
 	}, WithOperationID("listInvoices"))
+	return b
+}
+
+// unnamedApp is the same definition with its op's id left UNDECLARED, and it is
+// what the diamond tests need.
+//
+// The two fixtures are not a duplication, they are the two halves of one rule.
+// An id the author WROTE DOWN is a published name and composition may not edit
+// it, so a definition carrying one cannot occur twice — [derived] refuses that,
+// by design. An id nobody wrote down carries no promise, so the walk derives it
+// from the occurrence's prefix, and THAT is what makes one definition includable
+// at two addresses. Every test below about the diamond is a test about the
+// second half, and must use a definition that has no name to keep.
+//
+// Its derived id is defaultOpID("GET", "/invoices/:id") = "get_invoices_id",
+// qualified per occurrence: v1.get_invoices_id, admin.get_invoices_id.
+func unnamedApp() *App {
+	b := quiet("billing")
+	Get(b, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+		return &invoiceOut{ID: in.ID, Total: 42}, nil
+	})
 	return b
 }
 
@@ -245,7 +269,7 @@ func TestLint_StagedCompositionIsReportedNotRefused(t *testing.T) {
 // mount order, so swapping two lines in a wiring file becomes a breaking change
 // in every published SDK.
 func TestDiamond_TwoOccurrencesTwoIdsOneType(t *testing.T) {
-	billing := billingApp() // ONE definition
+	billing := unnamedApp() // ONE definition, no declared id — see unnamedApp
 	root := quiet("cloud")
 	root.Group("/v1").Use(billing)
 	root.Group("/admin").Use(billing)
@@ -259,7 +283,7 @@ func TestDiamond_TwoOccurrencesTwoIdsOneType(t *testing.T) {
 		ids = append(ids, op.OperationID)
 		paths = append(paths, op.Path)
 	}
-	wantIDs := []string{"v1.listInvoices", "admin.listInvoices"}
+	wantIDs := []string{"v1.get_invoices_id", "admin.get_invoices_id"}
 	wantPaths := []string{"/v1/invoices/:id", "/admin/invoices/:id"}
 	if strings.Join(ids, ",") != strings.Join(wantIDs, ",") {
 		t.Errorf("operation ids = %v, want %v", ids, wantIDs)
@@ -296,7 +320,7 @@ func TestDiamond_TwoOccurrencesTwoIdsOneType(t *testing.T) {
 // SDK break.
 func TestDiamond_IdsDoNotDependOnMountOrder(t *testing.T) {
 	idsFor := func(first, second string) map[string]bool {
-		billing := billingApp()
+		billing := unnamedApp()
 		root := quiet("cloud")
 		root.Group(first).Use(billing)
 		root.Group(second).Use(billing)
@@ -359,7 +383,7 @@ func TestCycle_SelfInclusion(t *testing.T) {
 // definition included twice as SIBLINGS is the diamond, which is legal and is
 // the whole point; only a definition included under ITSELF is a cycle.
 func TestDiamond_IsNotACycle(t *testing.T) {
-	shared := billingApp()
+	shared := unnamedApp() // no declared id, so it may occur twice
 	root := quiet("root")
 	root.Group("/v1").Use(shared)
 	root.Group("/admin").Use(shared)
@@ -669,8 +693,8 @@ func TestInert_TheServedAppsMiddlewareIsGlobalAndSoIsNeverInert(t *testing.T) {
 // sync.Once and shared.
 func TestRegistry_RaceCleanOnALiveGeneration(t *testing.T) {
 	root := quiet("root")
-	root.Group("/v1").Use(billingApp())
-	root.Group("/admin").Use(billingApp())
+	root.Group("/v1").Use(unnamedApp())
+	root.Group("/admin").Use(unnamedApp())
 	if err := build(root); err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -800,13 +824,19 @@ func TestCompose_ADefinitionsOwnDocumentIsUnchanged(t *testing.T) {
 	if after := jsonOf(t, solo.OpenAPISpec()); after != before {
 		t.Fatalf("being composed edited the definition's own document:\n before %s\n after  %s", before, after)
 	}
-	// Concretely: its op is still listInvoices at /invoices/{id}, not the
-	// v1.listInvoices the HOST publishes for its occurrence.
+	// Concretely: its op is still listInvoices at /invoices/{id} — and so is
+	// the HOST's occurrence of it. A DECLARED id is a published name and
+	// composition does not get a vote (see [occurrenceID]); only the ADDRESS is
+	// the host's to compose, and /v1/invoices/{id} is where it now answers.
 	if id := solo.Registry()[0].OperationID; id != "listInvoices" {
 		t.Errorf("the definition's own op id became %q", id)
 	}
-	if id := host.Registry()[0].OperationID; id != "v1.listInvoices" {
-		t.Errorf("the host's occurrence id = %q, want v1.listInvoices", id)
+	if id := host.Registry()[0].OperationID; id != "listInvoices" {
+		t.Errorf("the host's occurrence id = %q, want listInvoices — a declared id "+
+			"survives composition verbatim", id)
+	}
+	if p := host.Registry()[0].Path; p != "/v1/invoices/:id" {
+		t.Errorf("the host's occurrence path = %q, want /v1/invoices/:id", p)
 	}
 }
 

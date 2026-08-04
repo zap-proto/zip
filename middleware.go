@@ -57,6 +57,11 @@ func Chain(mw ...Middleware) Middleware {
 type wrapRouter struct {
 	inner *App
 	wrap  Middleware
+	// shadow is [App.Shadow]'s scope: every route registered through this
+	// decorator YIELDS its address. Carried here rather than on inner for the
+	// same reason wrap is — the decorator is the scope, and inner is an App that
+	// other scopes and the bare receiver also register on.
+	shadow bool
 }
 
 // Use accepts middleware, which it wraps like any other leaf. It REFUSES a
@@ -78,43 +83,49 @@ func (w *wrapRouter) Use(cs ...Component) Router {
 }
 
 func (w *wrapRouter) Get(p string, hs ...Handler) Router {
-	w.inner.Get(p, w.wrapChain(hs)...)
+	w.inner.method("GET", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) Post(p string, hs ...Handler) Router {
-	w.inner.Post(p, w.wrapChain(hs)...)
+	w.inner.method("POST", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) Put(p string, hs ...Handler) Router {
-	w.inner.Put(p, w.wrapChain(hs)...)
+	w.inner.method("PUT", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) Patch(p string, hs ...Handler) Router {
-	w.inner.Patch(p, w.wrapChain(hs)...)
+	w.inner.method("PATCH", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) Delete(p string, hs ...Handler) Router {
-	w.inner.Delete(p, w.wrapChain(hs)...)
+	w.inner.method("DELETE", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) Head(p string, hs ...Handler) Router {
-	w.inner.Head(p, w.wrapChain(hs)...)
+	w.inner.method("HEAD", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) Options(p string, hs ...Handler) Router {
-	w.inner.Options(p, w.wrapChain(hs)...)
+	w.inner.method("OPTIONS", p, w.wrapChain(hs), w.yields())
 	return w
 }
 func (w *wrapRouter) All(p string, hs ...Handler) Router {
-	w.inner.All(p, w.wrapChain(hs)...)
+	w.inner.method(methodAll, p, w.wrapChain(hs), w.yields())
 	return w
 }
+
+// yields is the decorator's scope OR the App's own, because a decorator of a
+// shadowed App is still shadowed — scopes compose, they do not replace.
+func (w *wrapRouter) yields() bool { return w.shadow || w.inner.shadow }
 
 // wrapChain wraps the FINAL handler (the terminal) with w.wrap and passes any
 // preceding middleware through untouched — With() composes around the leaf,
 // never around the chain's middleware.
 func (w *wrapRouter) wrapChain(hs []Handler) []Handler {
-	if len(hs) == 0 {
+	if len(hs) == 0 || w.wrap == nil {
+		// nil wrap is a Shadow-only scope: it yields addresses and composes
+		// nothing around them.
 		return hs
 	}
 	out := append([]Handler(nil), hs...)
@@ -129,6 +140,10 @@ func (w *wrapRouter) wrapChain(hs []Handler) []Handler {
 // why OpTarget is implementable from outside this package at all.
 func (w *wrapRouter) OpScope() OpScope {
 	s := w.inner.OpScope()
+	s.Shadow = w.yields()
+	if w.wrap == nil {
+		return s
+	}
 	if s.Middleware == nil {
 		s.Middleware = w.wrap
 		return s
@@ -144,6 +159,14 @@ func (w *wrapRouter) OpScope() OpScope {
 // drop the chain the way a decorator that returned a bare group would.
 func (w *wrapRouter) Group(prefix string, handlers ...Handler) Router {
 	g := w.inner.group(here(1), prefix, handlers...)
+	// A group of a shadowed scope is a shadowed group, and every leaf beneath it
+	// inherits that — including leaves registered on the returned App later,
+	// which is what a SCOPE has to mean and is why this cannot be a decorator
+	// that only sees the calls made through it.
+	g.shadow = g.shadow || w.shadow
+	if w.wrap == nil {
+		return g
+	}
 	if g.wrap == nil {
 		g.wrap = w.wrap
 	} else {

@@ -532,7 +532,7 @@ func TestRed_CleanDescendAncestorAliasing(t *testing.T) {
 // TestRed_CleanComposeOpsDoesNotEditTheDefinition: a definition's own document
 // must be unchanged by being composed, at any number of prefixes.
 func TestRed_CleanComposeOpsDoesNotEditTheDefinition(t *testing.T) {
-	billing := billingApp()
+	billing := unnamedApp() // no declared id, so it may occur twice
 	own := billing.Registry()
 	if len(own) != 1 {
 		t.Fatalf("setup: %d ops", len(own))

@@ -102,7 +102,7 @@ func TestWire_GroupIsLexicalScope(t *testing.T) {
 // answer. The router keys on the occurrence, so two inclusions are two route
 // sets, not one that the second inclusion silently lost.
 func TestWire_DiamondServesBothOccurrences(t *testing.T) {
-	billing := billingApp()
+	billing := unnamedApp() // no declared id, so it may occur twice
 	root := quiet("cloud")
 	root.Group("/v1").Use(billing)
 	root.Group("/admin").Use(billing)

@@ -1016,6 +1016,80 @@ field, as in OpenAPI's summary) and lands in every backend alike. One
 source. Prose written anywhere else about this API is the drift bug this
 language exists to kill.
 
+## An id the author wrote down, and an address the author yielded (v1.24.2)
+
+Two rules, one theme: **a declaration the programmer wrote is not something
+composition gets to overrule.** Both were reported as zip defects by consumers,
+and both are.
+
+### A declared `operationId` survives composition, verbatim
+
+`occurrenceID` used to qualify EVERY id with its occurrence's prefix, including
+an id the author had written with `WithOperationID`. Including
+`github.com/hanzoai/o11y` under `/v1/o11y` therefore renamed all 353 of its
+published ops to `v1.o11y.<id>` — every MCP tool an agent had cached, every
+OpenAPI `operationId`, every CLI command, every generated SDK method — as a
+silent side effect of one wiring line. The table at "Six decisions" above has
+said `operationIds | untouched` since Graft; the walk had stopped obeying it.
+
+The rule now asks one question first: did the author write the id down?
+
+| | id | reason |
+|---|---|---|
+| declared (`WithOperationID`) | **verbatim** | it is a published name, and a service embedded at a prefix publishes the same operations it publishes standalone |
+| undeclared | `<prefix>.<method+path>` | there is no promise to keep and there IS an ambiguity: one definition included twice is two operations, and a document cannot hold two under one id |
+
+Where they meet — a definition that DECLARES an id and occurs TWICE — is a
+refused program, named by `derived` with both occurrences and both fixes (drop
+the declaration and take the shape-derived id, or include the definition once).
+Silently renaming was the old answer, and renaming a published name to resolve
+an ambiguity the author never saw is the defect, not the fix.
+
+### `Shadow` — this op is in the document, that handler answers the address
+
+Two registrations at one address is a refused program, and that refusal is
+right. It also refused two shapes the estate writes ON PURPOSE:
+
+- a service installing its own published TABLE of ops onto the router its
+  implementation already answers on, so the operations reach the document, MCP,
+  the CLI and the SDK (hanzoai/o11y: 353 ops, `publish()` after the service's own
+  routes — "order is the contract");
+- a second handler at an address, declared, to pin what the router does with two
+  (hanzoai/cloud's openapi generator test).
+
+`App.Shadow() Router` is how a registration says it YIELDS its address. Scoped
+like `With`, and for the same reason — a group is an App, so
+`app.Shadow().Group(p)` carries the property onto the group and every leaf
+beneath it inherits it, including leaves registered later:
+
+    published := app.Shadow().Group("/v1/o11y")
+    zip.Post(published, "/roles", createRole, zip.WithOperationID("CreateRole"))
+
+Nothing about the wire, the registry or any projection changes — the route is
+installed exactly as before and fiber chains it behind whatever came first. Only
+the conflict check changes, and it becomes **two narrower rules rather than
+none**:
+
+- **exactly one claim at an address may decline to yield, and it must be the
+  FIRST.** The router answers with the first registration, so a shadow ahead of
+  what it yields to would stand in front of it — "order is the contract" is now
+  checked rather than stated. Two claims that both mean to answer is still the
+  accidental collision, refused in the same words.
+- **at most one claim at an address may carry an op.** A document keys an
+  operation on method and path; there is one slot, and two ops asking for it
+  would publish one and drop the other. Shadow yields an address to another
+  HANDLER, never a document slot to another op.
+
+A shadow that is the only claim at its address simply answers. That is what lets
+ONE table be mounted into a host that has an implementation and into one that
+does not, with nothing to keep in sync.
+
+`Shadow` is on the concrete `*App`, deliberately NOT on the `Router` interface:
+`Router` is implemented from outside this package (hanzoai/cloud's `scope`,
+hanzoai/commerce's `mintRouter`) method by method, and widening the interface is
+what stalled v1.19 adoption once already. Wanting the scope means holding an
+`*App` — the same argument that moved `Fiber()` off the interface.
+
 ## Validation errors
 
 Accumulate, with trails: conflicts, cycles, inert middleware,
