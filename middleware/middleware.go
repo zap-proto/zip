@@ -16,8 +16,6 @@ import (
 	"strings"
 	"time"
 
-	luxlog "github.com/luxfi/log"
-
 	"github.com/zap-proto/zip"
 )
 
@@ -59,44 +57,17 @@ func RequestID() zip.Handler {
 	}
 }
 
-// Logger logs each request with method, path, status, duration. Adds
-// request_id / org / user to the request-scoped logger via SetLog.
-func Logger(base luxlog.Logger) zip.Handler {
-	return func(c *zip.Ctx) error {
-		start := time.Now()
-
-		fields := []any{
-			"request_id", c.RequestID(),
-			"method", c.Method(),
-			"path", c.Path(),
-		}
-		if org := c.Org(); org != "" {
-			fields = append(fields, "org", org)
-		}
-		if user := c.User(); user != "" {
-			fields = append(fields, "user", user)
-		}
-		scoped := base.New(fields...)
-		c.SetLog(scoped)
-
-		err := c.Continue()
-		dur := time.Since(start)
-		status := c.Fiber().Response().StatusCode()
-
-		evt := []any{
-			"status", status,
-			"dur_ms", dur.Milliseconds(),
-		}
-		if err != nil {
-			scoped.Warn("request error", append(evt, "err", err.Error())...)
-		} else if status >= 500 {
-			scoped.Error("request 5xx", evt...)
-		} else {
-			scoped.Info("request", evt...)
-		}
-		return err
-	}
-}
+// The request log line and the o11y sink used to live here, as Logger(base)
+// and Telemetry(sink). Both are gone, and neither was replaced by anything a
+// caller writes: zip logs every request, measures it, and carries trace
+// context because the app is serving. See zip.Telemetry.
+//
+// They were middleware, and middleware is opt-in. That is the right shape for a
+// policy — a rate limit, a CORS rule — and the wrong shape for the report a
+// program makes about itself, because opt-in telemetry is telemetry some binary
+// does not have, and which one is always discovered during the incident where
+// it was needed. Moving it into the framework did not add a feature; it removed
+// the possibility of an app that lacks it.
 
 // Timeout sets a per-request deadline via context.WithTimeout. Handlers
 // that respect ctx will be cancelled when it expires.

@@ -1,10 +1,9 @@
 package zip
 
 import (
-	"strconv"
 	"strings"
-	"time"
 
+	"github.com/luxfi/metric"
 	fiber "github.com/zap-proto/fiber/v3"
 )
 
@@ -96,44 +95,36 @@ func (a *App) Ops() *App {
 			return fc.SendString(a.metrics())
 		})
 		ops.sibling = true // a sibling has no siblings of its own
+		// A sibling reports into the PRIMARY's instruments, because the two are
+		// one process and a scrape of that process must show everything it
+		// answered. A sibling with a registry of its own would measure faithfully
+		// into a registry nothing gathers — instrumented and invisible, which is
+		// the failure this whole file exists to end.
+		ops.telemetry = a.telemetry
 		a.ops = ops
 	})
 	return a.ops
 }
 
-// metrics is what zip actually knows about this process, in Prometheus text.
-// Every value is read from a live structure — the op registry, the router, the
-// plugin table, the process's own start — so none of it can be stale and none of
-// it is a placeholder. A plugin's own metrics are its own to add.
+// metrics is what this process measured, in Prometheus text: zip's own state
+// and the RED numbers for every request the app answered.
+//
+// It renders the app's registry and nothing else. It used to assemble the text
+// by hand from live structures, which was honest as far as it went but meant
+// the scrape surface and the exported batch were two renderings of two
+// different sources — so a number could appear on /metrics and never reach
+// o11y, or disagree with the copy that did. One registry, gathered one way,
+// rendered by whoever is asking. A plugin's own metrics are its own to add.
 func (a *App) metrics() string {
-	var b strings.Builder
-	b.WriteString("# HELP zip_up 1 when the app's listeners are bound.\n# TYPE zip_up gauge\nzip_up ")
-	if a.listening.Load() > 0 {
-		b.WriteString("1\n")
-	} else {
-		b.WriteString("0\n")
+	families, err := a.gather()
+	if err != nil {
+		a.logger.Error("zip metrics gather failed", "err", err)
+		return ""
 	}
-	b.WriteString("# HELP zip_uptime_seconds Seconds since the app was constructed.\n")
-	b.WriteString("# TYPE zip_uptime_seconds gauge\nzip_uptime_seconds ")
-	b.WriteString(strconv.FormatFloat(time.Since(a.born).Seconds(), 'f', 3, 64))
-	b.WriteString("\n# HELP zip_ops Registered typed operations.\n# TYPE zip_ops gauge\nzip_ops ")
-	b.WriteString(strconv.Itoa(len(a.Registry())))
-	b.WriteString("\n# HELP zip_routes Registered routes.\n# TYPE zip_routes gauge\nzip_routes ")
-	b.WriteString(strconv.Itoa(len(a.router().GetRoutes(false))))
-	b.WriteString("\n")
-	if st := a.Plugins(); len(st) > 0 {
-		b.WriteString("# HELP zip_plugin_running 1 when a composed plugin has a live instance.\n")
-		b.WriteString("# TYPE zip_plugin_running gauge\n")
-		for _, s := range st {
-			b.WriteString(`zip_plugin_running{name="`)
-			b.WriteString(s.Name)
-			b.WriteString(`"} `)
-			if s.Running {
-				b.WriteString("1\n")
-			} else {
-				b.WriteString("0\n")
-			}
-		}
+	var b strings.Builder
+	if err := metric.EncodeText(&b, families); err != nil {
+		a.logger.Error("zip metrics encode failed", "err", err)
+		return ""
 	}
 	return b.String()
 }

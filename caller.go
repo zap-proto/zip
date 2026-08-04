@@ -147,6 +147,16 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 				req.Header.SetBytesV(h, v)
 			}
 		}
+		// Trace context travels too, and it is listed apart from the identity
+		// headers because it is not a claim about anyone. Identity is the
+		// gateway's assertion, forwarded because a callee has to know who it is
+		// acting for; [HeaderTrace] is this hop's position in a trace, forwarded
+		// so the next hop can say it came from here. Folding it into the identity
+		// list would make "what may a caller assert about itself" a question with
+		// two different answers.
+		if v := rc.Request.Header.Peek(HeaderTrace); len(v) > 0 {
+			req.Header.SetBytesV(HeaderTrace, v)
+		}
 		return
 	}
 	stated, ok := ctx.Value(statedKey{}).(Caller)

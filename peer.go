@@ -37,6 +37,10 @@ func (a *App) Peer() *App {
 			MCP:     MCPConfig{Disabled: true},
 		})
 		p.sibling = true
+		// The peer surface reports into the primary's instruments: a call a peer
+		// makes is work this process did, and it belongs in the same numbers as
+		// the work the edge asked for. See [App.Ops] for the same reasoning.
+		p.telemetry = a.telemetry
 		a.peer = p
 	})
 	return a.peer

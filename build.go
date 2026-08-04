@@ -169,6 +169,14 @@ func composeOps(occ []occurrence) []*registeredOp {
 //     definition does not answer for addresses it does not declare.
 func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
 	f := fiber.New(a.fiberConfig())
+	// The report goes on FIRST, so it is outermost: it observes every request
+	// this router answers, including the ones that match no route and the ones a
+	// later middleware refuses. An app gets it by being built, which is the whole
+	// of what "no per-app code" means — there is no call to forget and no order
+	// to get wrong. See [App.report].
+	if h := a.telemetryHandler(); h != nil {
+		f.Use(h)
+	}
 	for _, o := range occ {
 		switch o.kind() {
 		case kindMiddleware:
