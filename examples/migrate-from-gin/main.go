@@ -54,7 +54,7 @@ type CreateUserIn struct {
 
 func main() {
 	app := zip.New(zip.Config{AppName: "migrate-from-gin"})
-	app.Use(middleware.Recover(), middleware.RequestID(), middleware.Logger(app.Logger()))
+	app.Use(middleware.Recover(), middleware.RequestID())
 
 	// STEP 1 — the mechanical port. The same shape as the gin handler, running
 	// on zip after one edit, and invisible to every projection until step 2.

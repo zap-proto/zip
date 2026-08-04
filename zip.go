@@ -171,6 +171,12 @@ type Config struct {
 	// same op registry that feeds OpenAPI), served over every transport. Set
 	// MCP.Disabled to suppress.
 	MCP MCPConfig
+
+	// Telemetry says where this app's report goes and whether it makes one. The
+	// report itself is not configured: every zip app logs every request,
+	// measures it, and carries trace context, because it is serving. See
+	// [Telemetry].
+	Telemetry Telemetry
 }
 
 // App is the zip application. It wraps *fiber.App and exposes the zip
@@ -269,6 +275,12 @@ type App struct {
 	listening atomic.Int32
 	born      time.Time
 
+	// This app's instruments. Built once with the app and never rebuilt: a
+	// generation swap re-installs the request boundary, and counters that reset
+	// on every composition change would read as a restart to anything watching
+	// the rate.
+	telemetry *telemetry
+
 	// controls is zip's OWN routes, keyed "METHOD path" — the openapi document,
 	// the docs page, the MCP door, the op plane, this app's declaration. Written
 	// only by App.control, read only by Declaration, so a control route cannot
@@ -309,10 +321,11 @@ func newApp(cfg Config) *App {
 		cfg.ServerHeader = "zip"
 	}
 	return &App{
-		cfg:    cfg,
-		logger: cfg.Logger,
-		loader: cfg.Loader,
-		born:   time.Now(),
+		cfg:       cfg,
+		logger:    cfg.Logger,
+		loader:    cfg.Loader,
+		born:      time.Now(),
+		telemetry: newTelemetry(cfg),
 	}
 }
 
