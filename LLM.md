@@ -1016,11 +1016,16 @@ field, as in OpenAPI's summary) and lands in every backend alike. One
 source. Prose written anywhere else about this API is the drift bug this
 language exists to kill.
 
-## An id the author wrote down, and an address the author yielded (v1.24.2)
+## An id the author wrote down (v1.24.2), and the verb that was not needed (v1.24.3)
 
-Two rules, one theme: **a declaration the programmer wrote is not something
-composition gets to overrule.** Both were reported as zip defects by consumers,
-and both are.
+**A declaration the programmer wrote is not something composition gets to
+overrule** — that rule stands, and it is what fixed the `operationId` defect.
+
+v1.24.2 applied the same reasoning to ADDRESSES and got a verb out of it,
+`App.Shadow()`. That was wrong, and v1.24.3 removed it: an address answered by
+one registration and declared by another is a braided program, and the answer to
+a braid is to unbraid it, not to give the framework a verb that holds the two
+ends together. `Use` and `Group` are enough.
 
 ### A declared `operationId` survives composition, verbatim
 
@@ -1045,50 +1050,33 @@ the declaration and take the shape-derived id, or include the definition once).
 Silently renaming was the old answer, and renaming a published name to resolve
 an ambiguity the author never saw is the defect, not the fix.
 
-### `Shadow` — this op is in the document, that handler answers the address
+### One address, one registration — and that registration both declares and answers
 
-Two registrations at one address is a refused program, and that refusal is
-right. It also refused two shapes the estate writes ON PURPOSE:
+Two registrations at one address is a refused program, and it stays refused. It
+has no escape hatch, no scope that declares the collision away, no verb.
 
-- a service installing its own published TABLE of ops onto the router its
-  implementation already answers on, so the operations reach the document, MCP,
-  the CLI and the SDK (hanzoai/o11y: 353 ops, `publish()` after the service's own
-  routes — "order is the contract");
-- a second handler at an address, declared, to pin what the router does with two
-  (hanzoai/cloud's openapi generator test).
+`App.Shadow()` was that verb for exactly one release (v1.24.2) and was removed
+in v1.24.3. It existed to let an op be DECLARED in one place and ANSWERED in
+another — a service publishing a table of its own operations onto the router its
+implementation already serves on, a test registering a second handler at an
+address on purpose. Both are the same braid: a declaration and the handler that
+satisfies it, written apart, with a framework verb holding them together.
 
-`App.Shadow() Router` is how a registration says it YIELDS its address. Scoped
-like `With`, and for the same reason — a group is an App, so
-`app.Shadow().Group(p)` carries the property onto the group and every leaf
-beneath it inherits it, including leaves registered later:
+The fix is to unbraid, not to accommodate. The declaration and the handler that
+answers it are ONE registration:
 
-    published := app.Shadow().Group("/v1/o11y")
-    zip.Post(published, "/roles", createRole, zip.WithOperationID("CreateRole"))
+    // no
+    svc.Post("/roles", createRoleHandler)          // answers
+    published.Post("/roles", createRoleOp)         // declares — a second claim
 
-Nothing about the wire, the registry or any projection changes — the route is
-installed exactly as before and fiber chains it behind whatever came first. Only
-the conflict check changes, and it becomes **two narrower rules rather than
-none**:
+    // yes
+    zip.Post(svc, "/roles", createRole, zip.WithOperationID("CreateRole"))
 
-- **exactly one claim at an address may decline to yield, and it must be the
-  FIRST.** The router answers with the first registration, so a shadow ahead of
-  what it yields to would stand in front of it — "order is the contract" is now
-  checked rather than stated. Two claims that both mean to answer is still the
-  accidental collision, refused in the same words.
-- **at most one claim at an address may carry an op.** A document keys an
-  operation on method and path; there is one slot, and two ops asking for it
-  would publish one and drop the other. Shadow yields an address to another
-  HANDLER, never a document slot to another op.
-
-A shadow that is the only claim at its address simply answers. That is what lets
-ONE table be mounted into a host that has an implementation and into one that
-does not, with nothing to keep in sync.
-
-`Shadow` is on the concrete `*App`, deliberately NOT on the `Router` interface:
-`Router` is implemented from outside this package (hanzoai/cloud's `scope`,
-hanzoai/commerce's `mintRouter`) method by method, and widening the interface is
-what stalled v1.19 adoption once already. Wanting the scope means holding an
-`*App` — the same argument that moved `Fiber()` off the interface.
+A typed registration IS both halves — the handler the router installs and the op
+the document, MCP tool list, CLI and SDK all read. There is nothing to keep in
+sync because there is only one thing. `Use` composes definitions and `Group`
+scopes them; between them any shape that needed `Shadow` is expressible, and
+each address still has exactly one claim on it.
 
 ## Validation errors
 

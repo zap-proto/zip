@@ -129,12 +129,6 @@ type route struct {
 	// and zip's own control routes. Exactly one of chain/serve is set.
 	serve fiber.Handler
 	op    *registeredOp
-	// shadow says this registration YIELDS its address: it is in the document,
-	// and a handler registered ahead of it is what answers. Declared at the
-	// registration site through [App.Shadow], never inferred — the whole value
-	// of the address check is that it cannot be talked out of an accident, and
-	// what separates an accident from this is that the author wrote it down.
-	shadow bool
 }
 
 // entry is one element of an App's program: a payload, and where it was
@@ -345,10 +339,6 @@ func (a *App) group(site callsite, prefix string, handlers ...Handler) *App {
 	// (wrapRouter.Group used to return another wrapRouter, so the chain rode
 	// down every level) — an auth seam quietly lost at the second nesting.
 	g.wrap = a.wrap
-	// Same reason as wrap: a group of a shadowed scope is a shadowed group, so
-	// the property rides down every level of nesting rather than stopping at the
-	// first.
-	g.shadow = a.shadow
 	for _, h := range handlers {
 		if h == nil {
 			continue

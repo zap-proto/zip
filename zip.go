@@ -212,13 +212,6 @@ type App struct {
 	// nothing for it.
 	wrap Middleware
 
-	// shadow is the scope property a [App.Shadow] installed on this App — every
-	// route registered here YIELDS its address. It rides on the App for the same
-	// reason wrap does: a group is an App, so a scope carried onto the group is a
-	// scope every leaf beneath it inherits, including leaves registered later.
-	// false for every ordinary App.
-	shadow bool
-
 	servers []Server // the running transport listeners, set by Listen
 
 	// authorizer, when set via Authorize, runs at every typed op's invoke seam
@@ -371,96 +364,32 @@ func (a *App) With(mw ...Middleware) Router {
 	return &wrapRouter{inner: a, wrap: Chain(mw...)}
 }
 
-// Shadow returns a Router whose registrations YIELD the address they claim:
-// they are in the DOCUMENT, and a handler registered elsewhere is what ANSWERS.
-//
-// # The fact that had no spelling
-//
-// Two registrations at one address is a refused program, and that refusal is
-// right — an address answered by a handler nobody meant to be reached is one of
-// the few defects a framework can catch for free. But it refused two DELIBERATE
-// shapes along with the accidents, and both are load-bearing in the estate:
-//
-//   - A service publishes a TABLE of its own operations — named inputs, named
-//     outputs, prose — and installs it on the same router its implementation
-//     already answers on, so the operations reach the document, the MCP tool
-//     list, the CLI and the SDK. hanzoai/o11y does exactly this for 353 ops.
-//     The table names the surface; it does not stand in front of it.
-//   - A test, or a staged cutover, registers a second handler at an address to
-//     pin what the router does with two.
-//
-// In both the author KNOWS. What was missing was a way to say so, and the
-// difference between a declared shadow and an accidental collision is precisely
-// that: whether it is written at the site. This is the same doctrine [Terminal]
-// already uses — a property the code declares, never a name the walk guesses.
-//
-// # What it means, exactly
-//
-//	published := app.Shadow().Group("/v1/o11y")
-//	zip.Post(published, "/roles", createRole, zip.WithOperationID("CreateRole"))
-//
-// The op is registered, walked, and projected like any other: same registry,
-// same document, same tool, same command, same call-plane entry, same route on
-// the router. Only the CONFLICT CHECK changes, and it changes into two narrower
-// rules rather than none (see [structural]):
-//
-//   - exactly ONE claim at an address may decline to yield, and it must be the
-//     FIRST. The router answers with the first registration, so a shadow ahead
-//     of what it yields to would stand in front of it — "order is the contract"
-//     becomes checked rather than merely stated. Two claims that both mean to
-//     answer is still the accidental collision, and is still refused.
-//   - at most one claim at an address may carry an OP, because a document keys
-//     an operation on its method and path and cannot hold two there.
-//
-// A shadow that is the only claim at its address simply answers, which is what
-// lets ONE table be mounted into a host that has an implementation and into one
-// that does not — the same 353 declarations, shadowed in the service binary and
-// serving in the composed one, with nothing to keep in sync.
-//
-// Scoped like [App.With], and for the same reason: a group is an App, so
-// Shadow().Group(p) carries the property onto the group and every leaf beneath
-// it inherits it, including leaves registered on the group later.
-func (a *App) Shadow() Router { return &wrapRouter{inner: a, shadow: true} }
-
 // Get / Post / Put / Patch / Delete / Head / Options / All register routes.
 // Chains are in wrapping order: middleware first, the final handler last.
 //
 // These still take ...Handler and always will. A bare closure written inline is
 // a *Handler by conversion, so nothing about route registration changes when
 // composition widens — [zip.H] is needed only at [App.Use].
-func (a *App) Get(path string, handlers ...Handler) Router {
-	return a.method("GET", path, handlers, a.shadow)
-}
-func (a *App) Post(path string, handlers ...Handler) Router {
-	return a.method("POST", path, handlers, a.shadow)
-}
-func (a *App) Put(path string, handlers ...Handler) Router {
-	return a.method("PUT", path, handlers, a.shadow)
-}
+func (a *App) Get(path string, handlers ...Handler) Router  { return a.method("GET", path, handlers) }
+func (a *App) Post(path string, handlers ...Handler) Router { return a.method("POST", path, handlers) }
+func (a *App) Put(path string, handlers ...Handler) Router  { return a.method("PUT", path, handlers) }
 func (a *App) Patch(path string, handlers ...Handler) Router {
-	return a.method("PATCH", path, handlers, a.shadow)
+	return a.method("PATCH", path, handlers)
 }
 func (a *App) Delete(path string, handlers ...Handler) Router {
-	return a.method("DELETE", path, handlers, a.shadow)
+	return a.method("DELETE", path, handlers)
 }
-func (a *App) Head(path string, handlers ...Handler) Router {
-	return a.method("HEAD", path, handlers, a.shadow)
-}
+func (a *App) Head(path string, handlers ...Handler) Router { return a.method("HEAD", path, handlers) }
 func (a *App) Options(path string, handlers ...Handler) Router {
-	return a.method("OPTIONS", path, handlers, a.shadow)
+	return a.method("OPTIONS", path, handlers)
 }
 
 // All registers a handler for any HTTP method.
 func (a *App) All(path string, handlers ...Handler) Router {
-	return a.method(methodAll, path, handlers, a.shadow)
+	return a.method(methodAll, path, handlers)
 }
 
-// method is the ONE place an untyped route is appended. shadow is a PARAMETER
-// rather than read off the receiver because a decorator registers through this
-// App while carrying its own scope — see [wrapRouter] — and reading a.shadow
-// there would drop the decorator's property silently, which is the exact hole
-// OpTarget's doc warns about for middleware.
-func (a *App) method(method, path string, handlers []Handler, shadow bool) Router {
+func (a *App) method(method, path string, handlers []Handler) Router {
 	// A scoped [App.With] lives on the App itself, so a leaf registered on this
 	// scope at any time is wrapped — including one registered after the scope was
 	// handed out. A decorator could only wrap what passed through it.
@@ -481,7 +410,7 @@ func (a *App) method(method, path string, handlers []Handler, shadow bool) Route
 	} else {
 		handlers = append([]Handler(nil), handlers...)
 	}
-	a.addRoute(here(2), route{method: method, path: normPath(path), chain: handlers, shadow: shadow})
+	a.addRoute(here(2), route{method: method, path: normPath(path), chain: handlers})
 	return a
 }
 
@@ -489,7 +418,7 @@ func (a *App) method(method, path string, handlers []Handler, shadow bool) Route
 // is not reported here: a group's prefix is a property of WHERE the group is
 // included, and one definition may be included in two places, so the absolute
 // path is computed by the walk and never baked into the op.
-func (a *App) OpScope() OpScope { return OpScope{App: a, Middleware: a.wrap, Shadow: a.shadow} }
+func (a *App) OpScope() OpScope { return OpScope{App: a, Middleware: a.wrap} }
 
 // errors.As helper for HTTPError unwrapping in tests / external callers.
 func asHTTPError(err error) (*HTTPError, bool) {
