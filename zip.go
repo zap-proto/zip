@@ -462,7 +462,16 @@ type TestConfig struct {
 //
 // It builds the program if nothing is live, exactly as serving would, so a test
 // exercises the same generation a request would — including every validation.
+//
+// "Exactly as serving would" includes the DEFERRED PROJECTIONS. Serving calls
+// prepare, which installs /mcp, the OpenAPI document, the op-call plane and the
+// plugin route; building alone does not. Test used to skip it, so those four
+// addresses answered 404 under test and 200 in production — a test could not see
+// the surface it was written to check, and the closer the test got to the real
+// program the more confidently it reported the wrong thing. Callers papered over
+// it with an exported Prepare, which is why unexporting that broke them.
 func (a *App) Test(req *http.Request, cfg ...TestConfig) (*http.Response, error) {
+	a.prepare()
 	if len(cfg) == 0 {
 		return a.router().Test(req)
 	}
