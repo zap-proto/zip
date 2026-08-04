@@ -79,6 +79,15 @@ func host(app *App) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Telemetry starts with the PROGRAM, not with the listeners, and it starts
+	// here because this is the last synchronous step both Serve and Listen share.
+	//
+	// Started from listenOn it raced its own caller: Serve returns as soon as the
+	// serving goroutine is launched, so a process that answered a request and shut
+	// down promptly could reach Shutdown before the exporter had registered its
+	// flush — and lose everything it had collected. A short-lived job is exactly
+	// the process whose telemetry is hardest to obtain by other means.
+	app.export()
 	return &Host{app: app}, nil
 }
 

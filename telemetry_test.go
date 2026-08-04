@@ -1,15 +1,20 @@
 package zip_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	luxlog "github.com/luxfi/log"
+	"github.com/luxfi/zap"
 	"github.com/zap-proto/zip"
 )
 
@@ -314,5 +319,308 @@ func TestTelemetryOff(t *testing.T) {
 	}
 	if text := scrape(t, app); strings.Contains(text, "http_requests_total") {
 		t.Errorf("an app with telemetry off still published numbers:\n%s", text)
+	}
+}
+
+// --- the export leg -------------------------------------------------------
+
+// collector is a ZAP listener standing in for o11y, decoding the envelope the
+// way its receivers do.
+type collector struct {
+	node *zap.Node
+	mu   sync.Mutex
+	body [][]byte
+	seen chan struct{}
+}
+
+func collect(t *testing.T, addr string, msg uint16) *collector {
+	t.Helper()
+	c := &collector{seen: make(chan struct{}, 8)}
+	c.node = zap.NewNode(zap.NodeConfig{
+		NodeID: "collector", ServiceType: "_o11y._tcp", Address: addr, NoDiscovery: true,
+	})
+	c.node.Handle(msg, func(_ context.Context, _ string, m *zap.Message) (*zap.Message, error) {
+		cp := append([]byte(nil), m.Root().Bytes(0)...)
+		c.mu.Lock()
+		c.body = append(c.body, cp)
+		c.mu.Unlock()
+		select {
+		case c.seen <- struct{}{}:
+		default:
+		}
+		return nil, nil
+	})
+	if err := c.node.Start(); err != nil {
+		t.Fatalf("collector on %s: %v", addr, err)
+	}
+	t.Cleanup(c.node.Stop)
+	return c
+}
+
+func (c *collector) await(t *testing.T) []byte {
+	t.Helper()
+	select {
+	case <-c.seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing reached the collector")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.body[len(c.body)-1]
+}
+
+func socketAt(t *testing.T, name string) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "zt")
+	if err != nil {
+		t.Fatalf("tempdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	return filepath.Join(d, name)
+}
+
+// TestBoundaryExportsASpanOverASocket is the end-to-end claim, and it is stated
+// over a UNIX SOCKET because that is where both ends of a pod-local export meet.
+// An app registers one route, answers one request, and a span for that request
+// arrives at a collector — with no telemetry code in the app at all.
+func TestBoundaryExportsASpanOverASocket(t *testing.T) {
+	addr := socketAt(t, "spans.sock")
+	got := collect(t, addr, 1) // 1 = spans, the fleet-wide message type
+
+	app := zip.New(zip.Config{
+		AppName:               "boundary",
+		Logger:                luxlog.NewWriter(&sink{}),
+		DisableStartupMessage: true,
+		Telemetry:             zip.Telemetry{Spans: addr},
+	})
+	app.Get("/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
+
+	sockPath := socketAt(t, "app.sock")
+	h, err := zip.Serve(app, sockPath)
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/orders/8a3f", nil))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	// Shutdown drains what the boundary collected, so the test does not wait out
+	// an export interval to see the span it just caused.
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	var batch struct {
+		Spans []struct {
+			TraceID    string         `json:"traceId"`
+			SpanID     string         `json:"spanId"`
+			Name       string         `json:"name"`
+			Kind       string         `json:"kind"`
+			StatusCode string         `json:"statusCode"`
+			Start      int64          `json:"startUnixNs"`
+			End        int64          `json:"endUnixNs"`
+			Attributes map[string]any `json:"attributes"`
+		} `json:"spans"`
+	}
+	if err := json.Unmarshal(got.await(t), &batch); err != nil {
+		t.Fatalf("collector could not decode the batch: %v", err)
+	}
+	if len(batch.Spans) != 1 {
+		t.Fatalf("want one span for one request, got %d", len(batch.Spans))
+	}
+	s := batch.Spans[0]
+	if len(s.TraceID) != 32 || len(s.SpanID) != 16 {
+		t.Errorf("trace/span ids are %q/%q, want 32/16 hex", s.TraceID, s.SpanID)
+	}
+	// The name is the TEMPLATE, so a trace store can group by operation.
+	if s.Name != "/v1/orders/:id" {
+		t.Errorf("name = %q, want the route template", s.Name)
+	}
+	if s.Kind != "server" {
+		t.Errorf("kind = %q, want server", s.Kind)
+	}
+	if s.StatusCode != "Ok" {
+		t.Errorf("statusCode = %q, want Ok for a 200", s.StatusCode)
+	}
+	if s.End <= s.Start {
+		t.Errorf("span does not span time: start=%d end=%d", s.Start, s.End)
+	}
+	// The path rides as an ATTRIBUTE, where cardinality belongs.
+	if s.Attributes["http.path"] != "/v1/orders/8a3f" {
+		t.Errorf("http.path = %v, want the path that arrived", s.Attributes["http.path"])
+	}
+}
+
+// TestBoundaryExportsALogOverASocket proves the same for the log leg, and that
+// the record carries the ids that join it to its span.
+func TestBoundaryExportsALogOverASocket(t *testing.T) {
+	addr := socketAt(t, "logs.sock")
+	got := collect(t, addr, 3) // 3 = logs
+
+	app := zip.New(zip.Config{
+		AppName:               "boundary",
+		Logger:                luxlog.NewWriter(&sink{}),
+		DisableStartupMessage: true,
+		Telemetry:             zip.Telemetry{Logs: addr},
+	})
+	app.Get("/x", func(c *zip.Ctx) error { return c.String(500, "boom") })
+
+	h, err := zip.Serve(app, socketAt(t, "app2.sock"))
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	var batch struct {
+		Records []struct {
+			Body     string `json:"body"`
+			Severity int    `json:"severity"`
+			Text     string `json:"severityText"`
+			TraceID  string `json:"traceId"`
+			SpanID   string `json:"spanId"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal(got.await(t), &batch); err != nil {
+		t.Fatalf("collector could not decode the batch: %v", err)
+	}
+	if len(batch.Records) != 1 {
+		t.Fatalf("want one record for one request, got %d", len(batch.Records))
+	}
+	r := batch.Records[0]
+	if r.Body != "request" {
+		t.Errorf("body = %q, want request", r.Body)
+	}
+	// A 500 is this service failing, so the record must carry error severity —
+	// 17 is OTel's number for it.
+	if r.Severity != 17 || r.Text != "error" {
+		t.Errorf("severity = %d/%q, want 17/error for a 500", r.Severity, r.Text)
+	}
+	if len(r.TraceID) != 32 || len(r.SpanID) != 16 {
+		t.Errorf("record lost its trace ids: %q/%q", r.TraceID, r.SpanID)
+	}
+}
+
+// TestZeroConfigurationFindsTheSocket is the headline claim: an app that
+// configures NOTHING — no address, no environment variable, no Telemetry field —
+// exports to the collector because the collector's socket is there.
+//
+// Presence is the configuration, so the test creates the situation a pod
+// creates: o11y's ingest listening on the runtime directory under its
+// well-known name.
+func TestZeroConfigurationFindsTheSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rt")
+	if err != nil {
+		t.Fatalf("tempdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("ZIP_RUNTIME_DIR", dir)
+
+	// The collector, at the name the convention says — nothing tells the app.
+	got := collect(t, filepath.Join(dir, "o11y-spans.sock"), 1)
+
+	app := zip.New(zip.Config{
+		AppName:               "zeroconf",
+		Logger:                luxlog.NewWriter(&sink{}),
+		DisableStartupMessage: true,
+		// No Telemetry field at all.
+	})
+	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+
+	h, err := zip.Serve(app, socketAt(t, "zc.sock"))
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	var batch struct {
+		Spans []struct {
+			Name string `json:"name"`
+		} `json:"spans"`
+	}
+	if err := json.Unmarshal(got.await(t), &batch); err != nil {
+		t.Fatalf("collector could not decode: %v", err)
+	}
+	if len(batch.Spans) != 1 || batch.Spans[0].Name != "/x" {
+		t.Fatalf("want one span named /x, got %+v", batch.Spans)
+	}
+}
+
+// TestNoCollectorIsFree is the other half of zero configuration: a program on a
+// laptop, with no collector anywhere, must serve normally, keep logging, and
+// never fail because telemetry has nowhere to go.
+func TestNoCollectorIsFree(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rt")
+	if err != nil {
+		t.Fatalf("tempdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("ZIP_RUNTIME_DIR", dir) // empty: no socket, and loopback has no ear
+
+	s := &sink{}
+	app := zip.New(zip.Config{
+		AppName:               "lonely",
+		Logger:                luxlog.NewWriter(s),
+		DisableStartupMessage: true,
+	})
+	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+
+	h, err := zip.Serve(app, socketAt(t, "lonely.sock"))
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	for range 25 {
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		if err != nil {
+			t.Fatalf("request failed with no collector: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d with no collector, want 200", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	// It still logs every request.
+	if s.find("request") == nil {
+		t.Error("an app with no collector stopped logging")
+	}
+	// And it says the export is not working AT MOST once per signal, not once
+	// per flush — the difference between a useful line and noise.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stopped := 0
+	for _, l := range s.lines {
+		if l["message"] == "telemetry export stopped" {
+			stopped++
+		}
+	}
+	if stopped > 2 {
+		t.Errorf("said %d times that export is down; edge-triggered means once per signal", stopped)
 	}
 }

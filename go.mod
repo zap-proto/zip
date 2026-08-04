@@ -8,6 +8,7 @@ require (
 	github.com/fasthttp/websocket v1.5.12
 	github.com/luxfi/log v1.4.3
 	github.com/luxfi/metric v1.9.1
+	github.com/luxfi/zap v1.2.7
 	github.com/valyala/fasthttp v1.70.0
 	github.com/zap-proto/fiber/v3 v3.2.1
 	github.com/zap-proto/go v1.3.0
@@ -24,7 +25,6 @@ require (
 	github.com/luxfi/accel v1.2.4 // indirect
 	github.com/luxfi/crypto v1.20.2 // indirect
 	github.com/luxfi/mdns v0.1.1 // indirect
-	github.com/luxfi/zap v1.2.6 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
