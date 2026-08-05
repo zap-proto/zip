@@ -7,7 +7,7 @@ require (
 	github.com/evanw/esbuild v0.28.1
 	github.com/fasthttp/websocket v1.5.12
 	github.com/luxfi/log v1.4.3
-	github.com/luxfi/metric v1.9.1
+	github.com/luxfi/metric v1.10.0
 	github.com/luxfi/zap v1.2.7
 	github.com/valyala/fasthttp v1.70.0
 	github.com/zap-proto/fiber/v3 v3.2.1
@@ -16,22 +16,13 @@ require (
 
 require (
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
-	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gorilla/rpc v1.2.1 // indirect
 	github.com/grandcat/zeroconf v1.0.0 // indirect
 	github.com/luxfi/accel v1.2.4 // indirect
 	github.com/luxfi/crypto v1.20.2 // indirect
 	github.com/luxfi/mdns v0.1.1 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
-	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/otel v1.44.0 // indirect
-	go.opentelemetry.io/otel/metric v1.44.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
-	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
