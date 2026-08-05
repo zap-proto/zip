@@ -119,6 +119,18 @@ type scope struct {
 	trail *trail
 	// depth is the number of inclusions between the root and here.
 	depth int
+	// origin is WHO DECLARED what is visited here: the nearest ancestor that
+	// has a name. Empty at the root, so the served app's own ops are exactly
+	// what they were before composition existed.
+	//
+	// It is the nearest NAMED ancestor and not the enclosing definition,
+	// because [App.Group] is an App with its name stripped ([App.groupConfig]).
+	// Reading the enclosing definition credited a group with declaring what its
+	// app declared — and a group has no name, so the answer was "nobody". A
+	// grafted app that declares its routes in groups (every real one does)
+	// published every type UNQUALIFIED: hanzoai/iam's 345 schemas arrived as
+	// bare Application and Role, colliding with the host's own.
+	origin string
 }
 
 // mwStack is a persistent middleware stack, innermost cell first, shared
@@ -260,26 +272,34 @@ func descend(a *App, sc scope, ancestors []*App, out *[]occurrence) error {
 		switch n := e.n.(type) {
 		case Handler:
 			mw = mw.push(n, e.site, sc.depth)
-			*out = append(*out, occurrence{n: n, site: e.site,
-				ctx: scope{in: a, prefix: sc.prefix, mw: mw, trail: sc.trail, depth: sc.depth}})
+			here := sc
+			here.in, here.mw = a, mw
+			*out = append(*out, occurrence{n: n, site: e.site, ctx: here})
 
 		case route:
-			*out = append(*out, occurrence{n: n, site: e.site,
-				ctx: scope{in: a, prefix: sc.prefix, mw: mw, trail: sc.trail, depth: sc.depth}})
+			here := sc
+			here.in, here.mw = a, mw
+			*out = append(*out, occurrence{n: n, site: e.site, ctx: here})
 
 		case *App:
 			// The included app's environment is anchored HERE. Everything the
 			// parent appends after this line is invisible to it, and everything
 			// the child appends later still lands inside this anchor.
+			origin := sc.origin
+			if n.cfg.AppName != "" {
+				origin = n.cfg.AppName
+			}
 			inner := scope{
 				in:     n,
 				prefix: sc.prefix + n.prefix,
 				mw:     mw,
 				trail:  sc.trail.push(n, n.label(), e.site),
 				depth:  sc.depth + 1,
+				origin: origin,
 			}
-			*out = append(*out, occurrence{n: n, site: e.site,
-				ctx: scope{in: a, prefix: inner.prefix, mw: mw, trail: inner.trail, depth: inner.depth}})
+			at := inner
+			at.in, at.mw = a, mw
+			*out = append(*out, occurrence{n: n, site: e.site, ctx: at})
 			if err := descend(n, inner, ancestors, out); err != nil {
 				return err
 			}
