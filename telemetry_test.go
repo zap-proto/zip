@@ -3,11 +3,11 @@ package zip_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -369,22 +369,26 @@ func (c *collector) await(t *testing.T) []byte {
 	return c.body[len(c.body)-1]
 }
 
-func socketAt(t *testing.T, name string) string {
+// free returns a loopback address nothing is listening on yet. host:port is the
+// only address form the collector serves, so it is the only one tested.
+func free(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "zt")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("tempdir: %v", err)
+		t.Fatalf("port: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(d) })
-	return filepath.Join(d, name)
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
-// TestBoundaryExportsASpanOverASocket is the end-to-end claim, and it is stated
-// over a UNIX SOCKET because that is where both ends of a pod-local export meet.
-// An app registers one route, answers one request, and a span for that request
-// arrives at a collector — with no telemetry code in the app at all.
-func TestBoundaryExportsASpanOverASocket(t *testing.T) {
-	addr := socketAt(t, "spans.sock")
+// TestBoundaryExportsASpan is the end-to-end claim: an app registers one route,
+// answers one request, and a span for that request arrives at a collector — with
+// no telemetry code in the app at all.
+func TestBoundaryExportsASpan(t *testing.T) {
+	addr := free(t)
 	got := collect(t, addr, 1) // 1 = spans, the fleet-wide message type
 
 	app := zip.New(zip.Config{
@@ -395,8 +399,7 @@ func TestBoundaryExportsASpanOverASocket(t *testing.T) {
 	})
 	app.Get("/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
-	sockPath := socketAt(t, "app.sock")
-	h, err := zip.Serve(app, sockPath)
+	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
 		t.Fatalf("serve: %v", err)
 	}
@@ -443,22 +446,23 @@ func TestBoundaryExportsASpanOverASocket(t *testing.T) {
 	if s.Kind != "server" {
 		t.Errorf("kind = %q, want server", s.Kind)
 	}
-	if s.StatusCode != "Ok" {
-		t.Errorf("statusCode = %q, want Ok for a 200", s.StatusCode)
+	if s.StatusCode != "ok" {
+		t.Errorf("statusCode = %q, want ok for a 200", s.StatusCode)
 	}
 	if s.End <= s.Start {
 		t.Errorf("span does not span time: start=%d end=%d", s.Start, s.End)
 	}
-	// The path rides as an ATTRIBUTE, where cardinality belongs.
-	if s.Attributes["http.path"] != "/v1/orders/8a3f" {
-		t.Errorf("http.path = %v, want the path that arrived", s.Attributes["http.path"])
+	// The path rides as an ATTRIBUTE, where cardinality belongs, under the key
+	// the collector reads a span's path column out of.
+	if s.Attributes["url.path"] != "/v1/orders/8a3f" {
+		t.Errorf("url.path = %v, want the path that arrived", s.Attributes["url.path"])
 	}
 }
 
-// TestBoundaryExportsALogOverASocket proves the same for the log leg, and that
-// the record carries the ids that join it to its span.
-func TestBoundaryExportsALogOverASocket(t *testing.T) {
-	addr := socketAt(t, "logs.sock")
+// TestBoundaryExportsALog proves the same for the log leg, and that the record
+// carries the ids that join it to its span.
+func TestBoundaryExportsALog(t *testing.T) {
+	addr := free(t)
 	got := collect(t, addr, 3) // 3 = logs
 
 	app := zip.New(zip.Config{
@@ -469,7 +473,7 @@ func TestBoundaryExportsALogOverASocket(t *testing.T) {
 	})
 	app.Get("/x", func(c *zip.Ctx) error { return c.String(500, "boom") })
 
-	h, err := zip.Serve(app, socketAt(t, "app2.sock"))
+	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
 		t.Fatalf("serve: %v", err)
 	}
@@ -513,33 +517,24 @@ func TestBoundaryExportsALogOverASocket(t *testing.T) {
 	}
 }
 
-// TestZeroConfigurationFindsTheSocket is the headline claim: an app that
-// configures NOTHING — no address, no environment variable, no Telemetry field —
-// exports to the collector because the collector's socket is there.
-//
-// Presence is the configuration, so the test creates the situation a pod
-// creates: o11y's ingest listening on the runtime directory under its
-// well-known name.
-func TestZeroConfigurationFindsTheSocket(t *testing.T) {
-	dir, err := os.MkdirTemp("", "rt")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	t.Setenv("ZIP_RUNTIME_DIR", dir)
-
-	// The collector, at the name the convention says — nothing tells the app.
-	got := collect(t, filepath.Join(dir, "o11y-spans.sock"), 1)
+// TestTheEnvironmentStatesTheAddress is how a deployment turns export on: the
+// manifest sets a variable, the program sets no field, and the span arrives.
+// This is the path cloud's own manifest takes, so the name is asserted here as
+// the deployment spells it.
+func TestTheEnvironmentStatesTheAddress(t *testing.T) {
+	addr := free(t)
+	got := collect(t, addr, 1)
+	t.Setenv("O11Y_SPANS_ADDR", addr)
 
 	app := zip.New(zip.Config{
-		AppName:               "zeroconf",
+		AppName:               "fromenv",
 		Logger:                luxlog.NewWriter(&sink{}),
 		DisableStartupMessage: true,
-		// No Telemetry field at all.
+		// No Telemetry field at all: the environment is the whole configuration.
 	})
 	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
-	h, err := zip.Serve(app, socketAt(t, "zc.sock"))
+	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
 		t.Fatalf("serve: %v", err)
 	}
@@ -567,16 +562,14 @@ func TestZeroConfigurationFindsTheSocket(t *testing.T) {
 	}
 }
 
-// TestNoCollectorIsFree is the other half of zero configuration: a program on a
-// laptop, with no collector anywhere, must serve normally, keep logging, and
-// never fail because telemetry has nowhere to go.
-func TestNoCollectorIsFree(t *testing.T) {
-	dir, err := os.MkdirTemp("", "rt")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
+// TestNoAddressIsSilent is the other half of the switch: a program with nothing
+// stated serves normally, keeps logging, and says nothing about telemetry —
+// because it never tried. A line about export in a program that exports nothing
+// would be the symptom of a connection nobody asked for.
+func TestNoAddressIsSilent(t *testing.T) {
+	for _, name := range []string{"O11Y_SPANS_ADDR", "O11Y_LOGS_ADDR", "O11Y_METRICS_ADDR"} {
+		t.Setenv(name, "")
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	t.Setenv("ZIP_RUNTIME_DIR", dir) // empty: no socket, and loopback has no ear
 
 	s := &sink{}
 	app := zip.New(zip.Config{
@@ -586,7 +579,7 @@ func TestNoCollectorIsFree(t *testing.T) {
 	})
 	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
-	h, err := zip.Serve(app, socketAt(t, "lonely.sock"))
+	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
 		t.Fatalf("serve: %v", err)
 	}
@@ -606,12 +599,51 @@ func TestNoCollectorIsFree(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 
-	// It still logs every request.
 	if s.find("request") == nil {
 		t.Error("an app with no collector stopped logging")
 	}
-	// And it says the export is not working AT MOST once per signal, not once
-	// per flush — the difference between a useful line and noise.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.lines {
+		if msg, _ := l["message"].(string); strings.HasPrefix(msg, "telemetry export") {
+			t.Errorf("an app with no address said %q; it should have dialled nothing", msg)
+		}
+	}
+}
+
+// TestTheCollectorBeingDownCostsNothing is the fire-and-forget claim at the app
+// level: an address that nothing answers must not fail a request, and must be
+// reported once rather than once per flush.
+func TestTheCollectorBeingDownCostsNothing(t *testing.T) {
+	s := &sink{}
+	app := zip.New(zip.Config{
+		AppName:               "shouting",
+		Logger:                luxlog.NewWriter(s),
+		DisableStartupMessage: true,
+		Telemetry:             zip.Telemetry{Spans: free(t)},
+	})
+	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+
+	h, err := zip.Serve(app, "http://"+free(t))
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	for range 25 {
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+		if err != nil {
+			t.Fatalf("request failed with a dead collector: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d with a dead collector, want 200", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stopped := 0
@@ -620,7 +652,7 @@ func TestNoCollectorIsFree(t *testing.T) {
 			stopped++
 		}
 	}
-	if stopped > 2 {
+	if stopped != 1 {
 		t.Errorf("said %d times that export is down; edge-triggered means once per signal", stopped)
 	}
 }
