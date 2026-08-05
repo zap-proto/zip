@@ -32,7 +32,7 @@ import (
 // REFERENCE to a definition. At build time one interpreter walks one program;
 // the child's entries are read in place, exactly as if they had been written
 // there. There is no boundary at run time to cross, so there is nothing for a
-// request to hop through: those words are reserved for [Mount], the one
+// request to hop through: those words are reserved for [Proxy], the one
 // operation where another runtime genuinely exists.
 //
 // The same definition may be referenced from any number of places. Each

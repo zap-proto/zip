@@ -19,7 +19,7 @@ import (
 //
 //	app.Group("/legacy").All("/*", zip.AdaptNetHTTP(httpHandler))
 //
-// Group is what carries the prefix; Mount does not do this. Mount delegates a
+// Group is what carries the prefix; Proxy does not do this. Proxy delegates a
 // prefix to a REMOTE address over a transport, so it takes a string, not a
 // handler. A local handler is composed, not delegated.
 //
