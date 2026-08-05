@@ -624,3 +624,23 @@ func TestNoCollectorIsFree(t *testing.T) {
 		t.Errorf("said %d times that export is down; edge-triggered means once per signal", stopped)
 	}
 }
+
+// An instrument registered through Metrics rides the same registry as the
+// framework's own, so it appears in Gather and therefore on /metrics and in the
+// export — the whole point of one registry per program.
+func TestMetricsRegistersIntoTheOneRegistry(t *testing.T) {
+	app := zip.New(zip.Config{Logger: luxlog.NewWriter(&sink{})})
+	g := app.Metrics().NewGaugeVec("fleet_up", "probe verdict per service", []string{"service"})
+	g.WithLabelValues("iam").Set(1)
+
+	fams, err := app.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, f := range fams {
+		if f.Name == "fleet_up" {
+			return
+		}
+	}
+	t.Fatal("fleet_up not gathered — Metrics() must register into the app's own registry")
+}

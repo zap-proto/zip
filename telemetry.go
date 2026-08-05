@@ -696,6 +696,15 @@ func (a *App) telemetryHandler() fiber.Handler {
 // luxfi/metric already ships, instead of a second one written here.
 func (a *App) Gather() ([]*metric.MetricFamily, error) { return a.gather() }
 
+// Metrics is where an app registers instruments of its own — a domain gauge, a
+// queue depth, a fleet probe — into the same registry the framework's request
+// instruments live in. Everything registered here rides the same /metrics page
+// and the same export as the built-in numbers: one registry per program, one
+// road out, nothing extra to configure. The standard Registerer is the whole
+// surface, so a caller holds no framework type and the registry stays owned
+// here.
+func (a *App) Metrics() metric.Registerer { return a.telemetry.registry }
+
 // exportInterval is how often the numbers go out. Fifteen seconds is the
 // scrape interval the fleet already uses, so a push and a pull of the same
 // registry describe the same time slices and a dashboard does not change shape
