@@ -41,7 +41,7 @@ func WithStripPrefix(prefix string) StaticOption {
 	return func(c *staticConfig) { c.stripPrefix = prefix }
 }
 
-// Static returns a leaf Handler that serves files from fsys. Mount it on a
+// Static returns a leaf Handler that serves files from fsys. Register it on a
 // wildcard route; the "*" capture selects the file:
 //
 //	app.Get("/assets/*", zip.Static(assets))                       // embed.FS

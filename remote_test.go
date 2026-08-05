@@ -48,7 +48,7 @@ func remoteService(t *testing.T) (string, Declaration) {
 	return sock, svc.Declaration()
 }
 
-// TestMount_DeclarationIsAnInputNotAFetch is the rule the whole design hangs
+// TestProxy_DeclarationIsAnInputNotAFetch is the rule the whole design hangs
 // on: building a program does no I/O. The address here goes nowhere, and the
 // registry, the document and the tool list are still complete — because the
 // declaration was handed in.
@@ -56,10 +56,10 @@ func remoteService(t *testing.T) (string, Declaration) {
 // If the walk dialled instead, this test could not exist: Registry() would be
 // fallible and slow, and an OpenAPI document would depend on some other process
 // being up at boot.
-func TestMount_DeclarationIsAnInputNotAFetch(t *testing.T) {
+func TestProxy_DeclarationIsAnInputNotAFetch(t *testing.T) {
 	host := quiet("cloud")
 	dead := "/nonexistent/nothing-listens-here.sock"
-	host.Use(mustApp(Mount("/v1/ledger", dead, Declaration{
+	host.Use(mustApp(Proxy("/v1/ledger", dead, Declaration{
 		Name: "ledger",
 		Routes: []Route{
 			{Method: "GET", Pattern: "/v1/ledger/entries/:id", Op: "getEntry"},
@@ -89,9 +89,9 @@ func TestMount_DeclarationIsAnInputNotAFetch(t *testing.T) {
 	// And nothing was dialled: an unreachable address built a complete program.
 }
 
-// TestMount_ServesAndCallsTheRemote: the leaf's routes proxy and its ops
+// TestProxy_ServesAndCallsTheRemote: the leaf's routes proxy and its ops
 // forward, over the same transport, to a service that really is somewhere else.
-func TestMount_ServesAndCallsTheRemote(t *testing.T) {
+func TestProxy_ServesAndCallsTheRemote(t *testing.T) {
 	sock, decl := remoteService(t)
 	if len(decl.Routes) != 2 {
 		t.Fatalf("the service declared %d routes, want 2: %+v", len(decl.Routes), decl.Routes)
@@ -107,7 +107,7 @@ func TestMount_ServesAndCallsTheRemote(t *testing.T) {
 	}
 
 	host := quiet("cloud")
-	host.Use(mustApp(Mount("/v1/ledger", sock, decl)))
+	host.Use(mustApp(Proxy("/v1/ledger", sock, decl)))
 	if err := host.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}

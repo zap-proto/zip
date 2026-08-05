@@ -8,7 +8,7 @@ import (
 )
 
 // Two definitions cannot own one address. That rule used to live in a private
-// prefix-claim ledger (App.claim/release) that only Mount and Load consulted;
+// prefix-claim ledger (App.claim/release) that only Proxy and Load consulted;
 // it now lives where every OTHER address collision is already decided — the
 // walk, at build. One mechanism, so there is no second answer to disagree with
 // the first, and the report is strictly better: every collision at once, with
@@ -71,19 +71,19 @@ func TestARefusedCompositionIsRolledBack(t *testing.T) {
 	}
 }
 
-// Mount and Load are the same kind of thing now — definition constructors — so
+// Proxy and Load are the same kind of thing now — definition constructors — so
 // they collide with each other exactly as two Loads do. There is no separate
 // register for either.
-func TestMountAndLoadCollideThroughOneMechanism(t *testing.T) {
-	remote, err := zip.Mount("/v1/y", "/run/zip/y.sock")
+func TestProxyAndLoadCollideThroughOneMechanism(t *testing.T) {
+	remote, err := zip.Proxy("/v1/y", "/run/zip/y.sock")
 	if err != nil {
-		t.Fatalf("Mount: %v", err)
+		t.Fatalf("Proxy: %v", err)
 	}
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(remote, plugin(t, "z", "/v1/y"))
 
 	if err := app.Build(); err == nil {
-		t.Fatal("a Mount and a Load claiming /v1/y were both accepted")
+		t.Fatal("a Proxy and a Load claiming /v1/y were both accepted")
 	} else if !strings.Contains(err.Error(), "/v1/y") {
 		t.Errorf("refusal does not name the address: %v", err)
 	}

@@ -13,7 +13,7 @@ import (
 
 // A remote service is a LEAF, not a verb.
 //
-// [Mount] used to be one of five composition verbs and the only one that
+// [Proxy] used to be one of five composition verbs and the only one that
 // pointed at another process. Under one program it stops being special: it
 // appends an App like any other inclusion, whose routes proxy and whose ops
 // forward. Every projection then reads it through the same walk — a mounted
@@ -35,13 +35,13 @@ import (
 //     depend on what the network said at the moment it was asked.
 //
 // The spec is a build input; the server is not asked what it serves. Without a
-// declaration a mount contributes its two proxy addresses and no ops, which is
+// declaration a proxy contributes its two proxy addresses and no ops, which is
 // exactly what it contributed before and says honestly that nothing is known
 // about the shape behind it.
-// Mount returns another service, running elsewhere, as a DEFINITION the host
+// Proxy returns another service, running elsewhere, as a DEFINITION the host
 // composes with Use like any other:
 //
-//	ledger, err := zip.Mount("/v1/ledger", "ledger.hanzo.svc:9653", decl)
+//	ledger, err := zip.Proxy("/v1/ledger", "ledger.hanzo.svc:9653", decl)
 //	if err != nil { return err }
 //	app.Use(ledger)
 //
@@ -51,6 +51,30 @@ import (
 // projection because it is in the registry, not because five projections each
 // learned what mounting meant.
 //
+// # Why the name changed
+//
+// This was Mount, and Mount already meant something else to everyone reading it:
+// 118 of the fleet's ~140 subsystems export
+// `func Mount(app cloud.Router, deps cloud.Deps) error`, the function by which an
+// app registers ITSELF. One name, two unrelated shapes — a caller who knows one
+// learns nothing about the other, and a reader seeing `Mount` in a diff cannot
+// tell which is meant without checking the arity.
+//
+// The verb was also wrong on its own terms, which is what makes the rename a
+// correction and not a coat of paint. The doc above already says composition
+// went to Use; a function that returns a value is a NOUN.
+//
+// Proxy is what it builds. Every route it registers runs the handler this file
+// calls `proxy`, and that handler's whole body is `forward(...)` to the address
+// given. The term is the term of art for a local stand-in whose handlers hand
+// the request to someone else, so it needs no gloss.
+//
+// Not Remote, which was the first choice and is wrong: [Remote] already exists
+// here, and correctly — it is the CALLER's side, a client that executes commands
+// against a service running elsewhere. This is the SERVER's side: a definition
+// that stands in for that service inside this program's own routing table. Two
+// sides of one wire are two things, and the compiler said so.
+//
 // The address scheme selects the transport exactly as [App.Listen]'s does, so a
 // bare address is ZAP and one registry serves both directions.
 //
@@ -58,7 +82,7 @@ import (
 // contributes its two proxy addresses and no ops, which honestly says nothing
 // is known about the shape behind it. With it, the remote's ops join the
 // document, the tool list, the commands and the call plane.
-func Mount(prefix, addr string, decl ...Declaration) (*App, error) {
+func Proxy(prefix, addr string, decl ...Declaration) (*App, error) {
 	var d Declaration
 	if len(decl) > 0 {
 		d = decl[0]
@@ -85,7 +109,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 	}
 	if len(d.Routes) == 0 {
 		// Nothing declared: the prefix and everything under it, which is what a
-		// bare Mount has always registered.
+		// bare Proxy has always registered.
 		p := trimPrefix(prefix)
 		r.All(p, proxy)
 		r.All(p+"/*", proxy)
@@ -100,7 +124,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 		// program poisoned. Validate at the boundary the input crosses, so a bad
 		// declaration is an error like every other bad declaration.
 		if !knownMethod(rt.Method) {
-			return nil, Errorf(400, "zip: Mount(%s): %q is not an HTTP method zip can route (route %q)",
+			return nil, Errorf(400, "zip: Proxy(%s): %q is not an HTTP method zip can route (route %q)",
 				prefix, rt.Method, rt.Pattern)
 		}
 		if rt.Op == "" {

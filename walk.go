@@ -30,7 +30,7 @@ import (
 //     ops; nothing dedupes middleware, which is also why [Handler] being a
 //     non-comparable func type costs nothing.
 //   - PURE. No global state, no projection-specific logic, no I/O. In
-//     particular a remote [Mount] contributes its declaration INLINE and is
+//     particular a remote [Proxy] contributes its declaration INLINE and is
 //     never asked over the network what it serves: a walk that did I/O would
 //     make the document fallible, slow, untestable, and a function of whether
 //     some other process happened to be up at boot.

@@ -187,7 +187,7 @@ type Conn struct {
 }
 
 // Dial returns a Conn to the app at addr. The address scheme selects the
-// transport exactly as it does for [App.Listen] and [Mount] — one registry,
+// transport exactly as it does for [App.Listen] and [Proxy] — one registry,
 // one vocabulary — so a bare path is ZAP over a unix socket and a bare host:port
 // is ZAP over tcp:
 //
@@ -286,7 +286,7 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 	forwardIdentity(ctx, req)
 
 	if err := c.client.Do(req, resp); err != nil {
-		// The far end, not this hop, is what failed — same reading Mount gives a
+		// The far end, not this hop, is what failed — same reading Proxy gives a
 		// broken upstream.
 		return nil, Errorf(502, "zip: call %s at %s: %v", op, c.addr, err)
 	}

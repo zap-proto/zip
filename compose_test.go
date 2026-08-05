@@ -443,7 +443,7 @@ func TestFreeze_MutateAfterBuildPanics_IncludeAfterBuildSucceeds(t *testing.T) {
 		child.Get("/sneak", func(c *Ctx) error { return nil })
 	}()
 
-	// Mount-after-seal: allowed. A second host includes the same sealed
+	// Proxy-after-seal: allowed. A second host includes the same sealed
 	// definition, and gets its own occurrence of it.
 	second := quiet("second")
 	second.Group("/v2").Use(child)

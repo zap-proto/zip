@@ -51,9 +51,9 @@ func echoHandler() http.Handler {
 	})
 }
 
-// TestMount_NewForm_Serves proves the recommended form —
+// TestAdaptNetHTTP_NewForm_Serves proves the recommended form —
 // app.All(prefix+"/*", zip.AdaptNetHTTP(h)) — serves the mounted subtree.
-func TestMount_NewForm_Serves(t *testing.T) {
+func TestAdaptNetHTTP_NewForm_Serves(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	app.All("/api/*", zip.AdaptNetHTTP(echoHandler()))
 
@@ -66,12 +66,12 @@ func TestMount_NewForm_Serves(t *testing.T) {
 	}
 }
 
-// TestMount_StaticBeatsMount is the load-bearing proof: a static route
+// TestAdaptNetHTTP_StaticRouteWins is the load-bearing proof: a static route
 // registered AFTER the wildcard mount still wins for its exact path, while
 // every other subpath falls through to the mount. This only holds because
 // the mount is an ordinary route participating in specificity precedence —
 // registration order is inverted on purpose.
-func TestMount_StaticBeatsMount(t *testing.T) {
+func TestAdaptNetHTTP_StaticRouteWins(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 
 	// Wildcard mount FIRST, static route SECOND. Specificity, not order,
@@ -91,9 +91,9 @@ func TestMount_StaticBeatsMount(t *testing.T) {
 	}
 }
 
-// TestMount_BodyAndPathIntact proves the adapted handler receives the request
+// TestAdaptNetHTTP_BodyAndPathIntact proves the adapted handler receives the request
 // body and the full subpath + query unchanged through the wildcard mount.
-func TestMount_BodyAndPathIntact(t *testing.T) {
+func TestAdaptNetHTTP_BodyAndPathIntact(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	app.All("/api/*", zip.AdaptNetHTTP(echoHandler()))
 
