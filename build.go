@@ -130,7 +130,9 @@ func composeOps(occ []occurrence) []*registeredOp {
 			// Who DECLARED the type — a property of the code, never of where it
 			// was deployed. An op that already names its declarer keeps that
 			// name, so a definition two levels deep still credits its author.
-			c.Origin = o.ctx.in.cfg.AppName
+			// [scope.origin] is what makes that last clause true: the enclosing
+			// definition is a GROUP for every real app, and a group has no name.
+			c.Origin = o.ctx.origin
 		}
 		if len(c.Tags) == 0 && c.Origin != "" {
 			c.Tags = []string{c.Origin}

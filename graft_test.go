@@ -351,6 +351,42 @@ func TestGraft_UngraftedDocumentIsUnchanged(t *testing.T) {
 	}
 }
 
+// TestGraft_AGroupDoesNotEraseTheAuthor is the qualification rule at the only
+// depth real apps use. A child declares its routes in groups — that is what a
+// prefix IS here — and a group is an App with its name stripped
+// (App.groupConfig), so reading the ENCLOSING definition asked a nameless thing
+// who wrote the op and got "nobody".
+//
+// Nothing said so, because the ungrafted and one-level cases both still passed.
+// hanzoai/iam publishes 345 schemas through groups: every one of them arrived
+// as a bare Application, Role, Input — colliding with the host's own types of
+// those names, one name for two shapes, in the document every SDK is generated
+// from.
+func TestGraft_AGroupDoesNotEraseTheAuthor(t *testing.T) {
+	child := zip.New(zip.Config{AppName: "iam", DisableStartupMessage: true})
+	g := child.Group("/v1/iam")
+	zip.Post(g, "/users", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
+	// Two levels down: a group inside a group still credits the app.
+	zip.Post(g.Group("/deep"), "/x", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
+
+	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
+	host.Use(child)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	schemas := host.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, want := range []string{"iam.userIn", "iam.userOut"} {
+		if _, ok := schemas[want]; !ok {
+			t.Errorf("no %q — a type declared inside a grafted app's group lost its author: %v", want, keysOf(schemas))
+		}
+	}
+	for _, unwanted := range []string{"userIn", "userOut"} {
+		if _, ok := schemas[unwanted]; ok {
+			t.Errorf("%q is unqualified — it would bind to whichever app the merge read last", unwanted)
+		}
+	}
+}
+
 // TestGraft_ChildControlPlaneIsNotAdopted: the parent keeps its own /docs, MCP
 // door, op plane and declaration. A child that took them would take the whole
 // composition's document.
