@@ -257,7 +257,7 @@ func flagType(t reflect.Type) string {
 func commandName(method, path, id string) (service, name string) {
 	// An id that IS the default says nothing the path does not; only an
 	// explicit one renames the command.
-	if id == defaultOpID(method, path) {
+	if id == ID(method, path) {
 		id = ""
 	}
 	segs := make([]string, 0, 8)

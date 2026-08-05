@@ -52,8 +52,9 @@ func billingApp() *App {
 // at two addresses. Every test below about the diamond is a test about the
 // second half, and must use a definition that has no name to keep.
 //
-// Its derived id is defaultOpID("GET", "/invoices/:id") = "get_invoices_id",
-// qualified per occurrence: v1.get_invoices_id, admin.get_invoices_id.
+// Its id is derived per occurrence from the ABSOLUTE path it answers at, which
+// is what distinguishes the two: ID("GET", "/v1/invoices/:id") is
+// get_v1_invoices_by_id, and under /admin it is get_admin_invoices_by_id.
 func unnamedApp() *App {
 	b := quiet("billing")
 	Get(b, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
@@ -283,7 +284,7 @@ func TestDiamond_TwoOccurrencesTwoIdsOneType(t *testing.T) {
 		ids = append(ids, op.OperationID)
 		paths = append(paths, op.Path)
 	}
-	wantIDs := []string{"v1.get_invoices_id", "admin.get_invoices_id"}
+	wantIDs := []string{"get_v1_invoices_by_id", "get_admin_invoices_by_id"}
 	wantPaths := []string{"/v1/invoices/:id", "/admin/invoices/:id"}
 	if strings.Join(ids, ",") != strings.Join(wantIDs, ",") {
 		t.Errorf("operation ids = %v, want %v", ids, wantIDs)

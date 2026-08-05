@@ -128,7 +128,7 @@ type scope struct {
 	// Reading the enclosing definition credited a group with declaring what its
 	// app declared — and a group has no name, so the answer was "nobody". A
 	// grafted app that declares its routes in groups (every real one does)
-	// published every type UNQUALIFIED: hanzoai/iam's 345 schemas arrived as
+	// published every type UNQUALIFIED: hanzoai/iam's 95 schemas arrived as
 	// bare Application and Role, colliding with the host's own.
 	origin string
 }
@@ -490,10 +490,12 @@ func structural(occ []occurrence) error {
 // are derived from the shape.
 //
 // It is separate because it cannot run earlier. An operation id is a function of
-// the occurrence's prefix and the declared id, so two occurrences can be
-// structurally fine — different paths, no address conflict — and still derive
-// the SAME id. That collision does not exist until derivation happens, and a
-// document with two operations under one operationId is invalid.
+// the declared id and the absolute path the occurrence answers at, so two
+// occurrences can be structurally fine — different paths, no address conflict —
+// and still derive the SAME id: one declaration included twice, or two addresses
+// the encoding cannot tell apart (/v1/a/b_c and /v1/a/b/c, see [ID]). That
+// collision does not exist until derivation happens, and a document with two
+// operations under one operationId is invalid.
 func derived(occ []occurrence) error {
 	type claim struct {
 		path string
@@ -518,8 +520,8 @@ func derived(occ []occurrence) error {
 			if r.op.OperationID == id {
 				errs = append(errs, fmt.Errorf("zip: operation id %q is declared once and occurs twice: %s (via %s) and %s at %s (via %s) — "+
 					"a declared id is a published name (SDK method, operationId, MCP tool, command) and survives composition verbatim, "+
-					"so one declaration cannot be two operations.\n\tEither drop WithOperationID and take the shape-derived id, which "+
-					"qualifies each occurrence by its prefix, or include the definition once",
+					"so one declaration cannot be two operations.\n\tEither drop WithOperationID and take the address-derived id, which "+
+					"names each occurrence by the absolute path it answers at, or include the definition once",
 					id, prev.path, prev.via, mine.path, mine.site, mine.via))
 				continue
 			}
@@ -613,70 +615,53 @@ func nameOr(a *App, fallback string) string {
 //
 // So a declared id survives composition VERBATIM.
 //
-// # An UNDECLARED id is still qualified, and must be
+// # An UNDECLARED id is derived from the ABSOLUTE path
 //
 // Without a declaration there is no promise to keep, and there IS a real
 // ambiguity to resolve: a definition included twice produces TWO operations
 // from one registration, and an OpenAPI document with two operations under one
-// operationId is invalid. So the default id — method+path, see [defaultOpID] —
-// is qualified by the prefix its occurrence answers under, deterministically and
-// from the composition's SHAPE:
+// operationId is invalid. So the id is [ID] of the method and the address the
+// occurrence actually ANSWERS AT — the prefix joined to the op's own path:
 //
-//	/v1/billing    + get_invoices_id -> v1.billing.get_invoices_id
-//	/admin/billing + get_invoices_id -> admin.billing.get_invoices_id
+//	/v1/billing    + /invoices/:id -> get_v1_billing_invoices_by_id
+//	/admin/billing + /invoices/:id -> get_admin_billing_invoices_by_id
+//
+// Two inclusions have two absolute paths, so this distinguishes them for free,
+// and it is the ONLY input: the id is what the address says, so a definition
+// reached through a group and the same routes written flat produce the same id.
+// They are the same operations at the same addresses; nothing about the wiring
+// that led there is part of the name.
+//
+// The prefix used to be spelled as a DOTTED qualifier instead —
+// v1.billing.get_invoices_id — derived from the shape rather than the address.
+// Two rules for one id is one rule too many, and these two disagreed: the
+// published document said post_v1_agents_targets while the tool list said
+// v1.agents.post_targets, so an agent that read the document and asked for the
+// tool it named got "no such tool". The document's rule is the published one, so
+// it is the rule that stayed.
 //
 // Never positional. "First occurrence wins" and "append -2" both make the
 // generated output a function of MOUNT ORDER, so reordering two Use calls in a
-// wiring file becomes a breaking change in every published SDK.
+// wiring file becomes a breaking change in every published SDK. An address is
+// not an order — it is the same however the wiring arrived at it.
 //
 // # The case the two rules meet
 //
 // A definition that DECLARES an id and is included TWICE is now a refused
 // program rather than a silent rename: one global name cannot be two
-// operations, and the qualification that used to paper over it was the very
-// override this rule exists to stop. [derived] reports it, names both
+// operations, and the per-occurrence qualifier that used to paper over it was
+// the very override this rule exists to stop. [derived] reports it, names both
 // occurrences, and says what to do — drop the declaration and take the
-// shape-derived id, or include the definition once. The author chooses; zip
+// address-derived id, or include the definition once. The author chooses; zip
 // does not choose for them behind their back.
 //
-// An occurrence at the root prefix is unqualified either way, so an app that
-// composes nothing publishes exactly the ids it declared, byte for byte.
+// An occurrence at the root prefix answers at its own path, so an app that
+// composes nothing publishes exactly what it would standalone, byte for byte.
 func occurrenceID(prefix string, op *registeredOp) string {
 	if op.OperationID != "" {
 		return op.OperationID // declared: composition does not get a vote
 	}
-	d := dotted(prefix)
-	id := defaultOpID(op.Method, op.Path)
-	if d == "" {
-		return id
-	}
-	return d + "." + id
-}
-
-// dotted turns a path prefix into an id qualifier: "/v1/billing" -> "v1.billing".
-// Path-parameter and wildcard punctuation is dropped rather than encoded — a
-// prefix with a parameter in it names a family of deployments, and an id must
-// name one method.
-func dotted(prefix string) string {
-	var b strings.Builder
-	for _, seg := range strings.Split(prefix, "/") {
-		seg = strings.Trim(seg, ":*{}")
-		if seg == "" {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteByte('.')
-		}
-		for _, r := range seg {
-			switch {
-			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-				b.WriteRune(r)
-			default:
-				b.WriteByte('_')
-			}
-		}
-	}
-	return b.String()
+	return ID(op.Method, joinPath(prefix, op.Path))
 }
 
 // A handler that ANSWERS an address is registered at that address; Use is for
