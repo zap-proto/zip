@@ -57,7 +57,7 @@ any of them.
 | `zip.WithStatus(201)` | declare the SUCCESS status; it keys the document's response, not just the wire |
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
-| `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
+| `zip.Proxy(prefix, addr)` | delegate there; same scheme registry, opposite direction |
 | `app.Graft(children...)` | **compose an APP in process** — the parent's router learns the child's shape, the child keeps its behaviour (v1.18.16) |
 | `zip.Call[In,Out](ctx, conn, op, in)` | invoke an op on another app; `zip.Dial`/`DialApp` gets the conn |
 | `app.Get/Post/...` | the ESCAPE HATCH: an untyped route. No op, no schema, invisible to every projection |
@@ -220,7 +220,7 @@ order, so reordering two lines in a wiring file becomes an SDK break. Surface
 keys on the occurrence; TYPES key on the definition, so one `Invoice` stays one
 schema.
 
-**Mount is a leaf.** `Mount(prefix, addr, decl...)` appends an App like any
+**Proxy is a leaf.** `Proxy(prefix, addr, decl...)` appends an App like any
 other inclusion. The declaration is a BUILD INPUT and is never fetched: a walk
 that did I/O would make `Registry()` fallible and slow and make the document
 depend on another process being up at boot. `Route.Op` (new, additive) is what

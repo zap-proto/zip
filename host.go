@@ -133,7 +133,7 @@ func (h *Host) Include(cs ...Component) error {
 // is referenced by the GROUP, so dropping it means dropping the group.
 //
 // Routing-level only. Go's plugin package has no Close and never unloads a .so,
-// so to reclaim memory run the subsystem out of process behind [Mount].
+// so to reclaim memory run the subsystem out of process behind [Proxy].
 func (h *Host) Drop(defs ...*App) error {
 	site := here(1)
 	return h.app.transact(site, func() {

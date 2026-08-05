@@ -47,7 +47,7 @@ type Client interface {
 // Transport is one address scheme in both directions: Serve terminates bytes
 // arriving here, Dial originates bytes going there. They are the same concept
 // — a wire — so they live in one value rather than two registries that drift.
-// A scheme may leave either half nil; Listen and Mount each say which they
+// A scheme may leave either half nil; Listen and Proxy each say which they
 // needed.
 type Transport struct {
 	Serve func(addr string, handler fasthttp.RequestHandler) Server
@@ -76,7 +76,7 @@ var (
 		},
 		// Dial-only: terminating TLS is the ingress's job, so nothing in the
 		// fleet serves https directly — but reaching something that does (an
-		// api.* host, a third party) is an ordinary Mount, and a CLI talking to
+		// api.* host, a third party) is an ordinary Proxy, and a CLI talking to
 		// a published API is the same call. One registry entry, both directions
 		// covered by the half that exists.
 		"https": {
@@ -97,8 +97,8 @@ func withPort(addr, port string) string {
 }
 
 // RegisterTransport adds (or replaces) a transport keyed by address scheme, so
-// any future protocol slots into both Listen and Mount with ZERO change to
-// either API. Call before Listen or Mount.
+// any future protocol slots into both Listen and Proxy with ZERO change to
+// either API. Call before Listen or Proxy.
 //
 //	zip.RegisterTransport("quic", zip.Transport{
 //		Serve: func(addr string, h fasthttp.RequestHandler) zip.Server {
@@ -239,7 +239,7 @@ func (a *App) listenOn(addrs []string) error {
 }
 
 // mount registers prefix onto a dialled address. The prefix is already CLAIMED
-// by the caller — [Mount] claims its one, [App.load] claims a plugin's whole set
+// by the caller — [Proxy] claims its one, [App.load] claims a plugin's whole set
 // all-or-nothing before spawning anything — so this does not claim again and
 // there is exactly one claim per prefix however the composition came in.
 func (a *App) mount(prefix, addr string) error {

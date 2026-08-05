@@ -436,7 +436,7 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 
 // Remote executes a command against a running zip service, and reads that
 // service's registry off the document it derives from it. Base is an address in
-// the same form Mount takes — the scheme selects the transport, so a command
+// the same form [Proxy] takes — the scheme selects the transport, so a command
 // runs over ZAP, HTTP or anything else RegisterTransport'd without the CLI
 // knowing which.
 type Remote struct {
