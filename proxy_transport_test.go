@@ -16,7 +16,7 @@ import (
 // unix socket when the address is a path. This is the colocated plugin case —
 // no port to allocate, filesystem permissions as the ACL — carrying byte-identical
 // ZAP frames to the tcp case.
-func TestMount_OverUnixSocket(t *testing.T) {
+func TestProxy_OverUnixSocket(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "billing.sock")
 
 	plugin := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
@@ -28,7 +28,7 @@ func TestMount_OverUnixSocket(t *testing.T) {
 	waitSocket(t, sock)
 
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
-	core.Use(must(zip.Mount("/v1/billing", sock)))
+	core.Use(must(zip.Proxy("/v1/billing", sock)))
 
 	status, body := call(t, core, "GET", "/v1/billing/invoices", "")
 	if status != 200 || !strings.Contains(body, `"servedBy":"over-uds"`) {
@@ -59,7 +59,7 @@ func waitSocket(t *testing.T, path string) {
 // zip.App with its own routes, listening on the real ZAP transport. The "core"
 // mounts it by address alone — a bare address, so DefaultScheme (ZAP) — and
 // serves its routes as if they were local. Nothing is shared but the address.
-func TestMount_OverZAP(t *testing.T) {
+func TestProxy_OverZAP(t *testing.T) {
 	plugin := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
 	plugin.Get("/v1/billing/invoices", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "billing-plugin"})
@@ -74,7 +74,7 @@ func TestMount_OverZAP(t *testing.T) {
 	waitReachable(t, pluginAddr)
 
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
-	core.Use(must(zip.Mount("/v1/billing", pluginAddr)))
+	core.Use(must(zip.Proxy("/v1/billing", pluginAddr)))
 
 	// GET travels core -> ZAP -> plugin and the plugin's body comes back.
 	status, body := call(t, core, "GET", "/v1/billing/invoices", "")
@@ -100,7 +100,7 @@ func TestMount_OverZAP(t *testing.T) {
 // path pins: a mount is an ORDINARY wildcard route, so a more specific route
 // registered afterwards still wins. A mount that short-circuited the router
 // would silently shadow the host's own routes.
-func TestMount_StaticBeatsRemoteMount(t *testing.T) {
+func TestProxy_StaticBeatsRemote(t *testing.T) {
 	plugin := zip.New(zip.Config{AppName: "plug", DisableStartupMessage: true})
 	plugin.Get("/v1/billing/*", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "plugin"})
@@ -112,7 +112,7 @@ func TestMount_StaticBeatsRemoteMount(t *testing.T) {
 	waitReachable(t, pluginAddr)
 
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
-	core.Use(must(zip.Mount("/v1/billing", pluginAddr)))
+	core.Use(must(zip.Proxy("/v1/billing", pluginAddr)))
 	// Registered AFTER the mount, and still wins for its exact path.
 	core.Get("/v1/billing/health", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "core"})
@@ -130,8 +130,8 @@ func TestMount_StaticBeatsRemoteMount(t *testing.T) {
 
 // TestMount_UnknownScheme proves Mount refuses an unregistered scheme loudly
 // rather than silently falling back to a default wire.
-func TestMount_UnknownScheme(t *testing.T) {
-	_, err := zip.Mount("/v1/x", "carrier-pigeon://somewhere:1")
+func TestProxy_UnknownScheme(t *testing.T) {
+	_, err := zip.Proxy("/v1/x", "carrier-pigeon://somewhere:1")
 	if err == nil {
 		t.Fatal("Mount with an unregistered scheme returned nil, want an error")
 	}
@@ -143,11 +143,11 @@ func TestMount_UnknownScheme(t *testing.T) {
 // TestMount_DialOnlyAndServeOnly proves a transport may implement one
 // direction: Listen reports a dial-only scheme and Mount reports a serve-only
 // one, each naming which half was missing.
-func TestMount_ServeOnlyTransportCannotDial(t *testing.T) {
+func TestProxy_ServeOnlyTransportCannotDial(t *testing.T) {
 	zip.RegisterTransport("serveonly", zip.Transport{
 		Serve: func(addr string, h fasthttp.RequestHandler) zip.Server { return nil },
 	})
-	_, err := zip.Mount("/v1/x", "serveonly://host:1")
+	_, err := zip.Proxy("/v1/x", "serveonly://host:1")
 	if err == nil || !strings.Contains(err.Error(), "cannot dial") {
 		t.Fatalf("Mount on a serve-only transport: err=%v, want a 'cannot dial' error", err)
 	}

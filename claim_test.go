@@ -75,7 +75,7 @@ func TestARefusedCompositionIsRolledBack(t *testing.T) {
 // they collide with each other exactly as two Loads do. There is no separate
 // register for either.
 func TestMountAndLoadCollideThroughOneMechanism(t *testing.T) {
-	remote, err := zip.Mount("/v1/y", "/run/zip/y.sock")
+	remote, err := zip.Proxy("/v1/y", "/run/zip/y.sock")
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}

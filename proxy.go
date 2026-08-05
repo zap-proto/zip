@@ -13,13 +13,34 @@ import (
 
 // A remote service is a LEAF, not a verb.
 //
-// [Mount] used to be one of five composition verbs and the only one that
+// [Proxy] used to be one of five composition verbs and the only one that
 // pointed at another process. Under one program it stops being special: it
 // appends an App like any other inclusion, whose routes proxy and whose ops
-// forward. Every projection then reads it through the same walk — a mounted
+// forward. Every projection then reads it through the same walk — a remote
 // service appears in the OpenAPI document, the MCP tool list, the CLI commands
 // and the by-name call plane because it is in the registry, not because four
 // projections each learned about mounting.
+//
+// # Why it is not called Mount
+//
+// It was, and the name outlived the design twice over. Graft/Mount/Add
+// dissolved into [App.Use], so "mount" no longer names a verb this package
+// has. Worse, it collided: 118 subsystems in hanzoai/cloud spell their entry
+// point `func Mount(app cloud.Router, deps cloud.Deps) error` — a definition
+// REGISTERING ITSELF — while this one CONNECTS TO a definition somewhere else.
+// One name, two unrelated shapes, in code that composes both. The framework's
+// is the one that moves: one file against a hundred and eighteen.
+//
+// Proxy names the value, not an action performed on the host. That is the whole
+// distinction — [App.Use] composes, this returns the thing composed — and it is
+// why the return type was already an *App and not an error.
+//
+// Not "Remote": that name is taken, and rightly, by [Remote] — the CLI's client
+// for RUNNING a command against a service somewhere else. Both are about a far
+// end, and they point in opposite directions: [Remote] sends a call OUT, Proxy
+// accepts calls IN and forwards them. Naming both "remote" would have replaced
+// one collision with another, which is the trap this rename exists to avoid.
+// Proxy is what every handler below already is.
 //
 // # The declaration is an INPUT, never a fetch
 //
@@ -35,21 +56,22 @@ import (
 //     depend on what the network said at the moment it was asked.
 //
 // The spec is a build input; the server is not asked what it serves. Without a
-// declaration a mount contributes its two proxy addresses and no ops, which is
+// declaration a remote contributes its two proxy addresses and no ops, which is
 // exactly what it contributed before and says honestly that nothing is known
 // about the shape behind it.
-// Mount returns another service, running elsewhere, as a DEFINITION the host
+//
+// Proxy returns another service, running elsewhere, as a DEFINITION the host
 // composes with Use like any other:
 //
-//	ledger, err := zip.Mount("/v1/ledger", "ledger.hanzo.svc:9653", decl)
+//	ledger, err := zip.Proxy("/v1/ledger", "ledger.hanzo.svc:9653", decl)
 //	if err != nil { return err }
 //	app.Use(ledger)
 //
-// It is no longer a VERB on App. Delegating to another process is not a second
-// kind of composition — it is a definition whose handlers happen to be a
-// network away — so it arrives through the one verb and appears in every
-// projection because it is in the registry, not because five projections each
-// learned what mounting meant.
+// It is not a VERB on App. Delegating to another process is not a second kind
+// of composition — it is a definition whose handlers happen to be a network
+// away — so it arrives through the one verb and appears in every projection
+// because it is in the registry, not because five projections each learned what
+// mounting meant.
 //
 // The address scheme selects the transport exactly as [App.Listen]'s does, so a
 // bare address is ZAP and one registry serves both directions.
@@ -58,7 +80,7 @@ import (
 // contributes its two proxy addresses and no ops, which honestly says nothing
 // is known about the shape behind it. With it, the remote's ops join the
 // document, the tool list, the commands and the call plane.
-func Mount(prefix, addr string, decl ...Declaration) (*App, error) {
+func Proxy(prefix, addr string, decl ...Declaration) (*App, error) {
 	var d Declaration
 	if len(decl) > 0 {
 		d = decl[0]
@@ -85,7 +107,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 	}
 	if len(d.Routes) == 0 {
 		// Nothing declared: the prefix and everything under it, which is what a
-		// bare Mount has always registered.
+		// bare Proxy has always registered.
 		p := trimPrefix(prefix)
 		r.All(p, proxy)
 		r.All(p+"/*", proxy)
@@ -100,7 +122,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 		// program poisoned. Validate at the boundary the input crosses, so a bad
 		// declaration is an error like every other bad declaration.
 		if !knownMethod(rt.Method) {
-			return nil, Errorf(400, "zip: Mount(%s): %q is not an HTTP method zip can route (route %q)",
+			return nil, Errorf(400, "zip: Proxy(%s): %q is not an HTTP method zip can route (route %q)",
 				prefix, rt.Method, rt.Pattern)
 		}
 		if rt.Op == "" {

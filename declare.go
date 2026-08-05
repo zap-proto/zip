@@ -83,7 +83,7 @@ type Route struct {
 	Pattern string `json:"pattern"`
 
 	// Op is the operation id this pattern answers under, empty when the route is
-	// untyped. It is what makes a remote [Mount] able to contribute OPS and
+	// untyped. It is what makes a [Proxy] able to contribute OPS and
 	// not merely addresses: the mounting app is handed the declaration inline and
 	// reads the ids out of it, instead of asking the remote what it serves.
 	Op string `json:"op,omitempty"`
