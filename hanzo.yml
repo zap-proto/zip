@@ -25,3 +25,10 @@ test:
     # every auth gate in every app built on zip), the no-Next abort, empty-leaf
     # group roots, static fallback, and the runtime/middleware packages.
     run: go test -count=1 -timeout 10m ./...
+  - name: go-test-collector
+    # contract/ is a module of its own, so ./... above does not reach it and no
+    # consumer of zip inherits what it requires. It runs the collector's REAL
+    # receivers against a real zip app: the one thing proving that two
+    # deliberately separate declarations of the batch shapes still describe one
+    # thing. See contract/doc.go.
+    run: cd contract && go test -count=1 -timeout 5m ./...

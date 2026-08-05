@@ -14,7 +14,7 @@ import (
 	luxlog "github.com/luxfi/log"
 	"github.com/luxfi/metric"
 	fiber "github.com/zap-proto/fiber/v3"
-	"github.com/zap-proto/zip/internal/otlz"
+	"github.com/zap-proto/zip/internal/o11y"
 )
 
 // Telemetry is a property of running, not a feature an app switches on.
@@ -39,6 +39,14 @@ import (
 // luxlog.Logger and stays one. zip writes the request line through it, so an
 // app's fields, level and destination are the app's; the LINE is the
 // framework's.
+//
+// Which is also the answer to "why is only the request line in the store": the
+// request line is the only line zip writes, so it is the only one zip can ship.
+// Everything a handler logs goes where the app's logger points it, untouched.
+// Taking every line off the box is one decision about logging in general, and it
+// belongs to luxfi/log — the thing that already sees every line, for every
+// program, whether or not that program serves requests. Made here it would be
+// zip deciding for 125 programs that a log line leaves the machine.
 
 // The one identifier a request carries between services, and the header it
 // travels in.
@@ -62,56 +70,99 @@ const HeaderTrace = "traceparent"
 // link is visible, a misparsed one is not.
 const traceVersion = "00"
 
-// Telemetry is the override, not the setup. Every field may stay empty forever.
+// Telemetry is where this app's three reports go. Every field may stay empty
+// forever, and an empty field means that signal is not exported.
 //
-// A program reports because it exists. It needs no address, no environment
-// variable and no line of configuration, because zip already knows where a
-// report goes — by the same conventions it already uses for everything else:
+// THE ADDRESS IS THE SWITCH, and it is the switch on both ends: the collector
+// states exactly this rule for receiving — an empty address means that signal is
+// not received in this process — so one sentence describes the producer and the
+// consumer, and there is no enable flag on either side that can disagree with an
+// address. A program with nothing stated still logs and still counts; it simply
+// has nowhere to send, which costs it no goroutine, no connection and no port.
 //
-//	the socket     <RuntimeDir()>/o11y-<signal>.sock, if it EXISTS
-//	loopback       127.0.0.1:4317 spans, :4318 logs, :4319 metrics
+// A field is read first, and the matching variable in the environment second, so
+// a deployment that states an address in its manifest and a process that
+// inherits one from its host agree on which wins — the explicit one:
 //
-// The socket wins wherever it is present, and its presence is the entire
-// configuration: o11y's ingest running in this pod creates it, and that is the
-// fact worth acting on rather than a setting somebody has to keep in step with
-// it. It is also the better channel — over a unix socket the kernel attests
-// which process sent a batch, so a collector learns the sender instead of being
-// told, exactly as zip documents for a Call. On TCP loopback any process on the
-// box can claim to be any service.
+//	Spans     O11Y_SPANS_ADDR
+//	Logs      O11Y_LOGS_ADDR
+//	Metrics   O11Y_METRICS_ADDR
 //
-// The destination is re-decided whenever there is no connection, so start order
-// is nobody's business: a program that starts before the collector picks it up
-// when it appears, with no restart. A program with no collector at all — a
-// laptop, a test — reports into nothing, costs nothing, and says so exactly once.
+// Three names rather than one base address with the three conventional ports
+// derived from it (spans 4317, logs 4318, metrics 4319). The collector binds one
+// listener per signal at one address per signal, refuses two signals that name
+// the same address, and receives whichever signals have one — so deriving two
+// addresses from a third would assert an adjacency it does not promise, and
+// would make "logs are off, spans are on" unsayable. Sibling names also state
+// which port belongs to which signal at the place a deployment sets it, and a
+// batch sent to the wrong ear is dropped by a receiver that decodes one message
+// type, silently on both sides.
 //
 // What is reported is not configurable at all, because a fleet whose members
 // report different shapes cannot be read as a fleet.
 type Telemetry struct {
-	// Spans overrides where spans go, for a collector that is not in this pod
-	// and not on this host. Empty reads OTEL_EXPORTER_ZAP_ENDPOINT — the name the
-	// fleet already deploys — and then falls back to the conventions above.
+	// Spans is where this app's server spans go, as host:port.
 	Spans string
 
-	// Logs overrides where the request line goes. Empty reads
-	// O11Y_LOGS_ZAP_ENDPOINT, then convention.
+	// Logs is where this app's request line goes, as host:port.
 	//
-	// Only zip's OWN request line ships here. An app's logging is its own: its
-	// luxlog.Logger writes wherever the app pointed it and is never intercepted,
-	// teed or rewritten by the framework. Shipping a program's every log line off
-	// the box is a decision that belongs to the program, and taking it here would
-	// mean zip quietly deciding it for 125 of them.
+	// Only zip's OWN request line ships here — the same line, with the same
+	// fields, that the app's logger already writes. An app's other logging is
+	// its own: its luxlog.Logger writes wherever the app pointed it and is
+	// never intercepted, teed or rewritten by the framework. Shipping a
+	// program's every log line off the box is one decision for the logger to
+	// make, in luxfi/log, once, for everything that logs; taking it here would
+	// mean zip quietly making it for 125 programs that never asked.
 	Logs string
 
-	// Metrics overrides where the numbers go. Empty reads
-	// O11Y_METRICS_ZAP_ENDPOINT, then convention.
+	// Metrics is where the numbers go, as host:port.
 	Metrics string
 
 	// Off stops this app reporting at all: no line, no numbers, no spans, no
 	// trace context. It is for the app that must not emit — a test double, a
-	// one-shot command — and it is the only switch, so "is this app
+	// one-shot command — and it is the only switch of its kind, so "is this app
 	// instrumented" has one answer and one place to read it.
 	Off bool
 }
+
+// The environment's spelling of the three addresses. A deployment sets these;
+// they are the names cloud's manifest already uses for the metric ear, extended
+// to its two siblings.
+const (
+	envSpans   = "O11Y_SPANS_ADDR"
+	envLogs    = "O11Y_LOGS_ADDR"
+	envMetrics = "O11Y_METRICS_ADDR"
+)
+
+// addresses is where one app reports, resolved once when the app is built.
+//
+// Once, because there is nothing left to re-decide: a field is fixed at
+// construction and the environment of a running process does not change. The
+// three are held together in one value so "does this app export anything" is one
+// question about one thing.
+type addresses struct{ spans, logs, metrics string }
+
+// resolve reads the three addresses: what the program stated, else what its
+// environment states, else nothing.
+func resolve(cfg Config) addresses {
+	pick := func(stated, env string) string {
+		if v := strings.TrimSpace(stated); v != "" {
+			return v
+		}
+		return strings.TrimSpace(os.Getenv(env))
+	}
+	t := cfg.Telemetry
+	return addresses{
+		spans:   pick(t.Spans, envSpans),
+		logs:    pick(t.Logs, envLogs),
+		metrics: pick(t.Metrics, envMetrics),
+	}
+}
+
+// any reports whether this app has anywhere at all to report to. It is what
+// makes "off" cost nothing: with no address there is no exporter, so no node
+// starts, no port is taken and no connection is attempted.
+func (a addresses) any() bool { return a.spans != "" || a.logs != "" || a.metrics != "" }
 
 // telemetry is one app's instruments. Built once in [newApp], read from every
 // serving goroutine, never rebuilt: a generation swap re-installs the handler
@@ -142,8 +193,13 @@ type telemetry struct {
 	plugins metric.GaugeVec
 	dropped metric.Counter
 
+	// Where this app reports, resolved once when it was built.
+	to addresses
+
 	// ship says this app has somewhere to send spans and lines, so the boundary
-	// should collect them.
+	// should collect them. False when neither address is stated, and then the
+	// boundary keeps nothing: a buffer nobody will drain is a memory leak with a
+	// good reason attached.
 	//
 	// It is decided WITH THE APP rather than when the export goroutine starts,
 	// and that is not a micro-optimisation: Serve returns as soon as the serving
@@ -161,8 +217,8 @@ type telemetry struct {
 	// request the span describes, which is the one place telemetry must never
 	// be. See [telemetry.keep].
 	pending sync.Mutex
-	spans   []otlz.Span
-	records []otlz.LogRecord
+	spans   []o11y.Span
+	records []o11y.LogRecord
 }
 
 // pendingLimit caps what one export interval may accumulate.
@@ -195,11 +251,11 @@ func newTelemetry(cfg Config) *telemetry {
 	if t.off {
 		return t
 	}
-	// There is always somewhere for a report to go — a socket if the collector
-	// is in this pod, loopback otherwise — so an app that is not silenced always
-	// collects. That is what "no configuration" means: nothing to set, and no
-	// arrangement in which a program is quietly not reporting.
-	t.ship = true
+	// An app collects spans and lines when it has somewhere to send them, and
+	// only then. The numbers are different: they are always measured, because
+	// /metrics serves them off this registry whether or not anything is pushed.
+	t.to = resolve(cfg)
+	t.ship = t.to.spans != "" || t.to.logs != ""
 	t.registry = metric.NewRegistry()
 	t.requests = t.registry.NewCounterVec(
 		"http_requests_total",
@@ -234,7 +290,7 @@ func newTelemetry(cfg Config) *telemetry {
 // they describe the same request: dropping the span while keeping the line would
 // leave a log record pointing at a trace that has no span in it, which reads as
 // a broken trace rather than as a dropped one.
-func (t *telemetry) keep(s otlz.Span, r otlz.LogRecord) {
+func (t *telemetry) keep(s o11y.Span, r o11y.LogRecord) {
 	t.pending.Lock()
 	defer t.pending.Unlock()
 	if len(t.spans) >= pendingLimit {
@@ -251,7 +307,7 @@ func (t *telemetry) keep(s otlz.Span, r otlz.LogRecord) {
 // drain takes everything pending and hands the buffers back empty. The caller
 // ships outside the lock, so a slow collector never blocks a request that is
 // only trying to append.
-func (t *telemetry) drain() ([]otlz.Span, []otlz.LogRecord) {
+func (t *telemetry) drain() ([]o11y.Span, []o11y.LogRecord) {
 	t.pending.Lock()
 	defer t.pending.Unlock()
 	s, r := t.spans, t.records
@@ -325,11 +381,19 @@ func (a *App) report() Handler {
 // not a metric label. A trace store is built to hold one row per request and is
 // searched by exactly this — "show me the request for order 8a3f" — where the
 // same value in a metric label would create a time series per order.
+//
+// The KEYS are the collector's vocabulary, not a spelling of our own. It reads
+// a span's path column out of the first of url.path, http.target, http.route,
+// path that a batch carries, and reads a log record's path column out of the
+// same four — one vocabulary across both signals, so a query written against
+// traces answers over logs too. A key it does not know is stored and searchable
+// but fills no column, which is how a report can look complete and leave the
+// column an operator actually searches empty.
 func facts(c *Ctx, method, route, path string, status int) map[string]any {
 	f := map[string]any{
-		"http.method":      method,
-		"http.path":        path,
-		"http.status_code": status,
+		"http.request.method":       method,
+		"url.path":                  path,
+		"http.response.status_code": status,
 	}
 	if route != "" {
 		f["http.route"] = route
@@ -353,14 +417,14 @@ func facts(c *Ctx, method, route, path string, status int) map[string]any {
 // is bounded: a trace store groups by operation name to answer "how is
 // /v1/orders/:id doing", and a name per order id makes that question
 // unanswerable. The path is an attribute, where the cardinality belongs.
-func span(tr trace, method, route, path string, status int, dur time.Duration, start time.Time, err error, c *Ctx) otlz.Span {
+func span(tr trace, method, route, path string, status int, dur time.Duration, start time.Time, err error, c *Ctx) o11y.Span {
 	name := route
 	if name == "" {
 		// Nothing matched, so there is no operation to name. The method alone is
 		// bounded and honest — the path it was looking for rides as an attribute.
 		name = method
 	}
-	s := otlz.Span{
+	s := o11y.Span{
 		TraceID:      tr.trace,
 		SpanID:       tr.span,
 		ParentSpanID: tr.parent,
@@ -372,13 +436,16 @@ func span(tr trace, method, route, path string, status int, dur time.Duration, s
 		StartUnixNs: start.UnixNano(),
 		EndUnixNs:   start.Add(dur).UnixNano(),
 		Attributes:  facts(c, method, route, path, status),
-		StatusCode:  "Ok",
+		// Lowercase because that is what is stored: the collector lowercases the
+		// value and strips a "status_code_" prefix, so sending what a query will
+		// match saves everyone one translation.
+		StatusCode: "ok",
 	}
 	// A span is in error when THIS service failed. A refusal is a correct answer
 	// to a bad request, and marking it an error makes every trace view that
 	// filters on errors mostly noise.
 	if status >= 500 {
-		s.StatusCode = "Error"
+		s.StatusCode = "error"
 		if err != nil {
 			s.StatusMsg = err.Error()
 		}
@@ -388,18 +455,21 @@ func span(tr trace, method, route, path string, status int, dur time.Duration, s
 
 // record renders the same request as the log line that ships.
 //
-// It carries the trace and span ids, which is the whole reason a log address is
-// worth setting: they are what lets a store put this line inside the span above
-// it rather than beside it.
-func record(tr trace, method, route, path string, status int, dur time.Duration, err error, c *Ctx) otlz.LogRecord {
+// It is the line [emit] writes, in the shape the collector decodes: same
+// request, same values, same one line for it, so the stream an operator greps
+// on the box and the stream they query in the store cannot tell different
+// stories. It carries the trace and span ids too, which is the whole reason a
+// log address is worth setting: they are what lets a store put this line INSIDE
+// the span above it rather than beside it.
+func record(tr trace, method, route, path string, status int, dur time.Duration, err error, c *Ctx) o11y.LogRecord {
 	f := facts(c, method, route, path, status)
 	f["duration_ms"] = dur.Milliseconds()
 	if err != nil {
 		f["error"] = err.Error()
 	}
-	r := otlz.LogRecord{
+	r := o11y.LogRecord{
 		TimeUnixNs:   time.Now().UnixNano(),
-		Severity:     otlz.SeverityInfo,
+		Severity:     o11y.SeverityInfo,
 		SeverityText: "info",
 		Body:         "request",
 		Attributes:   f,
@@ -407,7 +477,7 @@ func record(tr trace, method, route, path string, status int, dur time.Duration,
 		SpanID:       tr.span,
 	}
 	if status >= 500 {
-		r.Severity, r.SeverityText = otlz.SeverityError, "error"
+		r.Severity, r.SeverityText = o11y.SeverityError, "error"
 	}
 	return r
 }
@@ -653,27 +723,6 @@ func (a *App) gather() ([]*metric.MetricFamily, error) {
 	return t.registry.Gather()
 }
 
-// addresses are the three destinations, resolved once.
-//
-// The environment is consulted only when the config says nothing, so a
-// deployment that states an address in its manifest and a process that inherits
-// one from its host agree on which wins — the explicit one. Each name belongs
-// to exactly one signal, because the ports do: a batch sent to the wrong ear is
-// dropped by a receiver that only answers one message type, and the failure is
-// silent on both sides.
-func addresses(cfg Config) (spans, logs, metrics string) {
-	pick := func(stated, env string) string {
-		if v := strings.TrimSpace(stated); v != "" {
-			return v
-		}
-		return strings.TrimSpace(os.Getenv(env))
-	}
-	t := cfg.Telemetry
-	return pick(t.Spans, "OTEL_EXPORTER_ZAP_ENDPOINT"),
-		pick(t.Logs, "O11Y_LOGS_ZAP_ENDPOINT"),
-		pick(t.Metrics, "O11Y_METRICS_ZAP_ENDPOINT")
-}
-
 // exports reports whether anything is collected for shipment. A process with no
 // span or log address still measures and still logs; it just does not fill a
 // buffer nothing will drain.
@@ -711,7 +760,7 @@ func (a *App) Metrics() metric.Registerer { return a.telemetry.registry }
 // depending on which way the data arrived.
 const exportInterval = 15 * time.Second
 
-// export ships this app's telemetry to o11y until it shuts down.
+// export ships this app's telemetry to the collector until it shuts down.
 //
 // It is a PUSH because that is what the receiving side accepts: o11y ingests
 // what services send it and scrapes nothing (its own prober checks liveness,
@@ -719,47 +768,54 @@ const exportInterval = 15 * time.Second
 // and scraped — is a service registry we would have to run in order to learn
 // what we already know at the moment a process starts serving.
 //
-// Three signals, three addresses, three connections, mirroring the three ears
-// o11y binds — a signal that saturates or is firewalled takes only itself down.
-// Metrics ride the exporter luxfi/metric already ships, because it is this same
-// pattern plus the family translation, and a second implementation here would be
-// a second thing to keep in step with the collector.
+// One address and one connection per signal, mirroring the ears the collector
+// binds — a signal that saturates or is firewalled takes only itself down. A
+// signal with no address gets no exporter at all, so an app that reports nowhere
+// starts no goroutine, opens no connection and takes no port: it returns right
+// here. Metrics ride the exporter luxfi/metric already ships, because that is
+// this same shape plus the family translation, and a second implementation here
+// would be a second thing to keep in step with the collector.
 //
 // Nothing here can fail loudly. A collector that is down, moved or not yet
 // deployed must not take an app with it, so every failure is a debug line and
 // the next tick tries again.
 func (a *App) export() {
-	if a.telemetry.off {
+	t := a.telemetry
+	if t.off || !t.to.any() {
 		return
 	}
-	spans, logs, metrics := addresses(a.cfg)
 
 	stop := make(chan struct{})
 	var closers []func(context.Context) error
 
-	// Nothing dials here. Each exporter resolves its destination when it first
-	// has something to send, and re-resolves whenever it has no connection, so a
-	// collector that starts after this program is picked up without a restart.
-	spanOut := otlz.New(otlz.Spans, spans, a.cfg.AppName, a.logger.Info)
-	logOut := otlz.New(otlz.Logs, logs, a.cfg.AppName, a.logger.Info)
-	closers = append(closers,
-		func(context.Context) error { spanOut.Close(); return nil },
-		func(context.Context) error { logOut.Close(); return nil },
-	)
+	// Nothing dials here. Each exporter connects when it first has something to
+	// send, and reconnects whenever it has none, so a collector that starts
+	// after this program is picked up without a restart.
+	var spanOut, logOut *o11y.Export
+	if t.to.spans != "" {
+		spanOut = o11y.New(o11y.Spans, t.to.spans, a.cfg.AppName, a.logger.Info)
+		closers = append(closers, func(context.Context) error { spanOut.Close(); return nil })
+	}
+	if t.to.logs != "" {
+		logOut = o11y.New(o11y.Logs, t.to.logs, a.cfg.AppName, a.logger.Info)
+		closers = append(closers, func(context.Context) error { logOut.Close(); return nil })
+	}
 
 	// Metrics ride the exporter luxfi/metric already ships, which is this same
-	// pattern plus the family translation. It takes a fixed endpoint rather than
-	// resolving one, so the convention is applied here instead.
-	metricOut, err := metric.NewZAPExporter(metric.ZAPExporterConfig{
-		Endpoint: otlz.Address(otlz.Metrics, metrics),
-		AppName:  a.cfg.AppName,
-		Resource: map[string]string{"service.name": a.cfg.AppName},
-	})
-	if err != nil {
-		a.logger.Error("zip telemetry metrics export unavailable", "err", err)
-		metricOut = nil
-	} else {
-		closers = append(closers, metricOut.Shutdown)
+	// shape plus the family translation. It is built only when there is an
+	// address, because building it starts a node and takes a port immediately.
+	var metricOut *metric.ZAPExporter
+	if t.to.metrics != "" {
+		out, err := metric.NewZAPExporter(metric.ZAPExporterConfig{
+			Endpoint: t.to.metrics,
+			AppName:  a.cfg.AppName,
+		})
+		if err != nil {
+			a.logger.Error("zip telemetry metrics export unavailable", "err", err)
+		} else {
+			metricOut = out
+			closers = append(closers, out.Shutdown)
+		}
 	}
 
 	a.OnShutdown(func(ctx context.Context) error {
@@ -797,16 +853,20 @@ func (a *App) export() {
 // The buffer is drained ONCE and both batches are built from that one drain, so
 // a span and the line describing the same request leave together. Draining per
 // signal would let a shutdown deliver the spans and lose the lines.
-func (a *App) flush(ctx context.Context, spanOut, logOut *otlz.Export) {
+//
+// The batch names the app and nothing else. The collector lifts a batch's app
+// name into service.name when the resource does not already carry one, so
+// saying it twice would be two places to disagree about what this program is
+// called.
+func (a *App) flush(ctx context.Context, spanOut, logOut *o11y.Export) {
 	if !a.telemetry.ship {
 		return
 	}
 	spans, records := a.telemetry.drain()
-	resource := map[string]string{"service.name": a.cfg.AppName}
 	if spanOut != nil {
-		spanOut.Spans(ctx, otlz.SpanBatch{Resource: resource, Spans: spans})
+		spanOut.Spans(ctx, o11y.SpanBatch{Spans: spans})
 	}
 	if logOut != nil {
-		logOut.Logs(ctx, otlz.LogBatch{Resource: resource, Records: records})
+		logOut.Logs(ctx, o11y.LogBatch{Records: records})
 	}
 }
