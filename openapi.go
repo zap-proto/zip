@@ -432,16 +432,9 @@ func colonParams(path string) []string {
 	return out
 }
 
-func closeColonParams(path string) string {
-	// Convert ":name" segments to "{name}".
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		if strings.HasPrefix(p, ":") {
-			parts[i] = "{" + p[1:] + "}"
-		}
-	}
-	return strings.Join(parts, "/")
-}
+// closeColonParams is the document's spelling of a router path — see [Template],
+// which is the same rule under its public name.
+func closeColonParams(path string) string { return Template(path) }
 
 func typeName(t reflect.Type) string {
 	if t == nil {
