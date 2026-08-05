@@ -502,6 +502,26 @@ func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byt
 	req.SetRequestURI(path)
 	req.SetHost(host)
 	req.Header.SetMethod(method)
+	// THE ESCAPING MUST SURVIVE THE TRANSPORT. Invoke percent-encodes every path
+	// argument (urlEscape) precisely so an argument cannot become part of the
+	// path, and fasthttp then undid it: its default serialisation is
+	// appendQuotedPath(u.Path()), and Path() has already decoded %2F and resolved
+	// "..". So `Invoke(cmd, {"app": "../../../v1/iam/users"})` on
+	// GET /v1/platform/apps/:app left as GET /v1/iam/users — one op's argument
+	// addressing another op entirely, on the caller's own credential.
+	//
+	// Set here so RequestURI() serialises PathOriginal(), the bytes Invoke built.
+	// It is stated AGAIN on the http/https HostClients (transport.go), and that is
+	// not a belt on a brace: HostClient.doNonNilReqResp ASSIGNS this field from
+	// its own, so for those two transports the request's own wish is overwritten
+	// and only the client's setting is read. This line is what carries the
+	// property over every OTHER transport — ZAP, the default, and anything
+	// RegisterTransport adds — which serialise the request as it was built.
+	//
+	// A command addresses ONE operation. That is the whole basis on which any
+	// caller decides whether it may run, and a transport that re-reads the address
+	// makes that decision about a different request than the one it sends.
+	req.URI().DisablePathNormalizing = true
 	if scheme == "https" {
 		req.URI().SetScheme("https")
 	}
