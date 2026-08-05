@@ -358,7 +358,7 @@ func TestGraft_UngraftedDocumentIsUnchanged(t *testing.T) {
 // who wrote the op and got "nobody".
 //
 // Nothing said so, because the ungrafted and one-level cases both still passed.
-// hanzoai/iam publishes 345 schemas through groups: every one of them arrived
+// hanzoai/iam publishes 95 schemas through groups: every one of them arrived
 // as a bare Application, Role, Input — colliding with the host's own types of
 // those names, one name for two shapes, in the document every SDK is generated
 // from.

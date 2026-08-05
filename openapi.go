@@ -271,12 +271,72 @@ func (a *App) buildOpenAPI() map[string]any {
 	}
 }
 
-func defaultOpID(method, path string) string {
-	clean := strings.ReplaceAll(path, "/", "_")
-	clean = strings.ReplaceAll(clean, "{", "")
-	clean = strings.ReplaceAll(clean, "}", "")
-	clean = strings.ReplaceAll(clean, ":", "")
-	return strings.ToLower(method) + clean
+// ID is an operation's name, derived from its method and its ABSOLUTE path.
+//
+// It is THE rule for that derivation and the only one. The OpenAPI operationId,
+// the MCP tool name, the key the by-name call plane resolves and the command the
+// CLI spells all read this function, so one operation carries one token on every
+// surface and an agent reading the document can call what it just read.
+//
+// '_' is the SEPARATOR — it encodes '/' — so any character that also folded to
+// '_' would collide with a path boundary. That is not hypothetical: a router
+// serving both /v1/pricing-policy and /v1/pricing/policy, under an earlier
+// "everything non-alphanumeric becomes _" rule, collapsed the two onto one id.
+// Hyphenated addresses are permanent (…/git-upload-pack, …/documents/delete-batch),
+// so '-' and '.' — both legal in an operationId — are PRESERVED rather than
+// folded, which keeps such a pair distinct: get_v1_pricing-policy is not
+// get_v1_pricing_policy.
+//
+// A parameter contributes "by_<name>", so /v1/a/{b} and /v1/a/b do not collapse
+// either. Every spelling of one parameter reaches the same name: the router's
+// (":id", and the constraint and optional marker that are matching business and
+// not naming — see [Template]), the document's ("{id}"), and a wildcard, which
+// declares no name and takes the positional one the document gives it.
+//
+// This is derivation, not proof: a literal '_' in a segment can still alias a
+// '/' (/v1/a/b_c against /v1/a/b/c). The walk VERIFIES uniqueness across the
+// whole program and refuses to publish a duplicate — that check, not this
+// encoding, is what makes the ids trustworthy.
+func ID(method, path string) string {
+	var b strings.Builder
+	b.WriteString(strings.ToLower(method))
+	stars := 0
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "" {
+			continue
+		}
+		b.WriteByte('_')
+		switch {
+		case seg == "*" || seg == "+":
+			stars++
+			seg = "wildcard" + strconv.Itoa(stars)
+			b.WriteString("by_")
+		case strings.HasPrefix(seg, "{"):
+			// The document's spelling of what paramName reads in the router's.
+			seg = paramName(":" + strings.Trim(seg, "{}"))
+			b.WriteString("by_")
+		case strings.HasPrefix(seg, ":"):
+			seg = paramName(seg)
+			b.WriteString("by_")
+		}
+		b.WriteString(sanitize(seg))
+	}
+	return b.String()
+}
+
+// sanitize reduces a path segment to [a-z0-9.-], the characters that are legal
+// in an operationId and cannot be confused with the '_' path separator.
+func sanitize(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // hasBody reports whether a method carries a JSON request body ON THE WIRE. It

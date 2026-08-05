@@ -83,11 +83,11 @@ func TestDeclaredOperationIDSurvivesComposition(t *testing.T) {
 	}
 }
 
-// The other half of the rule, and the reason the qualification exists at all:
-// an op that declares NO id is still qualified by its occurrence's prefix, so
-// one definition included twice yields two distinguishable ids and neither is a
+// The other half of the rule, and the reason the derivation exists at all: an
+// op that declares NO id takes the one its ABSOLUTE path spells, so one
+// definition included twice yields two distinguishable ids and neither is a
 // function of mount order.
-func TestUndeclaredOperationIDIsStillQualified(t *testing.T) {
+func TestUndeclaredOperationIDComesFromTheAbsolutePath(t *testing.T) {
 	anon := quiet("anon")
 	Get(anon, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 		return &invoiceOut{ID: in.ID}, nil
@@ -104,10 +104,10 @@ func TestUndeclaredOperationIDIsStillQualified(t *testing.T) {
 	for _, op := range host.Registry() {
 		got[op.OperationID] = true
 	}
-	for _, want := range []string{"v1.get_invoices_id", "admin.get_invoices_id"} {
+	for _, want := range []string{"get_v1_invoices_by_id", "get_admin_invoices_by_id"} {
 		if !got[want] {
-			t.Errorf("id %q missing from %v — an UNDECLARED id must still be qualified by "+
-				"the prefix its occurrence answers under", want, got)
+			t.Errorf("id %q missing from %v — an UNDECLARED id must be derived from the "+
+				"absolute path its occurrence answers at", want, got)
 		}
 	}
 }

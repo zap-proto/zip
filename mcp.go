@@ -586,7 +586,7 @@ func opName(op *registeredOp) string {
 	if op.OperationID != "" {
 		return op.OperationID
 	}
-	return defaultOpID(op.Method, op.Path)
+	return ID(op.Method, op.Path)
 }
 
 func mcpResult(id json.RawMessage, result any) map[string]any {
