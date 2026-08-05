@@ -72,8 +72,18 @@ var (
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
 				return &httpServer{addr: addr, srv: &fasthttp.Server{Handler: h}}
 			},
-			Dial: func(addr string) Client { return &fasthttp.HostClient{Addr: withPort(addr, "80")} },
+			Dial: func(addr string) Client {
+				return &fasthttp.HostClient{Addr: withPort(addr, "80"), DisablePathNormalizing: true}
+			},
 		},
+		// DisablePathNormalizing on both dialers: the address a caller BUILT is the
+		// address that goes out. fasthttp's default is to re-read the path —
+		// decoding %2F and resolving ".." — which turns a percent-encoded argument
+		// back into path structure and lets one operation's input address another
+		// (see Remote.do). HostClient.doNonNilReqResp assigns the request's flag
+		// FROM this field, so on these two transports this is the only setting that
+		// is read; the request-level one covers the rest.
+		//
 		// Dial-only: terminating TLS is the ingress's job, so nothing in the
 		// fleet serves https directly — but reaching something that does (an
 		// api.* host, a third party) is an ordinary Proxy, and a CLI talking to
@@ -81,7 +91,7 @@ var (
 		// covered by the half that exists.
 		"https": {
 			Dial: func(addr string) Client {
-				return &fasthttp.HostClient{Addr: withPort(addr, "443"), IsTLS: true}
+				return &fasthttp.HostClient{Addr: withPort(addr, "443"), IsTLS: true, DisablePathNormalizing: true}
 			},
 		},
 	}
