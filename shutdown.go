@@ -59,6 +59,7 @@ func (a *App) shutdown(ctx context.Context) error {
 
 	// 1. Stop accepting new connections on every transport listener.
 	a.closeServers()
+	a.closeMCP()
 	// 2. Drain in-flight requests (graceful; bounded by ctx).
 	// A program that was never served has no router to drain.
 	var errs []error

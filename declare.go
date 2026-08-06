@@ -179,7 +179,7 @@ func declaredMethods(m string) []string {
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.
 func (a *App) installPluginRoute() {
 	a.control(fiber.MethodGet, PluginPath, func(fc fiber.Ctx) error {
-		fc.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		fc.Set(fiber.HeaderContentType, mimeJSON)
 		return fc.JSON(a.Declaration())
 	})
 }

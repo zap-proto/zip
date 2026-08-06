@@ -244,6 +244,11 @@ func (a *App) listenOn(addrs []string) error {
 	// HIP-0106 §2(3): peer ops ride a SECOND app served only on the canonical
 	// socket, so an internal op is never reachable on the edge.
 	a.servePeer()
+	// MCP over ZAP, when the deployment named an address for it. It is not a
+	// scheme in the transport registry above, because that registry is about
+	// WIRES that carry fasthttp requests and this is a different protocol on the
+	// same wire — the sibling of zap-proto/http, not a second spelling of it.
+	a.serveMCP()
 
 	// Serve every transport concurrently; return the first error (Shutdown
 	// closes the rest via closeServers).

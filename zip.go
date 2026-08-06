@@ -36,6 +36,7 @@ import (
 
 	luxlog "github.com/luxfi/log"
 	"github.com/zap-proto/fiber/v3"
+	zapmcp "github.com/zap-proto/mcp"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
@@ -268,6 +269,17 @@ type App struct {
 	// per-caller half can tell whether a tenant tool would shadow a projected one
 	// without re-parsing the array on every request.
 	mcpNames atomic.Pointer[map[string]bool]
+
+	// The ZAP-native MCP listener, when Config.MCP.Addr named one. It is a
+	// zapmcp.Server over App.MCP — the door served on the wire it was designed
+	// for, with no HTTP anywhere in the path. Guarded by mcpMu so a second Listen
+	// does not bind a second one.
+	mcpSrv *zapmcp.Server
+	mcpMu  sync.Mutex
+	// mcpOnce renders the tool list for whichever door asks first, so an app
+	// served only over ZAP is not left with the empty projection the HTTP
+	// installer used to be the sole producer of.
+	mcpOnce sync.Once
 
 	// The ops sibling (/healthz, /readyz, /metrics) and the listener count its
 	// readiness reports. born is the process's own clock for zip_uptime_seconds.
