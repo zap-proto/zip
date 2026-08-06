@@ -453,6 +453,46 @@ canonical path works on a fresh host. An existing directory keeps its own mode:
 a deployment needing a socket shared across users creates the directory itself
 and points `ZIP_RUNTIME_DIR` at it.
 
+## The peer that is not a peer — `here.go` (v1.26.1)
+
+Sometimes the app a caller names is *this* process. A fused binary mounts many
+apps; a service asks one of its own ops. Dialing the canonical socket for that
+is a loop — encode a value we already hold, hand it to the kernel, read it back,
+parse it into a copy — and only the ADDRESSING ever needed a wire.
+
+So a bound listener records which `*App` answers for it, and two calls read that
+back:
+
+```go
+if a := zip.Serving("commerce"); a != nil {          // is it here?
+    return zip.Here[BalanceIn, Balance](ctx, a, "finance_balance", &in)
+}
+out, err := zip.Ask[BalanceIn, Balance](ctx, "commerce", "finance_balance", &in)
+```
+
+`Here` is `Call` with the `Conn` removed. It finds the op with the same
+`opByName` the socket plane uses and runs it through the op's own seam, so it
+validates and authorizes identically — `registeredOp.direct` and
+`registeredOp.invoke` share one contract closure, and there is no path into a
+handler that skips a check another path makes. What `direct` does not do is
+decode, or bind a URL and headers: there is no request, and the caller supplies
+the whole input at once. The reply is the handler's own value, not a copy —
+read it, do not write it.
+
+`Serving(name)` is a fact about the PROCESS, keyed on `SocketPath(name)` so
+there is no second opinion about where an app lives. It goes true when the
+listener binds and false when it closes, before the listener does, so the
+in-process door and the socket never disagree about whether the app is up. Nil
+means "not here" and never "not deployed" — absence in the DEPLOYMENT is the
+router's word.
+
+Why it exists: cloud reached its own co-resident subsystems by building an
+`http.Request` and dispatching it into its own router, which re-ran every edge
+middleware — including middlewares that themselves read the subsystem being
+served, so a read re-entered the app without bound. The cure there was a depth
+cap keyed on a goroutine id parsed out of `runtime.Stack`. A direct op call
+cannot express that shape: it enters one op, not one router.
+
 ## Who is calling — `caller.go`
 
 Two questions, two authorities, neither answered by the caller:

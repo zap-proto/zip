@@ -196,6 +196,7 @@ func (a *App) listenOn(addrs []string) error {
 	h := a.pinned()
 
 	servers := make([]Server, 0, len(addrs))
+	unbind := make([]func(), 0, len(addrs))
 	for _, raw := range addrs {
 		scheme, addr, t, err := transportFor(raw)
 		if err != nil {
@@ -220,11 +221,16 @@ func (a *App) listenOn(addrs []string) error {
 			t.applyConfig(a.cfg)
 		}
 		servers = append(servers, s)
+		// This app now answers at this address, and a caller in THIS process can
+		// reach its ops without the address (see [Serving] and [Here]). Recorded
+		// here rather than at Serve because binding is what makes it true.
+		unbind = append(unbind, bound(addr, a))
 		a.logger.Info("zip listening", "transport", scheme, "addr", addr)
 	}
 
 	a.srvMu.Lock()
 	a.servers = servers
+	a.unbind = unbind
 	a.srvMu.Unlock()
 	a.listening.Add(int32(len(servers)))
 
@@ -342,7 +348,16 @@ func makeSocketDir(addr string) error {
 func (a *App) closeServers() {
 	a.srvMu.Lock()
 	servers := a.servers
+	unbind := a.unbind
+	a.unbind = nil
 	a.srvMu.Unlock()
+	// Stop answering by name BEFORE the listeners go, so an in-process caller
+	// cannot be handed an App that is on its way down while a caller over the
+	// socket is already getting a refused connection. The two ends of the same
+	// app must not disagree about whether it is up.
+	for _, u := range unbind {
+		u()
+	}
 	for _, s := range servers {
 		_ = s.Close()
 	}
