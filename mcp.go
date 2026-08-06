@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -553,6 +554,37 @@ func mcpToolOf(op *registeredOp) map[string]any {
 		"name":        opName(op),
 		"description": desc,
 		"inputSchema": rootSchemaOf(op.InType, docFields(hasDoc, doc)),
+		// readOnlyHint is derived from the METHOD, because that is where the
+		// answer already lives: a GET op is a read by construction, and no op can
+		// be annotated inconsistently with the route it IS.
+		//
+		// It is not decoration. An MCP client that cannot tell a read from a write
+		// must assume WRITE, and Slackbot says so outright — an unclassified tool
+		// defaults to write classification and prompts the user Allow / Always /
+		// Deny before EVERY call. Measured on cloud's 1,323-tool surface: 0 carried
+		// annotations, so every read cost a confirmation. That is the difference
+		// between an agent that answers and one that interrogates.
+		//
+		// Only the true half is emitted. readOnlyHint:false is the client's own
+		// default, and writing it would claim we had classified a mutation when all
+		// we know is that it is not a GET.
+		"annotations": mcpAnnotationsOf(op),
+	}
+}
+
+// mcpAnnotationsOf carries what the protocol lets a server say about a tool
+// beyond its schema. Today that is readOnlyHint alone.
+//
+// HEAD is included with GET: it is a read whose body is discarded, so a client
+// that treats it as a mutation is wrong in the only direction that costs a
+// prompt. Everything else — POST, PUT, PATCH, DELETE — is left unsaid rather
+// than asserted safe, so an unknown or custom method fails toward caution.
+func mcpAnnotationsOf(op *registeredOp) map[string]any {
+	switch op.Method {
+	case http.MethodGet, http.MethodHead:
+		return map[string]any{"readOnlyHint": true}
+	default:
+		return map[string]any{}
 	}
 }
 
