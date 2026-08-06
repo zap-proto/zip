@@ -553,6 +553,98 @@ which is why there is no separate `zapuds` scheme — one wire, one scheme.
 Adding a protocol is one `RegisterTransport` call and changes neither `Listen`
 nor `Mount`.
 
+## MCP rides ZAP, and HTTP rides MCP (v1.27.0 — SHAPE CHANGE)
+
+`mcp.go`, plus the new module `github.com/zap-proto/mcp` (`zapmcp`).
+
+**The door is `App.MCP(ctx, *zapmcp.Frame) *zapmcp.Frame`.** It takes a value and
+returns one. It names no transport, holds no request, and is literally a
+`zapmcp.Handler`, so serving the fleet's tools over ZAP with **no HTTP listener
+at all** is one line:
+
+```go
+srv := &zapmcp.Server{Network: "unix", Addr: sock, Handler: app.MCP}
+srv.ListenAndServe()
+```
+
+`Config.MCP.Addr` does exactly that from inside `Listen`, on the same footing as
+`Config.OpsAddr`: empty binds nothing, a deployment states the address.
+
+**HTTP is now an adapter over the door, not the thing it is made of.** The `/mcp`
+route reads a JSON-RPC body into a frame, calls `App.MCP`, and writes the answer.
+That is the entire HTTP surface of MCP — nine lines in `installMCP`, plus
+`mcpSend`.
+
+### What was actually wrong before
+
+`mcpCall(fc fiber.Ctx, req mcpRequest)`. The door's own signature took a fiber
+context and read the caller's headers off it, which means **a tools/call could
+not exist until an HTTP request did**. "ZAP-native MCP" was true only in the
+sense that ZAP carried the HTTP request that carried the tool call — the
+transport sat underneath the protocol, exactly backwards from how `zaphttp` and
+`zapmcp` are meant to sit beside each other on the wire.
+
+### zap-proto/mcp
+
+The sibling of `zap-proto/http`: same seams (`Server`/`ListenAndServe`/`Serve`,
+`Dial`/`Transport`/`Do`), same offset discipline in the codec, neither depending
+on the other. It implements `schema/zap_mcp.zap`, which had described this wire
+since that repo opened while only TypeScript spoke it.
+
+**One value, two projections.** `zapmcp.Frame` renders as the ZAP wire
+(`zapmcp.Marshal`) and as the JSON-RPC 2.0 message (`json.Marshal` — the Frame
+implements `json.Marshaler`). zip no longer hand-rolls the envelope: `mcpResult`,
+`mcpErr`, `idOrNull` and `mcpRequest` are gone, and the bytes an agent reads over
+HTTP and over ZAP are two renderings of one value rather than two encoders to
+keep in step.
+
+### Consequences worth knowing
+
+- **The caller comes off the ctx, not off headers.** `list` reads
+  `CallerOf(ctx).Org` where it used to read `fc.Get(HeaderOrg)`, so the
+  per-caller half of `tools/list` works on the ZAP door too. A ZAP server states
+  the caller with `WithCaller` after deciding who the peer is.
+- **`headerOf(ctx)`** (`caller.go`) is the declared-header reader, resolved from
+  the context. Where a request is behind the ctx it reads that request's headers;
+  where none is, it is nil — which is the honest answer a frame has, and the same
+  rule `CallerOf` already followed.
+- **A relayed tools/call now forwards IDENTITY only.** `relay` renders the
+  message for the hop instead of passing the inbound request through, so a child
+  receives the caller's identity via `forwardIdentity` and not every header the
+  edge happened to carry. That is also what lets a host relay from a door with no
+  HTTP request in hand.
+- **`ask` (was `askOpen`) goes through `relay`**, so there is one hop function
+  instead of two.
+- **A malformed message with neither method nor id** now answers `-32601` where
+  it used to answer HTTP 202.
+- **The tool list renders for whichever door asks first** (`mcpOnce`). It used to
+  be rendered by the HTTP installer alone, so an app served only over ZAP
+  answered `tools/list` with `[]` — the door working and having nothing to say.
+
+### The gates
+
+- `TestMCP_ServesOverZapWithNoHTTPListener` — asserts `prepared == false`,
+  zero `servers`, zero `listening`, and then drives a full MCP session.
+- `TestMCP_BothDoorsAnswerTheSame` — the ZAP socket and the HTTP route must
+  return byte-identical results for the same message.
+- `TestFiberIsNotInTheDispatchPath` — AST check: none of `App.MCP`, `tool`,
+  `answer`, `list`, `source`, `ask`, `relay` may name a `fiber.` anything, in a
+  signature **or** a body. The regression that would undo this is one line of
+  "just read `fc.Get` here", and it would pass every behavioural test because the
+  HTTP door would keep working.
+
+### zaphttp and fiber are not two HTTP paths
+
+Worth stating because it looks like duplication and is not. `zap-proto/http` is
+the **wire** — it reads ZAP frames and reconstructs a `*fasthttp.RequestCtx`.
+`zap-proto/fiber` is the **router** — it takes a `fasthttp.RequestHandler` and
+dispatches by method and path. They run in series (wire → router → handler), not
+in competition, and the transport registry proves it: the `zap` scheme serves via
+`zaphttp.Server` and the `http` scheme via `fasthttp.Server`, and **both** hand
+the very same fiber handler in. There is one router and two wire terminations,
+which is the minimum: plain HTTP has to be terminated by something that speaks
+plain HTTP.
+
 ## Services and plugins
 
 `service.go`, `load.go`. `Service` is `func(*App) error`. A constructor taking

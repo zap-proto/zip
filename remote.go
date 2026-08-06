@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/valyala/fasthttp"
-	fiber "github.com/zap-proto/fiber/v3"
 )
 
 // A remote service is a LEAF, not a verb.
@@ -222,7 +221,7 @@ func remoteInvoke(client Client, host, method, pattern string) func(context.Cont
 		req.Header.SetMethod(method)
 		if len(body) > 0 {
 			req.SetBody(body)
-			req.Header.SetContentType(fiber.MIMEApplicationJSON)
+			req.Header.SetContentType(mimeJSON)
 		}
 		forwardIdentity(ctx, req)
 

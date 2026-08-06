@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
+	zapmcp "github.com/zap-proto/mcp"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
@@ -18,16 +20,47 @@ import (
 // tool whose inputSchema is schemaOf(In) and whose call runs the exact same fn
 // (op.invoke). One value (the op), three projections (REST · OpenAPI · MCP).
 //
-// Because /mcp is an ordinary route on the app, it is served over EVERY
-// transport the app Listens on — so ZAP-native MCP is automatic: an agent
-// speaking ZAP gets the tool surface with zero extra wiring. Enabled by default.
+// # ZAP is underneath, not beside
+//
+// MCP is a protocol on the ZAP wire, the sibling of zap-proto/http — so the door
+// here takes a [zapmcp.Frame] and answers one, and knows nothing about any
+// transport. [App.MCP] IS a zapmcp.Handler, which means an agent reaches these
+// tools over ZAP with no HTTP listener running at all:
+//
+//	srv := &zapmcp.Server{Network: "unix", Addr: sock, Handler: app.MCP}
+//
+// HTTP is then an ADAPTER over that door — the /mcp route in installMCP reads a
+// JSON-RPC body into a frame, calls App.MCP, and writes the answer back — rather
+// than the thing the door is built out of.
+//
+// It used to be the other way round: the door's own signature took a fiber.Ctx
+// and read the caller off it, so a tools/call could not happen unless an HTTP
+// request already had. "ZAP-native MCP" was true only in the sense that ZAP
+// carried the HTTP request that carried the tool call. Now the frame is the
+// unit and the wire is a choice. See TestMCP_ServesOverZapWithNoHTTPListener,
+// and TestFiberIsNotInTheDispatchPath for the rule that keeps it that way.
+//
+// The JSON-RPC 2.0 envelope is zapmcp.Frame's own JSON projection, so the bytes
+// an agent reads over HTTP and the bytes it reads over ZAP describe one value
+// and cannot drift.
 
 // MCPConfig configures the auto-derived MCP surface.
 type MCPConfig struct {
 	// Disabled suppresses the /mcp route (MCP is on by default — it's free).
 	Disabled bool
-	// Path overrides the mount path (default "/mcp").
+	// Path overrides the HTTP mount path (default "/mcp").
 	Path string
+	// Addr is where this app serves MCP over ZAP, natively — no HTTP listener,
+	// no request, no status code, just frames. Empty binds nothing, exactly as
+	// [Config.OpsAddr] does: an address is deployment configuration and a
+	// deployment states it.
+	//
+	//	zip.MCPConfig{Addr: zip.SocketPath("flags-mcp")}
+	//
+	// The door itself is [App.MCP], so a deployment that wants it somewhere this
+	// does not reach serves that handler with a zapmcp.Server of its own. This is
+	// the convenience, not a second mechanism.
+	Addr string
 	// Name is the server name reported to MCP clients (default AppName, else "zip").
 	Name string
 	// Source is the door's PER-CALLER half: the tools that exist because of who
@@ -61,6 +94,12 @@ type Source interface {
 	// JSON-encodable result.
 	Call(ctx context.Context, name string, args json.RawMessage) (any, error)
 }
+
+// mimeJSON is the boundary content type, spelled once. HIP-0106: JSON at the
+// edge, ZAP between services — so this is what an answer a browser or an agent
+// reads carries, and it is stated here rather than reached for through the
+// router, which is not in the path of everything that writes one.
+const mimeJSON = "application/json"
 
 // mcpProtocolVersion is the MCP spec revision zip implements.
 const mcpProtocolVersion = "2025-06-18"
@@ -99,10 +138,37 @@ func (a *App) installMCP() {
 	if a.cfg.MCP.Disabled || (len(a.Registry()) == 0 && len(a.tools()) == 0 && !a.hasCaller()) {
 		return
 	}
-	a.renderTools()
-	a.control(fiber.MethodPost, a.mcpPath(), a.handleMCP)
+	a.mcpOnce.Do(a.renderTools)
+	// HTTP is an ADAPTER over the door, not a peer of it: read the JSON-RPC body
+	// into a frame, answer it, write the answer back. Everything HTTP knows about
+	// this surface is in these nine lines — which is the whole point, and the
+	// reason the same door needs no second implementation to be served over ZAP.
+	a.control(fiber.MethodPost, a.mcpPath(), func(fc fiber.Ctx) error {
+		var f zapmcp.Frame
+		if err := json.Unmarshal(fc.Body(), &f); err != nil {
+			return mcpSend(fc, &zapmcp.Frame{Kind: zapmcp.Response,
+				Err: &zapmcp.Error{Code: zapmcp.CodeParse, Message: "parse error"}})
+		}
+		ans := a.MCP(callerContext(fc), &f)
+		if ans == nil {
+			return fc.SendStatus(fiber.StatusAccepted) // a notification
+		}
+		return mcpSend(fc, ans)
+	})
 	a.logger.Info("zip mcp", "path", a.mcpPath(), "ops", len(a.Registry()),
 		"plugin tools", len(a.tools()), "per-caller", a.hasCaller())
+}
+
+// mcpSend writes one frame as the JSON-RPC message an HTTP client reads. The
+// rendering is [zapmcp.Frame]'s own, so the bytes an agent sees over HTTP and
+// the bytes it sees over ZAP describe the same value and cannot drift.
+func mcpSend(fc fiber.Ctx, f *zapmcp.Frame) error {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	fc.Set(fiber.HeaderContentType, mimeJSON)
+	return fc.Send(b)
 }
 
 // hasCaller reports that this door has a per-caller half at all — a Source of its
@@ -231,62 +297,89 @@ func parseTools(name string, b []byte) ([]mcpTool, error) {
 	return out, nil
 }
 
-type mcpRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-}
-
-// handleMCP dispatches one JSON-RPC 2.0 MCP message.
-func (a *App) handleMCP(fc fiber.Ctx) error {
-	var req mcpRequest
-	if err := json.Unmarshal(fc.Body(), &req); err != nil {
-		return fc.JSON(mcpErr(nil, -32700, "parse error"))
-	}
-	switch req.Method {
+// MCP answers one MCP message. It is this app's tool door as a VALUE — a frame
+// in, a frame out, nothing underneath it — which is the whole of why MCP can be
+// served over ZAP natively:
+//
+//	srv := &zapmcp.Server{Network: "unix", Addr: sock, Handler: app.MCP}
+//
+// HTTP is then an ADAPTER over this, not a peer of it: installMCP's route reads
+// a JSON-RPC body into a frame, calls this, and writes the answer back. Before,
+// the door's own signature took a fiber.Ctx, so an agent could not reach a tool
+// without an HTTP request existing first — which put the transport underneath
+// the protocol instead of the other way round.
+//
+// The caller is read from ctx ([CallerOf]), never from the frame: over HTTP the
+// adapter binds the gateway's assertion onto the context, and over ZAP a caller
+// states one with [WithCaller]. The frame's own Subject says who SIGNED it,
+// which is a different question and not one this door answers.
+//
+// A nil answer means there is nothing to say — a notification. [zapmcp.Server]
+// writes nothing; the HTTP adapter answers 202.
+func (a *App) MCP(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
+	// The tool list is a projection of the registry, like the OpenAPI document,
+	// and belongs to whichever door asks for it first. Rendering it in the HTTP
+	// installer meant an app served ONLY over ZAP answered tools/list with an
+	// empty array — the door worked and had nothing to say, which is the subtlest
+	// possible way for an inversion to be incomplete.
+	a.mcpOnce.Do(a.renderTools)
+	switch f.Method {
 	case "initialize":
-		return fc.JSON(mcpResult(req.ID, map[string]any{
+		return f.Answer(mcpJSON(map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": a.mcpName(), "version": a.cfg.OpenAPI.Version},
 		}))
 	case "tools/list":
-		return fc.JSON(mcpResult(req.ID, map[string]any{"tools": a.listTools(fc, req)}))
+		return f.Answer(mcpJSON(map[string]any{"tools": a.list(ctx)}))
 	case "tools/call":
-		return a.mcpCall(fc, req)
+		return a.tool(ctx, f)
 	case "ping":
-		return fc.JSON(mcpResult(req.ID, map[string]any{}))
-	default:
-		// notifications/* carry no id and expect no result — ack with 202.
-		if len(req.ID) == 0 {
-			return fc.SendStatus(fiber.StatusAccepted)
-		}
-		return fc.JSON(mcpErr(req.ID, -32601, "method not found: "+req.Method))
+		return f.Answer([]byte("{}"))
 	}
+	// notifications/* carry no id and expect no result.
+	if f.Kind == zapmcp.Notify {
+		return nil
+	}
+	return f.Fail(zapmcp.CodeMethod, "method not found: "+f.Method)
 }
 
-// listTools answers one tools/list: the build-time array, plus the tools that
-// exist only for THIS caller.
+// mcpJSON renders a result. An unrenderable one is a programming error in this
+// file — every value here is a literal map — so it answers null rather than
+// growing an error path no caller could act on.
+func mcpJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte("null")
+	}
+	return b
+}
+
+// list answers one tools/list: the build-time array, plus the tools that exist
+// only for THIS caller.
 //
 // The build-time half stays what it was — the pre-rendered bytes, verbatim, no
 // marshal of 451 schemas and no plugin touched to produce it. A door with no
 // per-caller half returns exactly those bytes, so the memcpy that makes the
 // most-called MCP method free is untouched by this file.
 //
-// The per-caller half runs only when the request NAMES a caller, which is the
+// The per-caller half runs only when the call NAMES a caller, which is the
 // whole of why it can be afforded: a tenant's own tools cannot be known without
 // asking, and there is nothing to ask about when nobody is asking. An anonymous
 // probe therefore still costs a memcpy and starts no child.
-func (a *App) listTools(fc fiber.Ctx, req mcpRequest) json.RawMessage {
+//
+// The caller comes off the ctx rather than off a request header, so the answer
+// is the same over ZAP as over HTTP — a door that read fc.Get(HeaderOrg) could
+// only ever have a per-caller half on the transport that has headers.
+func (a *App) list(ctx context.Context) json.RawMessage {
 	fleet := json.RawMessage("[]")
 	if cur := a.mcpList.Load(); cur != nil {
 		fleet = *cur
 	}
-	if !a.hasCaller() || fc.Get(HeaderOrg) == "" {
+	if !a.hasCaller() || CallerOf(ctx).Org == "" {
 		return fleet
 	}
-	mine := a.callerTools(fc)
+	mine := a.source(ctx)
 	if len(mine) == 0 {
 		return fleet
 	}
@@ -312,16 +405,16 @@ func (a *App) listTools(fc fiber.Ctx, req mcpRequest) json.RawMessage {
 	return out
 }
 
-// callerTools is every tool that exists because of WHO is asking: this app's own
-// Source, and every OPEN plugin's answer to the same question. A name the
-// build-time catalogue already claims is dropped — one name is one dispatch, and
-// the projected op is the one the whole fleet agreed on.
-func (a *App) callerTools(fc fiber.Ctx) []mcpTool {
-	// fleet is READ-ONLY and shared by every request; mine is this request's own.
-	// Writing the caller's names into the fleet set would be two bugs at once, and
-	// both are silent: one tenant's tool name would be "already claimed" for every
-	// tenant after it, and two concurrent lists would be concurrent writes to one
-	// map — a runtime FATAL that no recover() can catch, because tools/list is
+// source is every tool that exists because of WHO is asking: this app's own
+// [Source], and every OPEN plugin's answer to the same question. A name the
+// build-time catalogue already claims is dropped — one name is one dispatch,
+// and the projected op is the one the whole fleet agreed on.
+func (a *App) source(ctx context.Context) []mcpTool {
+	// fleet is READ-ONLY and shared by every call; mine is this one's own.
+	// Writing the caller's names into the fleet set would be two bugs at once,
+	// and both are silent: one tenant's tool name would be "already claimed" for
+	// every tenant after it, and two concurrent lists would be concurrent writes
+	// to one map — a runtime FATAL no recover() can catch, because tools/list is
 	// exactly the method that arrives in parallel.
 	var fleet map[string]bool
 	if cur := a.mcpNames.Load(); cur != nil {
@@ -337,7 +430,7 @@ func (a *App) callerTools(fc fiber.Ctx) []mcpTool {
 		out = append(out, mcpTool{name: name, raw: raw})
 	}
 	if src := a.cfg.MCP.Source; src != nil {
-		for _, t := range src.Tools(fc.Context()) {
+		for _, t := range src.Tools(ctx) {
 			name, _ := t["name"].(string)
 			raw, err := json.Marshal(t)
 			if err != nil {
@@ -348,7 +441,7 @@ func (a *App) callerTools(fc fiber.Ctx) []mcpTool {
 		}
 	}
 	if p := a.openPlugin(); p != nil {
-		for _, t := range a.askOpen(fc, p) {
+		for _, t := range a.ask(ctx, p) {
 			keep(t.name, t.raw)
 		}
 	}
@@ -369,33 +462,38 @@ func (a *App) openPlugin() *plugin {
 	return nil
 }
 
-// askOpen forwards this very request — fc's own tools/list message — to one open plugin and lifts the tools out
-// of its reply. The child answers as itself — its own registry, its own Source,
-// its own view of the caller the request names — so the host learns the tenant's
-// tools without holding the tenant's data.
+// ask puts a tools/list to one open plugin and lifts the tools out of its
+// reply. The child answers as itself — its own registry, its own [Source], its
+// own view of the caller — so the host learns the tenant's tools without holding
+// the tenant's data.
+//
+// It builds the question rather than forwarding the one that arrived, which is
+// what lets a host with no HTTP request in hand (an agent reaching it over ZAP)
+// still compose an open plugin's surface. It also means the child receives the
+// caller's IDENTITY and nothing else, through the one function that forwards it
+// — where forwarding the inbound request verbatim handed the child every header
+// the edge happened to carry.
 //
 // A child that fails contributes nothing. A tools/list is a question with a
 // partial answer available, and blanking the fleet's whole surface because one
-// plugin is down would be a far worse answer than a shorter list.
-func (a *App) askOpen(fc fiber.Ctx, p *plugin) []mcpTool {
-	client, host := p.target()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(resp)
-	if err := forward(fc.Request(), resp, client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
-		a.logger.Warn("zip mcp: open plugin did not answer tools/list", "plugin", p.name, "err", err)
+// plugin is down is a far worse answer than a shorter list.
+func (a *App) ask(ctx context.Context, p *plugin) []mcpTool {
+	ans := a.relay(ctx, &zapmcp.Frame{
+		Kind: zapmcp.Request, ID: "1", Method: "tools/list", Params: []byte("{}"),
+	}, p)
+	if ans == nil || ans.Err != nil {
+		a.logger.Warn("zip mcp: open plugin did not answer tools/list", "plugin", p.name, "err", ans.Err)
 		return nil
 	}
 	var env struct {
-		Result struct {
-			Tools []json.RawMessage `json:"tools"`
-		} `json:"result"`
+		Tools []json.RawMessage `json:"tools"`
 	}
-	if err := json.Unmarshal(resp.Body(), &env); err != nil {
+	if err := json.Unmarshal(ans.Result, &env); err != nil {
 		a.logger.Warn("zip mcp: open plugin sent an unreadable tools/list", "plugin", p.name, "err", err)
 		return nil
 	}
-	out := make([]mcpTool, 0, len(env.Result.Tools))
-	for _, raw := range env.Result.Tools {
+	out := make([]mcpTool, 0, len(env.Tools))
+	for _, raw := range env.Tools {
 		var named struct {
 			Name string `json:"name"`
 		}
@@ -458,50 +556,52 @@ func mcpToolOf(op *registeredOp) map[string]any {
 	}
 }
 
-// mcpCall runs a tools/call: find the op by name, invoke the SAME handler core
-// the REST route uses, and return its JSON result as MCP text content. A handler
-// error is reported as MCP isError content (not a JSON-RPC transport error), per
-// the MCP spec — the model sees the failure and can react.
-func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
+// tool runs a tools/call: find the op by name, invoke the SAME handler core the
+// REST route uses, and return its JSON result as MCP text content. A handler
+// error is reported as MCP isError content (not a JSON-RPC error), per the spec
+// — the model sees the failure and can react.
+func (a *App) tool(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	_ = json.Unmarshal(req.Params, &params)
+	_ = json.Unmarshal(f.Params, &params)
 
 	op := a.opByName(params.Name)
 	if op == nil || op.invoke == nil {
 		// Not ours — a composed plugin may own it. Only a CALL wakes a child:
 		// tools/list answered from the catalogue and touched nothing.
 		if p := a.toolOwner(params.Name); p != nil {
-			return a.mcpForward(fc, req, p)
+			return a.relay(ctx, f, p)
 		}
 		// Still nobody's: the name may be one that exists only for this caller,
 		// which no catalogue could have claimed. It goes to whoever offered the
 		// per-caller half of the list — this app's own Source, or the open plugin.
 		// Neither can be wrong about it: the same code that named the tool runs it.
 		if src := a.cfg.MCP.Source; src != nil {
-			out, err := src.Call(fc.Context(), params.Name, params.Arguments)
-			return a.mcpAnswer(fc, req, out, err)
+			out, err := src.Call(ctx, params.Name, params.Arguments)
+			return a.answer(f, out, err)
 		}
 		if p := a.openPlugin(); p != nil {
-			return a.mcpForward(fc, req, p)
+			return a.relay(ctx, f, p)
 		}
-		return fc.JSON(mcpErr(req.ID, -32602, "unknown tool: "+params.Name))
+		return f.Fail(zapmcp.CodeParams, "unknown tool: "+params.Name)
 	}
 
 	// No URL over MCP: a tools/call carries every argument in its JSON arguments
 	// object, so the body IS the whole input — neither query nor path binds.
-	out, err := op.invoke(callerContext(fc), jsonenc.Unmarshal, params.Arguments, nil, nil, func(k string) string { return fc.Get(k) })
-	return a.mcpAnswer(fc, req, out, err)
+	// The header reader comes off the ctx, so it answers honestly on a transport
+	// that has a request behind it and nothing on one that does not.
+	out, err := op.invoke(ctx, jsonenc.Unmarshal, params.Arguments, nil, nil, headerOf(ctx))
+	return a.answer(f, out, err)
 }
 
-// mcpAnswer renders one tool result. A handler error is MCP isError content and
-// not a JSON-RPC transport error, per the spec — the model sees the failure and
-// can react. ONE renderer, so a typed op and a Source answer the same shape.
-func (a *App) mcpAnswer(fc fiber.Ctx, req mcpRequest, out any, err error) error {
+// answer renders one tool result. A handler error is MCP isError content and not
+// a JSON-RPC error, per the spec — the model sees the failure and can react. ONE
+// renderer, so a typed op, a [Source] and a relayed plugin answer the same shape.
+func (a *App) answer(f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
 	if err != nil {
-		return fc.JSON(mcpResult(req.ID, map[string]any{
+		return f.Answer(mcpJSON(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},
 			"isError": true,
 		}))
@@ -512,7 +612,7 @@ func (a *App) mcpAnswer(fc fiber.Ctx, req mcpRequest, out any, err error) error 
 			text = string(b)
 		}
 	}
-	return fc.JSON(mcpResult(req.ID, map[string]any{
+	return f.Answer(mcpJSON(map[string]any{
 		"content": []map[string]any{{"type": "text", "text": text}},
 	}))
 }
@@ -548,27 +648,49 @@ func (a *App) tools() []mcpTool {
 	return out
 }
 
-// mcpForward hands the SAME JSON-RPC message to the plugin that owns the tool,
-// at that plugin's own MCP path, over the transport it was composed on — for a
-// Load'ed child, ZAP on its private unix socket. The plugin's own registry
-// answers, so the host can only ever NAME a tool, never invoke one the child did
-// not declare: a stale catalogue yields the child's own -32602, not a wrong call.
+// relay hands the message to the plugin that owns the tool, at that plugin's own
+// MCP door, over the transport it was composed on — for a Load'ed child, ZAP on
+// its private unix socket. The plugin's own registry answers, so the host can
+// only ever NAME a tool, never invoke one the child did not declare: a stale
+// catalogue yields the child's own refusal, not a wrong call.
 //
 // This is the ONLY trigger that starts a process, and it starts exactly one:
 // p.target() is the same single-flighted lazy path a prefix request takes.
 //
-// A hop failure is MCP isError content rather than an HTTP error, per the spec —
-// the model sees "this tool is not available right now" and can react, where a
-// 503 body would be a transport failure it cannot interpret.
-func (a *App) mcpForward(fc fiber.Ctx, req mcpRequest, p *plugin) error {
+// The message is RENDERED for the hop rather than the inbound request being
+// passed through, which is what makes a relay possible at all from a door with
+// no HTTP request behind it. The caller's identity rides along through
+// [forwardIdentity] — the one function that forwards it — and nothing else does.
+//
+// A hop failure is MCP isError content rather than a transport error, per the
+// spec: the model sees "this tool is not available right now" and can react,
+// where a 503 body is a failure it cannot interpret.
+func (a *App) relay(ctx context.Context, f *zapmcp.Frame, p *plugin) *zapmcp.Frame {
 	client, host := p.target()
-	if err := forward(fc.Request(), fc.Response(), client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
-		return fc.JSON(mcpResult(req.ID, map[string]any{
-			"content": []map[string]any{{"type": "text", "text": err.Error()}},
-			"isError": true,
-		}))
+	body, err := json.Marshal(f)
+	if err != nil {
+		return a.answer(f, nil, err)
 	}
-	return nil
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.Header.SetContentType(mimeJSON)
+	req.SetBody(body)
+	forwardIdentity(ctx, req)
+	if err := forward(req, resp, client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
+		return a.answer(f, nil, err)
+	}
+	var ans zapmcp.Frame
+	if err := json.Unmarshal(resp.Body(), &ans); err != nil {
+		return a.answer(f, nil, fmt.Errorf("mcp %s: unreadable answer: %w", p.name, err))
+	}
+	// The child answered its own copy of the message; this hop owns the
+	// correlation, so the reply is stamped with what the CALLER sent.
+	ans.Kind, ans.Session, ans.Seq, ans.ID = zapmcp.Response, f.Session, f.Seq, f.ID
+	return &ans
 }
 
 func (a *App) opByName(name string) *registeredOp {
@@ -589,17 +711,46 @@ func opName(op *registeredOp) string {
 	return ID(op.Method, op.Path)
 }
 
-func mcpResult(id json.RawMessage, result any) map[string]any {
-	return map[string]any{"jsonrpc": "2.0", "id": idOrNull(id), "result": result}
-}
-
-func mcpErr(id json.RawMessage, code int, msg string) map[string]any {
-	return map[string]any{"jsonrpc": "2.0", "id": idOrNull(id), "error": map[string]any{"code": code, "message": msg}}
-}
-
-func idOrNull(id json.RawMessage) any {
-	if len(id) == 0 {
-		return nil
+// serveMCP brings the ZAP-native MCP listener up when this process owns an
+// address for it. Called from Listen alongside the ops and peer listeners, so a
+// plugin main ends with one verb and the app's own declaration decides whether
+// there is another listener.
+//
+// It is [zapmcp.Server] wrapped around [App.MCP] and nothing else. That one line
+// is the whole of "MCP rides ZAP natively": there is no adapter here because
+// there is nothing to adapt — the door already speaks frames.
+func (a *App) serveMCP() {
+	if a.sibling || a.cfg.MCP.Disabled {
+		return // a sibling serves no siblings
 	}
-	return id
+	addr := strings.TrimSpace(a.cfg.MCP.Addr)
+	if addr == "" {
+		return
+	}
+	srv := &zapmcp.Server{Network: networkOf(addr), Addr: addr, Handler: a.MCP}
+	a.mcpMu.Lock()
+	if a.mcpSrv != nil {
+		a.mcpMu.Unlock()
+		return // Listen may be called twice
+	}
+	a.mcpSrv = srv
+	a.mcpMu.Unlock()
+	a.logger.Info("zip mcp listening", "transport", "zap", "addr", addr)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil {
+			a.logger.Error("zip mcp listener stopped", "addr", addr, "err", err)
+		}
+	}()
+}
+
+// closeMCP stops the ZAP MCP listener. Called from Shutdown alongside
+// closeServers.
+func (a *App) closeMCP() {
+	a.mcpMu.Lock()
+	srv := a.mcpSrv
+	a.mcpSrv = nil
+	a.mcpMu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
 }

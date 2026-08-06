@@ -122,6 +122,24 @@ func requestOf(ctx context.Context) *fasthttp.RequestCtx {
 	return in.rc
 }
 
+// headerOf is the declared-header reader an op's invoke seam takes, resolved
+// from the context rather than from a transport's own request object.
+//
+// It is a function rather than a map because the transports answer differently
+// and all of them answer honestly: where a request is behind the context it
+// reads that request's headers; where none is — a frame that arrived over ZAP,
+// a command, a background job — it is nil and a `header:` field keeps whatever
+// the arguments supplied. Reading it from the ctx is what lets the MCP door take
+// a frame: the door no longer needs to hold an HTTP request to say what it knows
+// about headers, it needs only to say honestly that it knows nothing.
+func headerOf(ctx context.Context) func(string) string {
+	rc := requestOf(ctx)
+	if rc == nil {
+		return nil
+	}
+	return func(k string) string { return string(rc.Request.Header.Peek(k)) }
+}
+
 // Forward returns a context that carries this request's identity onward, so a
 // [Call] made with it reaches the next service as the same caller. Use it when
 // an untyped handler calls another app; a typed handler's ctx already carries

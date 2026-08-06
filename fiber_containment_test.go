@@ -138,3 +138,75 @@ func exprText(fset *token.FileSet, e ast.Expr) string {
 	}
 	return ""
 }
+
+// dispatch is the path a call takes from a protocol to a handler: the MCP door
+// and everything it reaches. None of it may name a fiber type — not in a
+// signature, not in a body.
+//
+// This is the rule the inversion exists to make true, so it is the rule worth
+// pinning. Before, mcpCall took a fiber.Ctx and read the caller's headers off
+// it, which meant a tools/call could not happen unless an HTTP request already
+// had: the transport sat UNDERNEATH the protocol. The regression that would
+// undo it is not dramatic — it is one convenience, "just read fc.Get here" —
+// and it would pass every behavioural test in this package, because the HTTP
+// door would keep working. Only the ZAP door would quietly die, and only for
+// whatever this one line needed.
+var dispatch = map[string]bool{
+	"App.MCP":    true, // the door itself
+	"App.tool":   true, // tools/call
+	"App.answer": true, // one tool result
+	"App.list":   true, // tools/list
+	"App.source": true, // the per-caller half
+	"App.ask":    true, // an open plugin's half
+	"App.relay":  true, // the hop to a plugin that owns the tool
+}
+
+func TestFiberIsNotInTheDispatchPath(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "mcp.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp.go: %v", err)
+	}
+
+	seen := map[string]bool{}
+	var leaks []string
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 {
+			continue
+		}
+		name := recvTypeName(fn.Recv.List[0].Type) + "." + fn.Name.Name
+		if !dispatch[name] {
+			continue
+		}
+		seen[name] = true
+		// The WHOLE function, signature and body: a fiber type reached for
+		// inside a body is the same braiding as one in a parameter, and it is
+		// the one that arrives by accident.
+		ast.Inspect(fn, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "fiber" {
+				leaks = append(leaks, name+" names fiber."+sel.Sel.Name+
+					" at "+fset.Position(sel.Pos()).String())
+			}
+			return true
+		})
+	}
+
+	for name := range dispatch {
+		if !seen[name] {
+			t.Errorf("%s is in the dispatch set but no longer exists in mcp.go — "+
+				"rename it here, or drop it if the path really did change shape", name)
+		}
+	}
+	if len(leaks) > 0 {
+		t.Errorf("fiber reached into the dispatch path %d time(s):\n  %s\n\n"+
+			"The door takes a *zapmcp.Frame so it can be served over ZAP with no HTTP\n"+
+			"listener at all (see TestMCP_ServesOverZapWithNoHTTPListener). Whatever this\n"+
+			"needed from the request belongs on the ctx, put there by the ADAPTER that\n"+
+			"has one — see headerOf and callerContext.", len(leaks), strings.Join(leaks, "\n  "))
+	}
+}
