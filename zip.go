@@ -220,6 +220,12 @@ type App struct {
 
 	servers []Server // the running transport listeners, set by Listen
 
+	// unbind withdraws this app from the by-address table [Serving] reads, one
+	// entry per bound listener. Held beside servers because they have the same
+	// lifetime: an app answers in-process for exactly as long as it answers on
+	// the wire.
+	unbind []func()
+
 	// authorizer, when set via Authorize, runs at every typed op's invoke seam
 	// on the decoded In — the one place REST and MCP both funnel the value the
 	// handler will act on. nil leaves every decoded request unauthorized.

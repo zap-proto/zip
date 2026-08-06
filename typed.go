@@ -60,6 +60,17 @@ type registeredOp struct {
 	// choice: it says WHO declared the type, which is a property of the code.
 	Origin string
 	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error)
+	// direct is invoke with the decoding removed: the In arrives as the *In the
+	// caller already holds. It exists for the one transport that is not a
+	// transport — a call whose two ends are the same process (see [Here]) —
+	// where encoding the value would only be a way of copying it.
+	//
+	// It shares the contract half (validate → authorize → run) with invoke
+	// rather than reimplementing it, so there is no path into a handler that
+	// skips a check another way makes. What it does not share is the BINDING of
+	// a URL and headers onto the input: there is no URL and no request, and an
+	// op reached this way is given its whole input at once.
+	direct func(ctx context.Context, in any) (any, error)
 }
 
 // decoder reads a request body into an op's In. It is a PARAMETER rather than a
@@ -433,9 +444,44 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// authorizer on every invoke — REST and MCP alike.
 	meta := Op{Method: op.Method, Path: op.Path, OperationID: opName(op)}
 
-	// The transport-agnostic core: decode raw JSON args → In, validate, authorize,
-	// run fn, return Out (or a literal nil for a void result). REST and MCP both
-	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
+	// The CONTRACT, on an In however it was obtained: validate, authorize, run
+	// fn, return Out (or a literal nil for a void result). Both seams below end
+	// here, so no way of reaching this op can skip a check another way makes. A
+	// nil *Out becomes a nil `any`.
+	run := func(ctx context.Context, in *In) (any, error) {
+		if err := validate(in); err != nil {
+			return nil, ErrBadRequest(err.Error())
+		}
+		// Authorize the DECODED input — the exact value the handler will bind — so
+		// the decision cannot diverge from execution. Runs for REST and MCP alike.
+		if auth := app.authorizer; auth != nil {
+			if err := auth(ctx, meta, in); err != nil {
+				return nil, err
+			}
+		}
+		out, err := fn(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		if out == nil {
+			return nil, nil
+		}
+		return out, nil
+	}
+
+	// The in-process seam: the caller already holds the *In, so there is nothing
+	// to decode and no URL to bind from. See registeredOp.direct and [Here].
+	op.direct = func(ctx context.Context, in any) (any, error) {
+		v, ok := in.(*In)
+		if !ok {
+			return nil, ErrBadRequest(fmt.Sprintf("%s takes %T, not %T", opName(op), (*In)(nil), in))
+		}
+		return run(ctx, v)
+	}
+
+	// The transport-agnostic core: decode raw JSON args → In, bind the URL, then
+	// the contract above. REST and MCP both call THIS — one handler, many
+	// projections.
 	op.invoke = func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error) {
 		var in In
 		if len(rawIn) > 0 {
@@ -460,24 +506,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		}
 		bindURL(&in, query)
 		bindURL(&in, path)
-		if err := validate(&in); err != nil {
-			return nil, ErrBadRequest(err.Error())
-		}
-		// Authorize the DECODED input — the exact value the handler will bind — so
-		// the decision cannot diverge from execution. Runs for REST and MCP alike.
-		if auth := app.authorizer; auth != nil {
-			if err := auth(ctx, meta, &in); err != nil {
-				return nil, err
-			}
-		}
-		out, err := fn(ctx, &in)
-		if err != nil {
-			return nil, err
-		}
-		if out == nil {
-			return nil, nil
-		}
-		return out, nil
+		return run(ctx, &in)
 	}
 	handler := func(c fiber.Ctx) error {
 		// hasBody is THE rule about what a method carries, read here as well as
