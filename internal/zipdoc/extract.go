@@ -508,11 +508,12 @@ func calleeIdent(fun ast.Expr) *ast.Ident {
 }
 
 // handlerDoc is the comment that documents the operation. A handler reaches a
-// registration in exactly three shapes, and each has one place its prose can be
+// registration in exactly four shapes, and each has one place its prose can be
 // written:
 //
 //	zip.Get(app, p, ListUsers)      // named    → the function's doc comment
 //	zip.Get(app, p, listUsers(db))  // built    → the BUILDER's doc comment
+//	zip.Get(app, p, wrap(ListUsers))// wrapped  → the WRAPPED handler's, not wrap's
 //	zip.Get(app, p, func(…) {…})    // inline   → the comment above the call
 //
 // The middle shape is the one a service reaches for the moment a handler needs a
@@ -532,6 +533,21 @@ func (e *extractor) handlerDoc(info *types.Info, call *ast.CallExpr, arg ast.Exp
 	case *ast.Ident, *ast.SelectorExpr:
 		return e.funcDoc(info, calleeIdent(h))
 	case *ast.CallExpr:
+		// BUILT or WRAPPED, and the arguments say which. A builder takes what the
+		// handler needs — a db, a service, a limit — and returns the handler. A
+		// wrapper takes the HANDLER and returns another one, so its own doc
+		// describes the adapter: true of every route that uses it, and therefore
+		// about none of them. Measured on one fleet: 55 operations across 24 apps
+		// published `Binds a Service-scoped handler to a route` as their
+		// description, and the sentence each handler had already written sat
+		// unread one call inside.
+		//
+		// Taking the last func-typed argument is not a guess about naming — it is
+		// where a wrapper puts the thing it wraps, because everything it needs to
+		// do the wrapping has to come first.
+		if inner := lastFunc(info, h.Args); inner != nil {
+			return e.handlerDoc(info, call, inner)
+		}
 		return e.funcDoc(info, calleeIdent(h.Fun))
 	case *ast.FuncLit:
 		// An inline handler names no function, so only the sentence-shape
@@ -547,6 +563,22 @@ func (e *extractor) handlerDoc(info *types.Info, call *ast.CallExpr, arg ast.Exp
 		return stripSelf(e.commentAbove(call.Pos()), "")
 	}
 	return ""
+}
+
+// lastFunc is the last of args whose type is a function, or nil when none is.
+// That is the handler an adapter wraps; a call with none is a builder, and its
+// own doc comment is the operation's.
+func lastFunc(info *types.Info, args []ast.Expr) ast.Expr {
+	for i := len(args) - 1; i >= 0; i-- {
+		t := info.TypeOf(args[i])
+		if t == nil {
+			continue
+		}
+		if _, ok := t.Underlying().(*types.Signature); ok {
+			return args[i]
+		}
+	}
+	return nil
 }
 
 // funcDoc is the doc comment of the function id names, with the leading symbol

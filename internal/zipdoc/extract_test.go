@@ -45,8 +45,8 @@ func opByKey(t *testing.T, p Package, key string) Op {
 // the assertion.
 func TestExtract_Fixture(t *testing.T) {
 	p := load(t, "fixture")
-	if len(p.Ops) != 8 {
-		t.Fatalf("ops = %d, want 8", len(p.Ops))
+	if len(p.Ops) != 10 {
+		t.Fatalf("ops = %d, want 10", len(p.Ops))
 	}
 
 	list := opByKey(t, p, "POST /v1/billing/invoices")
@@ -114,6 +114,25 @@ func TestExtract_Fixture(t *testing.T) {
 	// carries field prose exactly as a named one does.
 	if got := pay.Fields["PayIn.id"]; got != "ID of the invoice to settle." {
 		t.Errorf("Fields[PayIn.id] = %q", got)
+	}
+
+	// A WRAPPED handler is documented by the handler, never by the wrapper. The
+	// two calls look identical — `f(x)` in the handler position — and the
+	// arguments are what tell them apart: a builder takes what the handler needs,
+	// a wrapper takes the handler. Reading the callee either way published the
+	// adapter's sentence on 55 operations across 24 apps, each of them saying
+	// what the adapter does and nothing about the operation.
+	for _, tc := range []struct{ key, want, wrapper string }{
+		{"POST /v1/billing/invoices/:id/disputes", "Opens a dispute", "Records the call"},
+		{"GET /v1/billing/invoices/:id/csv", "Downloads the invoice's line items", "is audited on the untyped side"},
+	} {
+		op := opByKey(t, p, tc.key)
+		if !strings.HasPrefix(op.Description, tc.want) {
+			t.Errorf("%s: wrapped description = %q, want it to start %q", tc.key, op.Description, tc.want)
+		}
+		if strings.Contains(op.Description, tc.wrapper) {
+			t.Errorf("%s: published the WRAPPER's prose: %q", tc.key, op.Description)
+		}
 	}
 
 	// The comment belongs to the REGISTRATION, not to the closure literal. They
