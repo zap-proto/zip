@@ -1,7 +1,7 @@
 // Package fixture is a real zip service, registered every way zipdoc has to
 // understand: a named handler, one built by a function that closes over a
-// dependency, an inline one, explicit type arguments and inferred ones. Its
-// committed zipdoc_gen.go is the assertion.
+// dependency, one passed through a wrapper, an inline one, explicit type
+// arguments and inferred ones. Its committed zipdoc_gen.go is the assertion.
 package fixture
 
 import (
@@ -59,6 +59,8 @@ func Register(app *zip.App, store Store) {
 	zip.Post(app, "/v1/billing/invoices", ListInvoices)
 	zip.Get(app, "/v1/billing/invoices/:id", GetInvoice)
 	zip.Post(app, "/v1/billing/invoices/:id/pay", payInvoice(store))
+	zip.Post(app, "/v1/billing/invoices/:id/disputes", audited(DisputeInvoice))
+	app.Get("/v1/billing/invoices/:id/csv", logged(invoiceCSV))
 
 	// RefundInvoice returns a settled invoice's amount to the org's balance.
 	//
@@ -95,6 +97,32 @@ func Register(app *zip.App, store Store) {
 // verb-noun spelling kept working for anything already calling it. Both are the
 // same handler, so both say this.
 func remind(c *zip.Ctx) error { return c.String(200, "sent") }
+
+// audited records the call before running the handler it was given.
+//
+// An ADAPTER, not a builder: its argument is the handler itself. So this sentence
+// is true of every operation that goes through it and describes none of them, and
+// an operation registered this way must still publish what IT does.
+func audited[In, Out any](h zip.TypedHandler[In, Out]) zip.TypedHandler[In, Out] {
+	return func(ctx context.Context, in *In) (*Out, error) { return h(ctx, in) }
+}
+
+// logged is audited on the untyped side, and is here because that is the side the
+// adapter bug was found on: a raw route whose handler arrives wrapped.
+func logged(h zip.Handler) zip.Handler { return func(c *zip.Ctx) error { return h(c) } }
+
+// DisputeInvoice opens a dispute against an invoice the org believes is wrong.
+//
+// Response: {"ok": true}
+func DisputeInvoice(_ context.Context, in *VoidIn) (*VoidOut, error) {
+	return &VoidOut{OK: in.ID != ""}, nil
+}
+
+// invoiceCSV downloads the invoice's line items as a spreadsheet.
+//
+// Registered through a wrapper, which changes nothing a caller receives — so this
+// sentence is the operation's, and the wrapper's is not.
+func invoiceCSV(c *zip.Ctx) error { return c.String(200, "id,cents") }
 
 // invoicePDF downloads an invoice as a printable PDF.
 //
