@@ -380,20 +380,25 @@ func structural(occ []occurrence) error {
 		case kindMiddleware:
 			// TERMINALITY IS ASKED FIRST, AND AT EVERY DEPTH.
 			//
-			// "A Handler may never terminate a request" is the rule the three
-			// node kinds encode, and until now nothing enforced it: the inert
-			// check below is strictly weaker — it asks whether a definition
-			// carrying middleware has routes beneath it — so
-			// `app.Use(zip.Static(assets))` passed on any app with a route, and
-			// then the static handler ran BEFORE every route in the composition
-			// and answered each one with a file, or a 404 where no file existed.
-			// The most literal spelling of the failure the whole rule exists to
-			// stop, accepted in silence.
+			// What is refused here is a handler that CLAIMS AN ADDRESS from Use
+			// position — never one that merely answers. Middleware answering is
+			// the ordinary case and always was: an auth gate, a rate limiter, a
+			// cache hit and a maintenance refusal all write a response and return
+			// without Next, and a request they answer already matched a route, so
+			// nothing appears at an address no projection knows.
+			//
+			// `app.Use(zip.Static(assets))` is the shape that is not that. It
+			// answers EVERY address beneath it with a file, or a 404 where no file
+			// exists, including addresses nothing declared — and it passed for a
+			// long time, because the inert check below is strictly weaker: it asks
+			// only whether a definition carrying middleware has routes beneath it.
+			// The most literal spelling of the failure this rule exists to stop,
+			// accepted in silence.
 			//
 			// Use cannot say WHERE a handler answers. That is not a missing
 			// feature, it is what Use MEANS: a handler registered there runs for
-			// everything beneath it, so a handler that terminates terminates
-			// everything. The address belongs on the route method, where it is
+			// everything beneath it, so a handler that claims one address claims
+			// all of them. The address belongs on the route method, where it is
 			// written down and where the router can resolve it against every
 			// other pattern by specificity.
 			//

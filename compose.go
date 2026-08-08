@@ -174,12 +174,21 @@ func (*App) component()    {}
 //	app.Use(zip.H(func(c *zip.Ctx) error {…})) // bare closure at Use
 func H(h Handler) Component { return h }
 
-// Terminal marks h as a handler that ANSWERS an address, and returns it.
+// Terminal marks h as a handler that CLAIMS an address, and returns it.
 //
-// A [Handler] may never terminate a request — that is the rule the three node
-// kinds encode, and the reason Use takes handlers that WRAP while an address is
-// something only a route method can say. Enforcing it needs terminality to be a
-// property the walk can READ, and a func value carries nothing a walk can read:
+// Middleware may answer. A gate that cannot refuse is not a gate, so a handler in
+// Use position is free to write a response and return without calling Next — that
+// is what an auth check, a rate limiter, a cache hit and a maintenance refusal all
+// are, and it is the ordinary case rather than a loophole.
+//
+// What it may not do is claim an address. Only a route method says WHERE a handler
+// answers; Use says only what runs beneath it. A gate answering a request that
+// already matched a route adds no address, so no projection can disagree with the
+// router — but a leaf like [Static] in Use position answers EVERY address beneath
+// it with a file, including ones nothing declared. That is the one shape refused,
+// and this marker is how the walk can tell it apart. Enforcing it needs
+// terminality to be a property the walk can READ, and a func value carries nothing
+// a walk can read:
 // two closures are the same type, and matching on the name of the constructor
 // that built one would bless zip's own leaves and condemn nobody else's.
 //
