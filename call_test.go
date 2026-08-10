@@ -72,7 +72,7 @@ func flagsApp(t *testing.T) *zip.App {
 // there is no HTTP listener in this process for a call to fall back to.
 func serveUDS(t *testing.T, app *zip.App) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "flags.sock")
+	sock := filepath.Join(sockDir(t), "flags.sock")
 	go func() { _ = app.Listen(sock) }()
 	t.Cleanup(func() { _ = app.Shutdown() })
 	waitSock(t, sock)
@@ -340,7 +340,7 @@ func TestCall_ForwardsIdentityWithoutMintingIt(t *testing.T) {
 // reaches it with zip.DialApp(name). If these two ever disagree, every call in
 // the fleet misses.
 func TestSocketPath_IsTheOneScheme(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	if got, want := zip.RuntimeDir(), dir; got != want {
@@ -394,7 +394,7 @@ func TestRuntimeDir_ResolutionOrder(t *testing.T) {
 // TestCall_RejectsAnOpNameThatIsNotAnOp keeps a caller bug from becoming a
 // request to some other route.
 func TestCall_RejectsAnOpNameThatIsNotAnOp(t *testing.T) {
-	c, err := zip.Dial(filepath.Join(t.TempDir(), "unused.sock"))
+	c, err := zip.Dial(filepath.Join(sockDir(t), "unused.sock"))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

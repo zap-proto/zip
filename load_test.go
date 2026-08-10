@@ -23,7 +23,7 @@ import (
 // so the benchmarks build their subject the same way the tests do.
 func buildPlugin(t testing.TB, version string) []byte {
 	t.Helper()
-	out := filepath.Join(t.TempDir(), "testplugin-"+version)
+	out := filepath.Join(sockDir(t), "testplugin-"+version)
 	cmd := exec.Command("go", "build",
 		"-ldflags", "-X main.version="+version,
 		"-o", out, "./internal/testplugin")
@@ -154,7 +154,7 @@ func TestLoad_AlreadyRunning(t *testing.T) {
 	plugin.Get("/v1/demo/version", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"version": "external"})
 	})
-	sock := filepath.Join(t.TempDir(), "demo.sock")
+	sock := filepath.Join(sockDir(t), "demo.sock")
 	go func() { _ = plugin.Listen(sock) }()
 	defer func() { _ = plugin.Shutdown() }()
 	waitSocket(t, sock)
@@ -180,7 +180,7 @@ func TestLoad_FromRelease(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cache := t.TempDir()
+	cache := sockDir(t)
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", URL: srv.URL + "/demo", Sum: hex.EncodeToString(sum[:]), Dir: cache,
@@ -215,7 +215,7 @@ func TestLoad_ReleaseRejectsBadSum(t *testing.T) {
 	// The verification is part of BUILDING the definition, so the refusal comes
 	// from Load itself — there is nothing to compose and nothing to build.
 	_, err := zip.Load(zip.Plugin{
-		Name: "demo", URL: srv.URL + "/demo", Dir: t.TempDir(),
+		Name: "demo", URL: srv.URL + "/demo", Dir: sockDir(t),
 		Sum: strings.Repeat("00", 32), // wrong on purpose
 	}, "/v1/demo")
 	if err == nil {
@@ -246,7 +246,7 @@ func TestPlugins_Status(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cache := t.TempDir()
+	cache := sockDir(t)
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(
 		must(zip.Load(zip.Plugin{Name: "embedded", Bin: v1, Dir: cache}, "/v1/embedded")),
@@ -317,7 +317,7 @@ func TestLoad_ChildDiesWithHost(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(zip.Plugin{
-		Name: "demo", Bin: bin, Dir: t.TempDir(),
+		Name: "demo", Bin: bin, Dir: sockDir(t),
 	}, "/v1/demo")))
 
 	pid := app.Plugins()[0].PID
@@ -354,7 +354,7 @@ func TestLoad_MultiplePrefixes(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()},
+		zip.Plugin{Name: "demo", Bin: bin, Dir: sockDir(t)},
 		"/v1/demo", "/v1/other",
 	)))
 	defer func() { _ = app.Shutdown() }()
@@ -428,7 +428,7 @@ func TestPlugins_Usage(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: bin, Dir: sockDir(t)}, "/v1/demo",
 	)))
 	defer func() { _ = app.Shutdown() }()
 
@@ -471,7 +471,7 @@ func TestPlugins_SurvivesPanic(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir()}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: bin, Dir: sockDir(t)}, "/v1/demo",
 	)))
 	defer func() { _ = app.Shutdown() }()
 
@@ -522,7 +522,7 @@ func TestLoad_Lazy(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir(), Lazy: true}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: bin, Dir: sockDir(t), Lazy: true}, "/v1/demo",
 	)))
 	defer func() { _ = app.Shutdown() }()
 
@@ -571,7 +571,7 @@ func TestReload_PinAndRollbackByDigest(t *testing.T) {
 		_, _ = w.Write(bits[r.URL.Path])
 	}))
 
-	cache := t.TempDir()
+	cache := sockDir(t)
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(zip.Plugin{
 		Name: "demo", URL: srv.URL + "/v1", Sum: d1, Dir: cache,

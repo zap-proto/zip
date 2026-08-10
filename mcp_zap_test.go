@@ -48,7 +48,7 @@ func mcpApp(t *testing.T) *App {
 // port.
 func zapDoor(t *testing.T, app *App) *zapmcp.Transport {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "mcp.sock")
+	sock := filepath.Join(sockDir(t), "mcp.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -173,7 +173,7 @@ func TestMCP_ZapCallerComesFromTheContext(t *testing.T) {
 		}{Org: CallerOf(ctx).Org}, nil
 	}, WithOperationID("whoami"))
 
-	sock := filepath.Join(t.TempDir(), "mcp.sock")
+	sock := filepath.Join(sockDir(t), "mcp.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

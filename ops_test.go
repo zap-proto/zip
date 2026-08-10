@@ -15,7 +15,7 @@ import (
 // public port, and a probe that queues behind public traffic is not a probe.
 func TestOpsSurfaceIsASecondListener(t *testing.T) {
 	port := freePort(t)
-	t.Setenv(zip.RuntimeDirEnv, t.TempDir())
+	t.Setenv(zip.RuntimeDirEnv, sockDir(t))
 
 	app := zip.New(zip.Config{
 		AppName:               "opsy",
@@ -71,7 +71,7 @@ func TestOpsListenerSpeaksHTTP(t *testing.T) {
 		t.Fatalf("DefaultOpsAddr = %q — a kubelet cannot probe that", zip.DefaultOpsAddr)
 	}
 	port := freePort(t)
-	t.Setenv(zip.RuntimeDirEnv, t.TempDir())
+	t.Setenv(zip.RuntimeDirEnv, sockDir(t))
 
 	app := zip.New(zip.Config{
 		AppName:               "probed",
@@ -97,7 +97,7 @@ func TestOpsListenerSpeaksHTTP(t *testing.T) {
 // two apps in it while a test process has many, so the second died on "address
 // already in use". A host names none for a child, so a child owns none.
 func TestEmptyOpsAddrBindsNothing(t *testing.T) {
-	t.Setenv(zip.RuntimeDirEnv, t.TempDir())
+	t.Setenv(zip.RuntimeDirEnv, sockDir(t))
 	// Free, and nothing in this test will bind it — so an answer here is zip
 	// having reached for an address nobody gave it.
 	unclaimed := freePort(t)
@@ -120,7 +120,7 @@ func TestEmptyOpsAddrBindsNothing(t *testing.T) {
 // Two apps in one process — the edge app and its peer sibling — must not race
 // for one ops port. Only the primary brings the surface up.
 func TestOnlyThePrimaryAppOwnsTheOpsListener(t *testing.T) {
-	t.Setenv(zip.RuntimeDirEnv, t.TempDir())
+	t.Setenv(zip.RuntimeDirEnv, sockDir(t))
 
 	app := zip.New(zip.Config{
 		AppName:               "twoapps",
