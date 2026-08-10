@@ -17,7 +17,7 @@ import (
 // no port to allocate, filesystem permissions as the ACL — carrying byte-identical
 // ZAP frames to the tcp case.
 func TestProxy_OverUnixSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "billing.sock")
+	sock := filepath.Join(sockDir(t), "billing.sock")
 
 	plugin := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
 	plugin.Get("/v1/billing/invoices", func(c *zip.Ctx) error {

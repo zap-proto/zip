@@ -319,7 +319,33 @@ func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host
 	if client == nil {
 		return Errorf(503, "%s: no instance running", what)
 	}
-	req.SetHost(host)
+	// THE CALLER'S HOST SURVIVES THE HOP. A client dials its own address
+	// (HostClient.Addr, zaphttp.Dial(addr)) and never reads this header to find
+	// the far end, so Host here is not routing — it is the question "who was
+	// asked", and the child needs it to answer as that brand.
+	//
+	// It used to be overwritten with the dial address unconditionally, which
+	// made every multi-brand behaviour collapse behind a plugin. Identity is
+	// where that showed: hanzoai/iam serves every brand from one instance and
+	// resolves each brand's OIDC issuer from the Host, so a child asked as
+	// "/var/lib/cloud/run/iam.sock" matched no brand and fell back to its single
+	// default — lux.id and zoolabs.id minting tokens that claim iss=hanzo.id,
+	// which their own relying parties reject. Config could not fix it: the brand
+	// map was in the child's environment, and the Host never arrived.
+	//
+	// The dial address remains the fallback for a request that carries no Host
+	// of its own — a freshly built one (the MCP hop) rather than a proxied
+	// inbound — because HTTP/1.1 requires the header to be present.
+	// req.Header.Host(), not req.Host(): the latter reads through the URI, which
+	// parses it on first touch — 34 allocations a request where this hop is
+	// meant to cost none, and the alloc gate catches exactly that. The header is
+	// the raw inbound bytes, and it is also the value that MEANS "who was asked".
+	//
+	// A request that already carries one is left ALONE rather than re-set: the
+	// cheapest correct move here is no move at all.
+	if len(req.Header.Host()) == 0 {
+		req.SetHost(host)
+	}
 	if path != "" {
 		req.URI().SetPath(path)
 	}

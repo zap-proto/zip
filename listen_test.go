@@ -11,7 +11,7 @@ import (
 // there is no second path to a running program — only a terminal form that
 // hands back no handle, and says so.
 func TestListenIsServePlusWait(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "a.sock")
+	sock := filepath.Join(sockDir(t), "a.sock")
 	app := quiet("svc")
 	app.Get("/x", func(c *Ctx) error { return c.String(200, "x") })
 
@@ -45,7 +45,7 @@ func TestListenIsServePlusWait(t *testing.T) {
 // Serve hands back the handle Listen withholds, and the handle is what makes a
 // running program changeable.
 func TestServeYieldsAHandleListenDoesNot(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "b.sock")
+	sock := filepath.Join(sockDir(t), "b.sock")
 	app := quiet("svc")
 	app.Get("/x", func(c *Ctx) error { return c.String(200, "x") })
 
