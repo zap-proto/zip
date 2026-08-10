@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/valyala/fasthttp"
-	zaphttp "github.com/zap-proto/http"
+	"github.com/zap-proto/http"
 )
 
 // Transport is decomplected: ONE fiber handler, served on any number of
@@ -38,7 +38,7 @@ type Server interface {
 }
 
 // Client is the call side of a transport: anything that can complete a
-// request. *zaphttp.Transport and *fasthttp.HostClient already satisfy it, so
+// request. *zap.Transport and *fasthttp.HostClient already satisfy it, so
 // giving a scheme a Dial is a one-liner.
 type Client interface {
 	Do(req *fasthttp.Request, resp *fasthttp.Response) error
@@ -64,9 +64,9 @@ var (
 	transports   = map[string]Transport{
 		"zap": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
-				return &zaphttp.Server{Network: networkOf(addr), Addr: addr, Handler: h}
+				return &zap.Server{Network: networkOf(addr), Addr: addr, Handler: h}
 			},
-			Dial: func(addr string) Client { return zaphttp.Dial(networkOf(addr), addr) },
+			Dial: func(addr string) Client { return zap.Dial(networkOf(addr), addr) },
 		},
 		"http": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {

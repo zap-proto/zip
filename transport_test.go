@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/valyala/fasthttp"
-	zaphttp "github.com/zap-proto/http"
+	"github.com/zap-proto/http"
 
 	"github.com/zap-proto/zip"
 )
@@ -38,7 +38,7 @@ func TestListen_ZAP(t *testing.T) {
 	req.SetRequestURI("/v1/health")
 	req.Header.SetMethod(fasthttp.MethodGet)
 
-	tr := zaphttp.Dial("tcp", addr)
+	tr := zap.Dial("tcp", addr)
 	defer tr.CloseIdleConnections()
 	if err := tr.Do(req, resp); err != nil {
 		t.Fatalf("ZAP round-trip failed: %v", err)
@@ -69,7 +69,7 @@ func TestListen_DualTransport(t *testing.T) {
 	waitReachable(t, zapAddr)
 
 	// ZAP side.
-	ztr := zaphttp.Dial("tcp", zapAddr)
+	ztr := zap.Dial("tcp", zapAddr)
 	defer ztr.CloseIdleConnections()
 	zreq, zresp := fasthttp.AcquireRequest(), fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(zreq)
@@ -235,7 +235,7 @@ func waitDialable(t *testing.T, addr string) {
 
 func waitReachable(t *testing.T, addr string) {
 	t.Helper()
-	tr := zaphttp.Dial("tcp", addr)
+	tr := zap.Dial("tcp", addr)
 	tr.SetDialTimeout(200 * time.Millisecond)
 	defer tr.CloseIdleConnections()
 	for i := 0; i < 50; i++ {
