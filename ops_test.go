@@ -61,7 +61,7 @@ func TestOpsSurfaceIsASecondListener(t *testing.T) {
 // used to be built from a port, a bare ":9090" takes DefaultScheme — which is
 // ZAP — and so the probe's "GET " arrived at the ops app as a frame header:
 //
-//	zaphttp: read frame: frame size 1195725856 exceeds MaxFrameSize=67108864
+//	zap: read frame: frame size 1195725856 exceeds MaxFrameSize=67108864
 //
 // 1195725856 is 0x47455420. The pod never went Ready, its Service kept zero
 // endpoints, and everything that resolved identity through it got connection

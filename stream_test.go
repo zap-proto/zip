@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/valyala/fasthttp"
-	zaphttp "github.com/zap-proto/http"
+	"github.com/zap-proto/http"
 
 	"github.com/zap-proto/zip"
 )
@@ -37,7 +37,7 @@ func TestListenZAP_Streams(t *testing.T) {
 	defer func() { _ = app.Shutdown() }()
 
 	// Wait for the ZAP listener.
-	tr := zaphttp.Dial("tcp", addr)
+	tr := zap.Dial("tcp", addr)
 	defer tr.CloseIdleConnections()
 	for i := 0; i < 50; i++ {
 		req := fasthttp.AcquireRequest()
