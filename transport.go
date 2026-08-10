@@ -38,7 +38,7 @@ type Server interface {
 }
 
 // Client is the call side of a transport: anything that can complete a
-// request. *zap.Transport and *fasthttp.HostClient already satisfy it, so
+// request. *http.Transport and *fasthttp.HostClient already satisfy it, so
 // giving a scheme a Dial is a one-liner.
 type Client interface {
 	Do(req *fasthttp.Request, resp *fasthttp.Response) error
@@ -64,9 +64,9 @@ var (
 	transports   = map[string]Transport{
 		"zap": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
-				return &zap.Server{Network: networkOf(addr), Addr: addr, Handler: h}
+				return &http.Server{Network: networkOf(addr), Addr: addr, Handler: h}
 			},
-			Dial: func(addr string) Client { return zap.Dial(networkOf(addr), addr) },
+			Dial: func(addr string) Client { return http.Dial(networkOf(addr), addr) },
 		},
 		"http": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {

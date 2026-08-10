@@ -198,7 +198,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	}
 	req.SetBody(inBody)
 
-	frame, merr := zap.MarshalRequest(req)
+	frame, merr := http.MarshalRequest(req)
 	if merr != nil {
 		t.Fatalf("marshal ZAP request frame: %v", merr)
 	}
@@ -221,7 +221,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 		t.Fatalf("read response length prefix: %v", err)
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
-	if n == 0 || n > zap.MaxFrameSize {
+	if n == 0 || n > http.MaxFrameSize {
 		t.Fatalf("implausible frame length %d — these are not ZAP frames", n)
 	}
 	respFrame := make([]byte, n)
@@ -231,7 +231,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
-	if err := zap.UnmarshalResponse(respFrame, resp); err != nil {
+	if err := http.UnmarshalResponse(respFrame, resp); err != nil {
 		t.Fatalf("the reply is not a ZAP response frame: %v", err)
 	}
 	if resp.StatusCode() != 200 {
@@ -327,7 +327,7 @@ func TestCall_ForwardsIdentityWithoutMintingIt(t *testing.T) {
 	req.URI().SetPath("/v1/agg/eval")
 	req.Header.Set(zip.HeaderOrg, "acme")
 	req.SetBodyString("{}")
-	if err := zap.Dial("unix", aggSock).Do(req, resp); err != nil {
+	if err := http.Dial("unix", aggSock).Do(req, resp); err != nil {
 		t.Fatalf("call aggregator: %v", err)
 	}
 	if !strings.Contains(string(resp.Body()), `"caller":"`+zip.HeaderOrg+`=acme"`) {
