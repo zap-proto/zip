@@ -1,11 +1,16 @@
 package zip
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/http"
@@ -289,6 +294,9 @@ func (a *App) mount(prefix, addr string) error {
 func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	h := func(c *Ctx) error {
 		client, host := to()
+		if upgrading(c.fc.Request()) {
+			return relay(c.fc.RequestCtx(), host, "mount "+prefix)
+		}
 		return forward(c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
 	}
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
@@ -335,6 +343,120 @@ func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host
 		return Errorf(502, "%s: %v", what, err)
 	}
 	return nil
+}
+
+// upgradeWait bounds reaching a plugin for an upgrade. It is a dial on a socket
+// in this pod, so a second is already generous; what it exists to stop is a
+// caller hanging on a plugin that is not listening yet.
+const upgradeWait = time.Second
+
+// plain is where a mounted plugin speaks ordinary HTTP, derived from the address
+// it speaks ZAP on.
+//
+// A plugin's socket carries ZAP frames: one length-prefixed request, one
+// length-prefixed reply. That shape has no room for a connection that STOPS being
+// request-and-reply, which is exactly what an upgrade is — so a websocket cannot
+// cross it, and the frames a client sends after the handshake arrive at an HTTP
+// parser as nonsense ("error when reading request headers", the first byte being
+// 0x81). The plugin therefore listens a second time, in plain HTTP, beside the
+// first. This DERIVES that address instead of configuring it, so a mount is still
+// one address and there is no second value to keep in step with the first.
+//
+// Only over a unix socket, because that is the one place the sibling is known to
+// be the same process. A tcp mount would need a port nobody has agreed on.
+func plain(addr string) string {
+	if networkOf(addr) != "unix" {
+		return ""
+	}
+	return addr + ".http"
+}
+
+// upgrading reports whether a request is asking to stop being HTTP.
+func upgrading(req *fasthttp.Request) bool {
+	return len(req.Header.Peek(fasthttp.HeaderUpgrade)) > 0 &&
+		bytes.Contains(bytes.ToLower(req.Header.Peek(fasthttp.HeaderConnection)),
+			[]byte("upgrade"))
+}
+
+// relay carries an upgraded connection between a caller and a mounted plugin.
+//
+// Everything up to the switch is ordinary — the request goes up as it arrived,
+// and a plugin that declines (an unauthorized socket is refused BEFORE it opens)
+// answers an ordinary reply that comes straight back. What is different is what
+// happens after 101: neither end is speaking HTTP any more, so there is nothing
+// left to parse and the only correct act is to move bytes until one side stops.
+//
+// The switch reply is written verbatim, from the bytes the plugin sent, rather
+// than through the response object — fasthttp would frame a body onto a message
+// that has none. Bytes the plugin has already sent past the header are held in
+// the reader, so the copy starts there and not at the socket.
+func relay(rc *fasthttp.RequestCtx, addr, what string) error {
+	to := plain(addr)
+	if to == "" {
+		return Errorf(502, "%s: no upgrade path over %s", what, networkOf(addr))
+	}
+	up, err := net.DialTimeout(networkOf(to), to, upgradeWait)
+	if err != nil {
+		return Errorf(502, "%s: upgrade: %v", what, err)
+	}
+	bw := bufio.NewWriter(up)
+	if err := rc.Request.Write(bw); err == nil {
+		err = bw.Flush()
+	}
+	if err != nil {
+		_ = up.Close()
+		return Errorf(502, "%s: upgrade: %v", what, err)
+	}
+
+	br := bufio.NewReader(up)
+	var head fasthttp.ResponseHeader
+	if err := head.Read(br); err != nil {
+		_ = up.Close()
+		return Errorf(502, "%s: upgrade: %v", what, err)
+	}
+	if head.StatusCode() != fasthttp.StatusSwitchingProtocols {
+		defer func() { _ = up.Close() }()
+		head.CopyTo(&rc.Response.Header)
+		body, err := body(br, head.ContentLength())
+		if err != nil {
+			return Errorf(502, "%s: upgrade: %v", what, err)
+		}
+		rc.Response.SetBody(body)
+		return nil
+	}
+
+	switched := head.Header()
+	rc.HijackSetNoResponse(true)
+	rc.Hijack(func(down net.Conn) {
+		defer func() { _ = up.Close() }()
+		defer func() { _ = down.Close() }()
+		if _, err := down.Write(switched); err != nil {
+			return
+		}
+		go func() {
+			_, _ = io.Copy(up, down)
+			// The caller is gone. Close write so the plugin's read sees EOF and
+			// ends its session rather than holding a shell nobody is watching.
+			if c, ok := up.(interface{ CloseWrite() error }); ok {
+				_ = c.CloseWrite()
+			}
+		}()
+		_, _ = io.Copy(down, br)
+	})
+	return nil
+}
+
+// body reads a reply's body given the length its header declared. A negative
+// length is "until the connection ends", which is what identity encoding means.
+func body(br *bufio.Reader, n int) ([]byte, error) {
+	if n < 0 {
+		return io.ReadAll(br)
+	}
+	b := make([]byte, n)
+	if _, err := io.ReadFull(br, b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // makeSocketDir creates the directory a unix socket will be bound in, so
