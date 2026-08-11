@@ -514,8 +514,21 @@ type httpServer struct {
 	srv  *fasthttp.Server
 }
 
-func (h *httpServer) ListenAndServe() error { return h.srv.ListenAndServe(h.addr) }
-func (h *httpServer) Close() error          { return h.srv.Shutdown() }
+// ListenAndServe binds the address, over tcp or over a unix socket.
+//
+// A PATH IS A SOCKET on this transport for the same reason it is on the ZAP one:
+// the address names where the bytes are spoken and the shape of the address says
+// which kind of place that is. It earns its keep next to a plugin — an upgraded
+// connection cannot cross ZAP framing, so a plugin listens HTTP beside its socket
+// and the host relays to it — and a path there must not mean "a tcp host called
+// /var/lib/…", which is what binding it as tcp amounts to.
+func (h *httpServer) ListenAndServe() error {
+	if networkOf(h.addr) == "unix" {
+		return h.srv.ListenAndServeUNIX(h.addr, 0o600)
+	}
+	return h.srv.ListenAndServe(h.addr)
+}
+func (h *httpServer) Close() error { return h.srv.Shutdown() }
 
 // tunableServer is a transport whose underlying server accepts the App's
 // per-conn wire tuning. Listen applies it after construction so zip.Config's

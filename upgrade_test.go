@@ -1,96 +1,56 @@
 package zip_test
 
 import (
-	"bufio"
+	"bytes"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/fasthttp/websocket"
 	"github.com/zap-proto/zip"
+	"github.com/zap-proto/zip/wsx"
 )
 
 // A MOUNTED PLUGIN'S WEBSOCKET REACHES THE CALLER.
 //
-// The plugin's own socket carries ZAP frames — one request, one reply — so an
-// upgraded connection cannot cross it: the host wrote 101 and then went on
-// parsing HTTP, and the first frame the client sent (0x81…) arrived at the
-// header parser as garbage. Every websocket behind a plugin died on its first
-// message. These tests pin the two halves of the fix: the switch is relayed and
-// the bytes flow both ways, and a plugin that REFUSES to switch still answers.
+// A plugin's socket carries ZAP frames — one request, one reply — and an
+// upgraded connection is neither. The host wrote the 101 through and then went
+// on parsing HTTP, so the first frame the client sent arrived at the header
+// parser as nonsense (first byte 0x81) and the connection died. Every websocket
+// behind a mounted plugin failed on its first message, and the session the
+// plugin meant to run after the handshake never started.
+//
+// These pin both halves: the switch is relayed and the bytes flow both ways,
+// and a plugin that REFUSES to switch still answers its own reply.
 
-// upstream stands in for the plugin's plain-HTTP leg: it speaks HTTP/1.1 on the
-// sibling socket, switches protocols, and then echoes what it is sent in caps.
-func upstream(t *testing.T, sock string, code, body string) {
-	t.Helper()
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("listen %s: %v", sock, err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = c.Close() }()
-				br := bufio.NewReader(c)
-				for {
-					line, err := br.ReadString('\n')
-					if err != nil {
-						return
-					}
-					if line == "\r\n" {
-						break
-					}
-				}
-				if code != "101" {
-					_, _ = c.Write([]byte("HTTP/1.1 " + code + " No\r\nContent-Length: " +
-						itoa(len(body)) + "\r\n\r\n" + body))
-					return
-				}
-				_, _ = c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\n" +
-					"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-				for {
-					b := make([]byte, 256)
-					n, err := br.Read(b)
-					if err != nil {
-						return
-					}
-					if _, err := c.Write([]byte(strings.ToUpper(string(b[:n])))); err != nil {
-						return
-					}
-				}
-			}()
-		}
-	}()
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var d []byte
-	for ; n > 0; n /= 10 {
-		d = append([]byte{byte('0' + n%10)}, d...)
-	}
-	return string(d)
-}
-
-// mounted starts a ZAP plugin plus its plain-HTTP sibling, mounts it on a host
-// listening over real TCP, and answers the host's address.
-func mounted(t *testing.T, code, body string) string {
+// box is a plugin in the shape production runs: ZAP on its socket, plain HTTP on
+// the sibling beside it, one echo socket and one that refuses. It answers the
+// host address it is mounted on.
+func box(t *testing.T) string {
 	t.Helper()
 	dir := sockDir(t)
 	sock := dir + "/box.sock"
 
 	child := zip.New(zip.Config{AppName: "box", DisableStartupMessage: true})
-	child.Get("/v1/box/ping", func(c *zip.Ctx) error { return c.String(200, "ok") })
-	go func() { _ = child.Listen(sock) }()
+	child.Get("/v1/box/ws", wsx.Upgrade(func(c *wsx.Conn) error {
+		for {
+			typ, msg, err := c.ReadMessage()
+			if err != nil {
+				return err
+			}
+			if err := c.WriteMessage(typ, bytes.ToUpper(msg)); err != nil {
+				return err
+			}
+		}
+	}))
+	// Refused BEFORE the upgrade, which is how an unticketed terminal is refused.
+	child.Get("/v1/box/shut", func(c *zip.Ctx) error {
+		return zip.ErrUnauthorized("no ticket")
+	})
+	go func() { _ = child.Listen(sock, "http://"+sock+".http") }()
 	waitSock(t, sock)
-	upstream(t, sock+".http", code, body)
+	waitSock(t, sock+".http")
+	t.Cleanup(func() { _ = child.Shutdown() })
 
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	loaded, err := zip.Load(zip.Plugin{Name: "box", Addr: sock}, "/v1/box")
@@ -106,7 +66,7 @@ func mounted(t *testing.T, code, body string) string {
 	addr := probe.Addr().String()
 	_ = probe.Close()
 	go func() { _ = host.Listen("http://" + addr) }()
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 200; i++ {
 		if c, err := net.Dial("tcp", addr); err == nil {
 			_ = c.Close()
 			break
@@ -117,44 +77,24 @@ func mounted(t *testing.T, code, body string) string {
 	return addr
 }
 
-func TestMountedPluginRelaysAnUpgrade(t *testing.T) {
-	addr := mounted(t, "101", "")
+func TestMountedPluginServesAWebsocket(t *testing.T) {
+	addr := box(t)
 
-	c, err := net.Dial("tcp", addr)
+	d := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := d.Dial("ws://"+addr+"/v1/box/ws", nil)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("dial through the mount: %v", err)
 	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := c.Write([]byte("GET /v1/box/ws HTTP/1.1\r\nHost: x\r\n" +
-		"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-	br := bufio.NewReader(c)
-	status, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if !strings.Contains(status, "101") {
-		t.Fatalf("want 101, got %q", status)
-	}
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read head: %v", err)
-		}
-		if line == "\r\n" {
-			break
-		}
-	}
-
-	// PAST THE SWITCH: this is the byte that used to reach an HTTP parser.
-	if _, err := c.Write([]byte("hello")); err != nil {
+	// PAST THE SWITCH: the frame that used to reach an HTTP header parser.
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	got := make([]byte, 5)
-	if _, err := br.Read(got); err != nil {
+	_, got, err := conn.ReadMessage()
+	if err != nil {
 		t.Fatalf("recv: %v", err)
 	}
 	if string(got) != "HELLO" {
@@ -163,29 +103,17 @@ func TestMountedPluginRelaysAnUpgrade(t *testing.T) {
 }
 
 func TestMountedPluginMayRefuseToUpgrade(t *testing.T) {
-	addr := mounted(t, "401", `{"error":"no ticket"}`)
+	addr := box(t)
 
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	d := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	_, resp, err := d.Dial("ws://"+addr+"/v1/box/shut", nil)
+	if err == nil {
+		t.Fatal("want the plugin's refusal, got a socket")
 	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := c.Write([]byte("GET /v1/box/ws HTTP/1.1\r\nHost: x\r\n" +
-		"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
-		t.Fatalf("write: %v", err)
+	if resp == nil {
+		t.Fatalf("want a reply to read, got only %v", err)
 	}
-	br := bufio.NewReader(c)
-	head, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if !strings.Contains(head, "401") {
-		t.Fatalf("want 401, got %q", head)
-	}
-	rest := make([]byte, 512)
-	n, _ := br.Read(rest)
-	if !strings.Contains(string(rest[:n]), "no ticket") {
-		t.Fatalf("want the plugin's own body, got %q", rest[:n])
+	if resp.StatusCode != 401 {
+		t.Fatalf("want 401, got %d", resp.StatusCode)
 	}
 }
