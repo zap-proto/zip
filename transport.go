@@ -320,15 +320,9 @@ func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host
 		return Errorf(503, "%s: no instance running", what)
 	}
 	// The caller's Host survives the hop. A client dials its own address and never
-	// reads this header to find the far end, so overwriting it with the dial
-	// address destroyed the one fact a callee needs to serve more than one brand:
-	// which host was asked for. The dial address remains the fallback for a request
-	// carrying no Host of its own — a freshly built one rather than a proxied
-	// inbound — because HTTP/1.1 requires the header.
-	//
-	// This is only half the path. zap-proto/http dropped Host on the wire as well
-	// (it excluded the header as frame-owned while nothing in the frame carried a
-	// host); fixed in v0.3.2, which this module requires.
+	// reads this header to find the far end, so overwriting it destroyed the one
+	// fact a callee needs to serve more than one brand. The dial address is the
+	// fallback for a request carrying none — HTTP/1.1 requires the header.
 	if inbound := req.Header.Host(); len(inbound) > 0 {
 		host = string(inbound)
 	}
