@@ -85,7 +85,7 @@ func TestOpen_NamedCallerGetsItsOwnTools(t *testing.T) {
 		switch n {
 		case "acme_own":
 			mine = true
-		case "get_v1_demo_version":
+		case "get_demo_version":
 			projected = true
 		}
 	}
