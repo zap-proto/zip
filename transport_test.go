@@ -130,6 +130,76 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 	}
 }
 
+// TestHTTPTransport_BodyLimitReachesTheSocket is the regression test for the
+// same drop one field over: the HTTP transport built a bare fasthttp.Server and
+// honored zip.Config.BodyLimit nowhere, so every body was capped at fasthttp's
+// 4 MiB default however the App was configured. fiberConfig sets fiber's own
+// BodyLimit, which reaches MaxRequestBodySize only when fiber owns the listener
+// — here the transport does, so the two disagreed and the socket won.
+//
+// It cost a production deployment configured for 100 MiB: 4,194,304 bytes were
+// answered and 4,194,305 were refused, which is 4<<20 exactly. Every site
+// publish over 4 MiB and every full-context prompt (a 1M-token prompt is ~4.3 MB
+// of JSON) died as an opaque 400 "Error when parsing request", a message that
+// reads like a malformed payload rather than a size cap.
+//
+// A REAL socket, both directions. The config-level assertion the cloud carried
+// (BodyLimit != 4<<20) passed the whole time this was broken, because the value
+// was set correctly and never reached the wire.
+func TestHTTPTransport_BodyLimitReachesTheSocket(t *testing.T) {
+	post := func(n int) string {
+		return fmt.Sprintf("POST /v1/echo HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\n"+
+			"Content-Length: %d\r\nConnection: close\r\n\r\n%s", n, strings.Repeat("a", n))
+	}
+	serve := func(name string, limit int) string {
+		app := zip.New(zip.Config{AppName: name, DisableStartupMessage: true, BodyLimit: limit})
+		app.Post("/v1/echo", func(c *zip.Ctx) error { return c.JSON(200, map[string]int{"n": len(c.Body())}) })
+		addr := freeAddr(t)
+		go func() { _ = app.Listen("http://" + addr) }()
+		t.Cleanup(func() { _ = app.Shutdown() })
+		waitDialable(t, addr)
+		return addr
+	}
+
+	// Raised: 5 MiB is past fasthttp's 4 MiB default and inside an 8 MiB App.
+	// A refusal here means the limit never left the Config. This is the arm that
+	// was production's outage.
+	if !answered200(t, serve("raised", 8<<20), post(5<<20)) {
+		t.Errorf("BodyLimit 8 MiB: 5 MiB body was REFUSED, want 200 (the knob is still dropped at the wire)")
+	}
+
+	// Lowered: the knob has to bind in BOTH directions, or a deployment that
+	// TIGHTENS the ceiling silently keeps serving 4 MiB. 2 MiB is past a 1 MiB
+	// App and inside the default the bug left on the socket, so this arm answers
+	// 200 precisely when the transport is ignoring Config.
+	//
+	// Read as "did the handler run", not as a status: fasthttp refuses an
+	// oversized body while the client is still writing it, so what comes back is
+	// a connection reset as often as a response. Either is the refusal; only a
+	// 200 is the bug.
+	if answered200(t, serve("lowered", 1<<20), post(2<<20)) {
+		t.Errorf("BodyLimit 1 MiB: 2 MiB body was SERVED, want a refusal (the socket is still on fasthttp's 4 MiB default)")
+	}
+}
+
+// answered200 reports whether the handler answered 200. A write or read failure is a
+// refusal, not a test failure: fasthttp drops the connection mid-body when the
+// limit is crossed, so the peer never gets a status line to parse.
+func answered200(t *testing.T, addr, rawRequest string) bool {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(c, rawRequest); err != nil {
+		return false
+	}
+	line, err := bufio.NewReader(c).ReadString('\n')
+	return err == nil && strings.HasPrefix(line, "HTTP/1.1 200")
+}
+
 // TestHTTPTransport_ServerHeaderCoversPreRoutingErrors proves fasthttp's OWN
 // pre-routing error responses (431 on header overflow) carry the App's
 // ServerHeader and NEVER the framework default "fasthttp"/"zip". Those bytes are
