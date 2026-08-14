@@ -586,14 +586,11 @@ func (h *httpServer) applyConfig(cfg Config) {
 	if cfg.ReadBufferSize > 0 {
 		h.srv.ReadBufferSize = cfg.ReadBufferSize
 	}
-	// BodyLimit is the SAME shape of drop one field over, and it hid behind the
-	// header fix: fiberConfig sets fiber's BodyLimit, but fiber only pushes that
-	// onto MaxRequestBodySize when FIBER owns the listener. Here the transport
-	// does, so the socket kept fasthttp's 4 MiB default while Config said
-	// otherwise — and fasthttp refuses an oversized body BEFORE any handler runs,
-	// as an opaque 400 "Error when parsing request" that reads like a malformed
-	// payload rather than a size cap. Measured on a deployment configured for
-	// 100 MiB: 4,194,304 bytes answered, 4,194,305 answered 400.
+	// The body ceiling reaches the wire only here. fiber binds its own BodyLimit
+	// when fiber owns the listener, and on this transport it does not, so without
+	// this the socket keeps fasthttp's 4 MiB default. fasthttp refuses an
+	// oversized body before any handler runs, answering 400 "Error when parsing
+	// request".
 	if cfg.BodyLimit > 0 {
 		h.srv.MaxRequestBodySize = cfg.BodyLimit
 	}

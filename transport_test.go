@@ -130,22 +130,11 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 	}
 }
 
-// TestHTTPTransport_BodyLimitReachesTheSocket is the regression test for the
-// same drop one field over: the HTTP transport built a bare fasthttp.Server and
-// honored zip.Config.BodyLimit nowhere, so every body was capped at fasthttp's
-// 4 MiB default however the App was configured. fiberConfig sets fiber's own
-// BodyLimit, which reaches MaxRequestBodySize only when fiber owns the listener
-// — here the transport does, so the two disagreed and the socket won.
-//
-// It cost a production deployment configured for 100 MiB: 4,194,304 bytes were
-// answered and 4,194,305 were refused, which is 4<<20 exactly. Every site
-// publish over 4 MiB and every full-context prompt (a 1M-token prompt is ~4.3 MB
-// of JSON) died as an opaque 400 "Error when parsing request", a message that
-// reads like a malformed payload rather than a size cap.
-//
-// A REAL socket, both directions. The config-level assertion the cloud carried
-// (BodyLimit != 4<<20) passed the whole time this was broken, because the value
-// was set correctly and never reached the wire.
+// TestHTTPTransport_BodyLimitReachesTheSocket asserts zip.Config.BodyLimit binds
+// the socket in both directions: raised, a body past fasthttp's 4 MiB default is
+// served; lowered, a body past the App's own ceiling is refused. It drives a real
+// listener, because fiber's config and this transport's server are separate
+// objects and only the second one answers the wire.
 func TestHTTPTransport_BodyLimitReachesTheSocket(t *testing.T) {
 	post := func(n int) string {
 		return fmt.Sprintf("POST /v1/echo HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\n"+
@@ -162,23 +151,14 @@ func TestHTTPTransport_BodyLimitReachesTheSocket(t *testing.T) {
 	}
 
 	// Raised: 5 MiB is past fasthttp's 4 MiB default and inside an 8 MiB App.
-	// A refusal here means the limit never left the Config. This is the arm that
-	// was production's outage.
 	if !answered200(t, serve("raised", 8<<20), post(5<<20)) {
-		t.Errorf("BodyLimit 8 MiB: 5 MiB body was REFUSED, want 200 (the knob is still dropped at the wire)")
+		t.Errorf("BodyLimit 8 MiB: 5 MiB body was refused, want 200")
 	}
 
-	// Lowered: the knob has to bind in BOTH directions, or a deployment that
-	// TIGHTENS the ceiling silently keeps serving 4 MiB. 2 MiB is past a 1 MiB
-	// App and inside the default the bug left on the socket, so this arm answers
-	// 200 precisely when the transport is ignoring Config.
-	//
-	// Read as "did the handler run", not as a status: fasthttp refuses an
-	// oversized body while the client is still writing it, so what comes back is
-	// a connection reset as often as a response. Either is the refusal; only a
-	// 200 is the bug.
+	// Lowered: 2 MiB is past a 1 MiB App and inside fasthttp's default, so a 200
+	// here means the socket is on the default rather than on Config.
 	if answered200(t, serve("lowered", 1<<20), post(2<<20)) {
-		t.Errorf("BodyLimit 1 MiB: 2 MiB body was SERVED, want a refusal (the socket is still on fasthttp's 4 MiB default)")
+		t.Errorf("BodyLimit 1 MiB: 2 MiB body was served, want a refusal")
 	}
 }
 
