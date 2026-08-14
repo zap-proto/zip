@@ -226,6 +226,14 @@ func (a *App) listenOn(addrs []string) error {
 			t.applyConfig(a.cfg)
 		}
 		servers = append(servers, s)
+		// The plain-HTTP listener that lets an upgrade reach this app. [plain]
+		// derives its address and the host dials it; this is the half that
+		// answers. Appended to servers so it shuts down with the rest, and NOT
+		// bound: it is the same app at a derived address, not a second place to
+		// find it.
+		if p := a.plainSibling(addr, h); p != nil {
+			servers = append(servers, p)
+		}
 		// This app now answers at this address, and a caller in THIS process can
 		// reach its ops without the address (see [Serving] and [Here]). Recorded
 		// here rather than at Serve because binding is what makes it true.
@@ -369,6 +377,39 @@ func plain(addr string) string {
 		return ""
 	}
 	return addr + ".http"
+}
+
+// plainSibling is the listener that answers at [plain] — the second, ordinary
+// HTTP listener a mounted app needs because an upgrade cannot cross ZAP framing.
+// Without it the host dials a socket nobody created and every websocket through
+// a mount fails the handshake.
+//
+// nil when the address has no sibling. A tcp address has none (no port both ends
+// have agreed on), and neither does an app that is ITSELF a sibling — ops and
+// peer are reached by name from inside the fleet, never mounted, so a second
+// socket beside them would be one nothing dials.
+func (a *App) plainSibling(addr string, h fasthttp.RequestHandler) Server {
+	if a.sibling {
+		return nil
+	}
+	to := plain(addr)
+	if to == "" {
+		return nil
+	}
+	// Resolved through the registry rather than constructed here, so the sibling
+	// is the same HTTP transport a caller gets from an http:// address and there
+	// is one implementation of "serve plain HTTP" to keep correct.
+	_, at, t, err := transportFor("http://" + to)
+	if err != nil || t.Serve == nil {
+		a.logger.Error("zip: no http transport for the upgrade sibling", "addr", to, "err", err)
+		return nil
+	}
+	s := t.Serve(at, h)
+	if t, ok := s.(tunableServer); ok {
+		t.applyConfig(a.cfg)
+	}
+	a.logger.Info("zip listening", "transport", "http", "addr", at, "for", "upgrade")
+	return s
 }
 
 // upgrading reports whether a request is asking to stop being HTTP.
