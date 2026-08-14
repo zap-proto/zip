@@ -23,9 +23,11 @@ import (
 // These pin both halves: the switch is relayed and the bytes flow both ways,
 // and a plugin that REFUSES to switch still answers its own reply.
 
-// box is a plugin in the shape production runs: ZAP on its socket, plain HTTP on
-// the sibling beside it, one echo socket and one that refuses. It answers the
-// host address it is mounted on.
+// box is a plugin in the shape production runs: ONE address, the way a plugin
+// main is written. The plain-HTTP sibling an upgrade needs is derived from that
+// address, not passed alongside it — so this also pins that Listen creates it.
+// Naming the sibling here instead would test the relay while assuming away the
+// wiring, and a mounted websocket would still fail everywhere it is really used.
 func box(t *testing.T) string {
 	t.Helper()
 	dir := sockDir(t)
@@ -47,7 +49,7 @@ func box(t *testing.T) string {
 	child.Get("/v1/box/shut", func(c *zip.Ctx) error {
 		return zip.ErrUnauthorized("no ticket")
 	})
-	go func() { _ = child.Listen(sock, "http://"+sock+".http") }()
+	go func() { _ = child.Listen(sock) }()
 	waitSock(t, sock)
 	waitSock(t, sock+".http")
 	t.Cleanup(func() { _ = child.Shutdown() })
