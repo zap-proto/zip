@@ -1,6 +1,8 @@
 package zip
 
 import (
+	"cmp"
+	"slices"
 	"sync"
 	"time"
 )
@@ -36,28 +38,98 @@ import (
 // Load and stopping it would contradict that.
 func (p Plugin) idleAfter() time.Duration { return p.IdleAfter }
 
-// EvictIdle stops every lazy plugin that has not served a request for its
-// IdleAfter, and reports how many it stopped. One pass, no goroutine — the
-// caller decides the cadence, so a host under test can drive it directly and a
-// host in production can put it on the ticker it already has.
+// Evict reclaims plugin processes under two bounds and reports how many it
+// stopped: first every lazy plugin that has not served for its IdleAfter, then,
+// while more than warm are still running, the least recently used. Zero warm
+// means only the first bound applies.
+//
+// One pass, no goroutine — the caller decides the cadence, so a host under test
+// can drive it directly and a host in production can put it on the ticker it
+// already has. warm is an ARGUMENT rather than a field because the number of
+// processes a host may hold is a fact about the host's memory budget, which the
+// host knows and a library cannot.
 //
 // Draining uses the plugin's own Drain, so a request in flight when the sweep
 // lands finishes on the old process exactly as it would across a Reload.
-func (a *App) EvictIdle() int {
+func (a *App) Evict(warm int) int {
 	now := time.Now()
 	stopped := 0
+	for _, p := range a.pluginSet() {
+		if p.evictIfIdle(now) {
+			stopped++
+		}
+	}
+	return stopped + a.evictOver(warm, now)
+}
+
+// pluginSet is every plugin this host and its composed hosts hold, read once
+// under each host's lock. Both passes need the same set and neither may hold a
+// lock while stopping a child, because retire() takes the plugin's own.
+func (a *App) pluginSet() []*plugin {
+	var all []*plugin
 	for _, h := range a.hosts() {
 		h.plugMu.Lock()
-		named := make([]*plugin, 0, len(h.plugins))
 		for _, p := range h.plugins {
-			named = append(named, p)
+			all = append(all, p)
 		}
 		h.plugMu.Unlock()
+	}
+	return all
+}
 
-		for _, p := range named {
-			if p.evictIfIdle(now) {
-				stopped++
-			}
+// evictOver stops the least recently used evictable plugins until at most warm
+// remain running. Zero means unbounded, which is the historical behaviour.
+//
+// AGE BOUNDS THE STEADY STATE AND COUNT BOUNDS THE BURST, which is why both
+// exist. IdleAfter can only reclaim a plugin that has already gone quiet for
+// its whole window, so during the minutes after a cold start — when every
+// prefix that gets a request starts a child and none is old enough to be idle —
+// it reclaims nothing at all. Measured on a host of this shape: 37 children at
+// ~152MiB each in steady state, and an OOM kill six minutes after boot, well
+// before the first plugin was 15 minutes idle. A count is a bound the burst
+// cannot outrun.
+//
+// LEAST RECENT USE, because the plugin that has gone longest without a request
+// is the one whose restart is least likely to be paid for by a caller waiting.
+//
+// The cap counts every RUNNING plugin, including the ones it may not stop: they
+// hold the same memory, so counting only the evictable ones would authorise the
+// budget twice. When the unevictable alone exceed warm this reclaims what it
+// can and leaves the rest — a host is better over its budget than deprived of
+// the identity or config service every other call goes through.
+func (a *App) evictOver(warm int, now time.Time) int {
+	if warm <= 0 {
+		return 0
+	}
+	var (
+		live      int
+		evictable []*plugin
+	)
+	for _, p := range a.pluginSet() {
+		if p.cur.Load() == nil {
+			continue
+		}
+		live++
+		if p.spec.Lazy && p.spec.idleAfter() > 0 {
+			evictable = append(evictable, p)
+		}
+	}
+	if live <= warm {
+		return 0
+	}
+	// Ascending by last use, so the front of the slice is the coldest. A
+	// plugin's lastUse is stamped on every resolve, and only stamped for the
+	// ones collected above, so the ordering is total.
+	slices.SortFunc(evictable, func(x, y *plugin) int {
+		return cmp.Compare(x.lastUse.Load(), y.lastUse.Load())
+	})
+	stopped := 0
+	for _, p := range evictable {
+		if live-stopped <= warm {
+			break
+		}
+		if p.evict("lru", now.Sub(time.Unix(0, p.lastUse.Load()))) {
+			stopped++
 		}
 	}
 	return stopped
@@ -70,21 +142,25 @@ func (p *plugin) evictIfIdle(now time.Time) bool {
 	if after <= 0 || !p.spec.Lazy {
 		return false
 	}
-	// Read before taking the lock: an idle plugin is the common case and there
-	// is no reason to contend with the request path to decide it is not.
+	// No lock: the swap that takes the child down happens under p.mu inside
+	// evict, and this read only decides whether to ask. A request landing
+	// between the two is safe either way — it is already being served by the
+	// instance retire() is about to DRAIN, or it arrives after the swap and
+	// starts a fresh child. So the check buys freshness, not correctness, and
+	// holding the lock across it would contend with the request path to learn
+	// something it cannot guarantee anyway.
 	last := p.lastUse.Load()
 	if last == 0 || now.Sub(time.Unix(0, last)) < after {
 		return false
 	}
+	return p.evict("idle", now.Sub(time.Unix(0, last)))
+}
 
+// evict stops p's current instance and reports whether it stopped one. It is
+// the one place a plugin is reclaimed, so the two policies above cannot come to
+// disagree about how a child is taken down; reason says which asked.
+func (p *plugin) evict(reason string, idle time.Duration) bool {
 	p.mu.Lock()
-	// Re-checked under the lock. A request between the read above and here
-	// starts a new instance or refreshes lastUse, and evicting then would stop
-	// a plugin that is serving.
-	if last = p.lastUse.Load(); last == 0 || now.Sub(time.Unix(0, last)) < after {
-		p.mu.Unlock()
-		return false
-	}
 	if p.closed || p.disabled.Load() {
 		p.mu.Unlock()
 		return false
@@ -101,17 +177,17 @@ func (p *plugin) evictIfIdle(now time.Time) bool {
 	p.evictions.Add(1)
 	if p.app != nil {
 		p.app.logger.Info("zip idle plugin evicted",
-			"name", p.name, "pid", in.cmd.Process.Pid,
-			"idle", now.Sub(time.Unix(0, last)).Round(time.Second).String())
+			"name", p.name, "pid", in.cmd.Process.Pid, "reason", reason,
+			"idle", idle.Round(time.Second).String())
 	}
 	p.retire(in, p.spec.Drain)
 	return true
 }
 
-// ReapIdle runs EvictIdle on a ticker until the returned function is called.
-// A host that wants the behaviour writes one line; a host that does not is
-// unaffected, because nothing here runs unless it is asked for.
-func (a *App) ReapIdle(every time.Duration) (stop func()) {
+// Reap runs Evict on a ticker until the returned function is called. A host
+// that wants the behaviour writes one line; a host that does not is unaffected,
+// because nothing here runs unless it is asked for.
+func (a *App) Reap(every time.Duration, warm int) (stop func()) {
 	if every <= 0 {
 		every = time.Minute
 	}
@@ -126,7 +202,7 @@ func (a *App) ReapIdle(every time.Duration) (stop func()) {
 			case <-done:
 				return
 			case <-t.C:
-				a.EvictIdle()
+				a.Evict(warm)
 			}
 		}
 	}()
