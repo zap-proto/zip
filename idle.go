@@ -45,13 +45,21 @@ func (p Plugin) idleAfter() time.Duration { return p.IdleAfter }
 //
 // One pass, no goroutine — the caller decides the cadence, so a host under test
 // can drive it directly and a host in production can put it on the ticker it
-// already has. warm is an ARGUMENT rather than a field because the number of
-// processes a host may hold is a fact about the host's memory budget, which the
-// host knows and a library cannot.
+// already has.
+//
+// THE COUNT IS NOT THIS FUNCTION'S TO ENFORCE ALONE, and an earlier version of
+// this comment claimed otherwise: warm was an ARGUMENT here, on the reasoning
+// that the number is a fact about the host and not the library. The reasoning
+// held; the placement did not. A bound consulted once a minute is outrun by
+// anything that starts faster, and a fan-out door that asks every subsystem at
+// once does — a hundred children inside ninety seconds, so the process held them
+// all until the next sweep, stopped answering its own liveness probe, and was
+// killed with the ceiling never applied. Warm is state now and makeRoom applies
+// it at the start path; this still runs it, because age and count are one sweep.
 //
 // Draining uses the plugin's own Drain, so a request in flight when the sweep
 // lands finishes on the old process exactly as it would across a Reload.
-func (a *App) Evict(warm int) int {
+func (a *App) Evict() int {
 	now := time.Now()
 	stopped := 0
 	for _, p := range a.pluginSet() {
@@ -59,7 +67,61 @@ func (a *App) Evict(warm int) int {
 			stopped++
 		}
 	}
-	return stopped + a.evictOver(warm, now)
+	return stopped + a.evictOver(a.warm, now)
+}
+
+// host is the ROOT app of the composition this plugin belongs to, which is the
+// only app that can answer how many processes are running and what the budget is.
+// Falls back to the defining app for a plugin whose composition was never built —
+// a Load'ed service used directly in a test, where the two are the same thing.
+func (p *plugin) host() *App {
+	if o := p.owner.Load(); o != nil {
+		return o
+	}
+	return p.app
+}
+
+// makeRoom is the ceiling, and it runs where a process is about to exist rather
+// than on a ticker. Called from the start path with the starter's own lock held,
+// so it must never consider the starter itself: evicting p here would deadlock on
+// p.mu, and p is the one plugin about to be needed anyway.
+//
+// This is the half a sweep cannot do. Evict trims to warm once a minute, which is
+// a bound only while starts arrive slower than that. Measured on a host whose MCP
+// door asks every subsystem at once: ~100 children started inside 90 seconds, the
+// pod stopped answering its own liveness probe, and the kubelet killed it — the
+// "ceiling" observed only in the logs of a container that was already gone.
+func (a *App) makeRoom(starter *plugin) {
+	if a.warm <= 0 {
+		return
+	}
+	now := time.Now()
+	for {
+		var (
+			live      int
+			evictable []*plugin
+		)
+		for _, p := range a.pluginSet() {
+			if p.cur.Load() == nil {
+				continue
+			}
+			live++
+			if p != starter && p.spec.Lazy && p.spec.idleAfter() > 0 {
+				evictable = append(evictable, p)
+			}
+		}
+		// The starter is not running yet, so room for it means strictly under.
+		if live < a.warm || len(evictable) == 0 {
+			return
+		}
+		slices.SortFunc(evictable, func(x, y *plugin) int {
+			return cmp.Compare(x.lastUse.Load(), y.lastUse.Load())
+		})
+		cold := evictable[0]
+		if !cold.evict("room", now.Sub(time.Unix(0, cold.lastUse.Load()))) {
+			return // already down; re-reading would spin
+		}
+	}
 }
 
 // pluginSet is every plugin this host and its composed hosts hold, read once
@@ -187,7 +249,7 @@ func (p *plugin) evict(reason string, idle time.Duration) bool {
 // Reap runs Evict on a ticker until the returned function is called. A host
 // that wants the behaviour writes one line; a host that does not is unaffected,
 // because nothing here runs unless it is asked for.
-func (a *App) Reap(every time.Duration, warm int) (stop func()) {
+func (a *App) Reap(every time.Duration) (stop func()) {
 	if every <= 0 {
 		every = time.Minute
 	}
@@ -202,7 +264,7 @@ func (a *App) Reap(every time.Duration, warm int) (stop func()) {
 			case <-done:
 				return
 			case <-t.C:
-				a.Evict(warm)
+				a.Evict()
 			}
 		}
 	}()

@@ -103,6 +103,16 @@ type Config struct {
 	// DisableStartupMessage suppresses Fiber's startup banner.
 	DisableStartupMessage bool
 
+	// Warm is how many plugin processes this app may hold at once. Zero means
+	// unbounded, the historical behaviour. It is enforced where a plugin STARTS,
+	// so it is a ceiling rather than something a sweep restores a minute later,
+	// and again by [App.Evict] alongside each plugin's IdleAfter.
+	//
+	// The host states it because the number is a fact about the host's memory: the
+	// processes are its own children in its own cgroup, and a library cannot know
+	// how much of it they may have.
+	Warm int
+
 	// ErrorHandler is the catch-all error handler. Defaults to zip.errorHandler
 	// which renders {error, code, status} JSON.
 	ErrorHandler fiber.ErrorHandler
@@ -258,6 +268,12 @@ type App struct {
 	open   *plugin
 	plugMu sync.Mutex
 
+	// warm is Config.Warm: how many plugin processes may run at once. It is state
+	// rather than an argument to Evict because the ceiling must be known where a
+	// process is STARTED — a bound only a periodic sweep consults is a bound a
+	// burst outruns. See makeRoom.
+	warm int
+
 	// mcpList is the whole tools/list array, rendered by installMCP and re-rendered
 	// by any later load: own ops ++ every plugin catalogue, sorted by name. Serving
 	// bytes is what makes the most-called MCP method free. Atomic because a Load
@@ -343,6 +359,7 @@ func newApp(cfg Config) *App {
 		logger:    cfg.Logger,
 		loader:    cfg.Loader,
 		born:      time.Now(),
+		warm:      cfg.Warm,
 		telemetry: newTelemetry(cfg),
 	}
 }

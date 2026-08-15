@@ -35,7 +35,7 @@ func TestIdle_EvictsAndComesBack(t *testing.T) {
 
 	// Fresh from a request, so it is NOT idle. An evictor that stops a plugin
 	// that just served would be a request-latency bug that only shows in prod.
-	if n := app.Evict(0); n != 0 {
+	if n := app.Evict(); n != 0 {
 		t.Fatalf("evicted %d plugins that had just served", n)
 	}
 	if !app.Plugins()[0].Running {
@@ -43,7 +43,7 @@ func TestIdle_EvictsAndComesBack(t *testing.T) {
 	}
 
 	time.Sleep(80 * time.Millisecond)
-	if n := app.Evict(0); n != 1 {
+	if n := app.Evict(); n != 1 {
 		t.Fatalf("Evict stopped %d, want 1 after idling past IdleAfter", n)
 	}
 
@@ -86,7 +86,7 @@ func TestIdle_ZeroNeverEvicts(t *testing.T) {
 	pid := app.Plugins()[0].PID
 
 	time.Sleep(60 * time.Millisecond)
-	if n := app.Evict(0); n != 0 {
+	if n := app.Evict(); n != 0 {
 		t.Fatalf("evicted %d with IdleAfter unset — zero must mean never", n)
 	}
 	if got := app.Plugins()[0]; !got.Running || got.PID != pid {
@@ -120,7 +120,7 @@ func TestIdle_EagerIsNeverEvicted(t *testing.T) {
 		t.Fatal("eager plugin did not serve")
 	}
 	time.Sleep(40 * time.Millisecond)
-	if n := app.Evict(0); n != 0 {
+	if n := app.Evict(); n != 0 {
 		t.Fatalf("evicted %d eager plugins — IdleAfter applies to lazy only", n)
 	}
 	if got := app.Plugins()[0]; !got.Running || got.PID != pid {
@@ -146,7 +146,7 @@ func TestIdle_ReapRunsAndStops(t *testing.T) {
 	if status, _ := call(t, app, "GET", "/v1/demo/version", ""); status != 200 {
 		t.Fatal("first request failed")
 	}
-	stop := app.Reap(10*time.Millisecond, 0)
+	stop := app.Reap(10 * time.Millisecond)
 	if !settles(3*time.Second, func() bool { return !app.Plugins()[0].Running }) {
 		t.Fatal("Reap never evicted an idle plugin")
 	}
