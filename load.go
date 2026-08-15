@@ -215,7 +215,7 @@ type plugin struct {
 	restarts atomic.Int64
 
 	// lastUse is the unix-nano of the most recent target() resolve, and
-	// evictions counts idle stops. Together they are what EvictIdle reads: a
+	// evictions counts idle stops. Together they are what Evict reads: a
 	// plugin nothing has asked for is one nothing needs running.
 	lastUse   atomic.Int64
 	evictions atomic.Int64
