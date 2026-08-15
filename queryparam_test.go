@@ -255,7 +255,7 @@ func TestMCPCallIsUnaffectedByQueryBinding(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	req, _ := http.NewRequest("POST", "/mcp", stringReader(
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_v1_t_search","arguments":{"q":"viajson","limit":9}}}`))
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_t_search","arguments":{"q":"viajson","limit":9}}}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.Fiber().Test(req)
 	if err != nil {

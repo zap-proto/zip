@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/valyala/fasthttp"
-	zaphttp "github.com/zap-proto/http"
+	"github.com/zap-proto/http"
 
 	"github.com/zap-proto/zip"
 )
@@ -72,7 +72,7 @@ func flagsApp(t *testing.T) *zip.App {
 // there is no HTTP listener in this process for a call to fall back to.
 func serveUDS(t *testing.T, app *zip.App) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "flags.sock")
+	sock := filepath.Join(sockDir(t), "flags.sock")
 	go func() { _ = app.Listen(sock) }()
 	t.Cleanup(func() { _ = app.Shutdown() })
 	waitSock(t, sock)
@@ -173,7 +173,7 @@ func TestCall_TypedRoundTripOverZAPOnUnixSocket(t *testing.T) {
 }
 
 // TestCall_WireIsZAPFramesNotHTTP proves the bytes on that socket are ZAP
-// frames. It writes a length-prefixed ZAP request frame with zaphttp's own
+// frames. It writes a length-prefixed ZAP request frame with zap's own
 // codec and decodes the reply with it — a positive identification of the wire
 // format, not an inference from the fact that a call succeeded.
 //
@@ -198,7 +198,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	}
 	req.SetBody(inBody)
 
-	frame, merr := zaphttp.MarshalRequest(req)
+	frame, merr := http.MarshalRequest(req)
 	if merr != nil {
 		t.Fatalf("marshal ZAP request frame: %v", merr)
 	}
@@ -221,7 +221,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 		t.Fatalf("read response length prefix: %v", err)
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
-	if n == 0 || n > zaphttp.MaxFrameSize {
+	if n == 0 || n > http.MaxFrameSize {
 		t.Fatalf("implausible frame length %d — these are not ZAP frames", n)
 	}
 	respFrame := make([]byte, n)
@@ -231,7 +231,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
-	if err := zaphttp.UnmarshalResponse(respFrame, resp); err != nil {
+	if err := http.UnmarshalResponse(respFrame, resp); err != nil {
 		t.Fatalf("the reply is not a ZAP response frame: %v", err)
 	}
 	if resp.StatusCode() != 200 {
@@ -327,7 +327,7 @@ func TestCall_ForwardsIdentityWithoutMintingIt(t *testing.T) {
 	req.URI().SetPath("/v1/agg/eval")
 	req.Header.Set(zip.HeaderOrg, "acme")
 	req.SetBodyString("{}")
-	if err := zaphttp.Dial("unix", aggSock).Do(req, resp); err != nil {
+	if err := http.Dial("unix", aggSock).Do(req, resp); err != nil {
 		t.Fatalf("call aggregator: %v", err)
 	}
 	if !strings.Contains(string(resp.Body()), `"caller":"`+zip.HeaderOrg+`=acme"`) {
@@ -340,7 +340,7 @@ func TestCall_ForwardsIdentityWithoutMintingIt(t *testing.T) {
 // reaches it with zip.DialApp(name). If these two ever disagree, every call in
 // the fleet misses.
 func TestSocketPath_IsTheOneScheme(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	if got, want := zip.RuntimeDir(), dir; got != want {
@@ -394,7 +394,7 @@ func TestRuntimeDir_ResolutionOrder(t *testing.T) {
 // TestCall_RejectsAnOpNameThatIsNotAnOp keeps a caller bug from becoming a
 // request to some other route.
 func TestCall_RejectsAnOpNameThatIsNotAnOp(t *testing.T) {
-	c, err := zip.Dial(filepath.Join(t.TempDir(), "unused.sock"))
+	c, err := zip.Dial(filepath.Join(sockDir(t), "unused.sock"))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

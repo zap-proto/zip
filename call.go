@@ -251,7 +251,7 @@ func (c *Conn) Close() error {
 //
 // ctx is honored to the extent the transport allows: an already-cancelled ctx
 // fails before the wire, and the transport's own read timeout bounds the call
-// (zaphttp: 30s). It is not cancellable mid-flight, because abandoning a call
+// (zap: 30s). It is not cancellable mid-flight, because abandoning a call
 // would mean abandoning the pooled buffers it is writing into.
 func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, error) {
 	if c == nil || c.client == nil {

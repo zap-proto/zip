@@ -8,9 +8,9 @@ import (
 	"github.com/zap-proto/zip"
 )
 
-// shortDir is t.TempDir() with a SHORT name. A plugin's socket lives inside
+// shortDir is sockDir(t) with a SHORT name. A plugin's socket lives inside
 // Plugin.Dir, and a unix socket path is capped at 108 bytes by the kernel —
-// t.TempDir() spends most of that budget on the test's own name, so a
+// sockDir(t) spends most of that budget on the test's own name, so a
 // descriptively-named test silently fails to bind and reports the child as
 // "exited before listening".
 func shortDir(t *testing.T) string {

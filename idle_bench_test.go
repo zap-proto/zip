@@ -60,14 +60,25 @@ func TestIdle_ReclaimsRealMemory(t *testing.T) {
 
 	// The processes are gone from the OS, not merely forgotten by the host.
 	// This is the half a Running check cannot make.
-	alive := 0
-	for _, pid := range warmPIDs {
-		if rssOf(pid) > 0 {
-			alive++
+	//
+	// It has to WAIT for them. retire() is asynchronous by design — the caller
+	// is not blocked for the drain — so Running goes false the moment cur is
+	// cleared, which is strictly before the child is reaped. Asserting
+	// residency at that instant tests the scheduler, not the code: it passed
+	// on one machine and failed on the next, which is how this comment came to
+	// be written.
+	alive := len(warmPIDs)
+	settles(5*time.Second, func() bool {
+		alive = 0
+		for _, pid := range warmPIDs {
+			if rssOf(pid) > 0 {
+				alive++
+			}
 		}
-	}
+		return alive == 0
+	})
 	if alive != 0 {
-		t.Errorf("%d of %d evicted processes still resident — the pointer was dropped but the process was not", alive, len(warmPIDs))
+		t.Errorf("%d of %d evicted processes still resident after 5s — the pointer was dropped but the process was not", alive, len(warmPIDs))
 	}
 
 	t.Logf("%d plugins warm: %.1f MiB resident across %d child processes",
