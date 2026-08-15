@@ -51,7 +51,7 @@ func TestIdle_ReclaimsRealMemory(t *testing.T) {
 	warmRSS := totalRSS(t, warmPIDs)
 
 	time.Sleep(80 * time.Millisecond)
-	if n := app.Evict(0); n != plugins {
+	if n := app.Evict(); n != plugins {
 		t.Fatalf("evicted %d of %d", n, plugins)
 	}
 	if !settles(3*time.Second, func() bool { return len(runningPIDs(t, app)) == 0 }) {

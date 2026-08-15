@@ -208,7 +208,12 @@ type plugin struct {
 	prefixes []string // every subtree this plugin answers
 	spec     Plugin
 
-	app      *App // for logging and supervision when started on demand
+	app *App // for logging and supervision when started on demand
+	// owner is the ROOT app of the composition this plugin ended up in, stamped
+	// when a generation is built. app is the definition that Load'ed it, which for
+	// a composed service is a sub-app holding one plugin and no ceiling — so it is
+	// the wrong thing to ask "how many are running" or "what is the budget".
+	owner    atomic.Pointer[App]
 	cur      atomic.Pointer[instance]
 	mu       sync.Mutex
 	reloads  atomic.Int64
@@ -328,6 +333,10 @@ func (p *plugin) startOnDemand() (Client, string) {
 	if p.closed || p.disabled.Load() {
 		return nil, ""
 	}
+	// The ceiling is applied HERE, before another process exists, so warm bounds
+	// what this host holds rather than what a sweep restores a minute later.
+	p.host().makeRoom(p)
+
 	in, err := start(p.spec)
 	if err != nil {
 		p.app.logger.Error("zip lazy plugin failed to start", "name", p.name, "err", err)
