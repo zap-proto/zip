@@ -19,7 +19,7 @@ type askOut struct {
 // and a value. No address, no registry, no discovery — and the tenant rides the
 // CALLER, so the callee reads an org the caller could not choose.
 func TestAskReachesAPeerByNameAndCarriesTheCaller(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	peer := zip.New(zip.Config{AppName: "ledger", DisableStartupMessage: true})
@@ -58,7 +58,7 @@ func TestAskReachesAPeerByNameAndCarriesTheCaller(t *testing.T) {
 // The Conn is kept for the life of the process: a plane hop must not pay for a
 // fresh connect, which is what "dial, call, close" per call costs.
 func TestAskReusesOneConnPerPeer(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	peer := zip.New(zip.Config{AppName: "reuse", DisableStartupMessage: true})

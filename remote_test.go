@@ -24,7 +24,7 @@ func remoteService(t *testing.T) (string, Declaration) {
 	}, WithOperationID("getEntry"))
 	svc.Get("/v1/ledger/raw", func(c *Ctx) error { return c.String(200, "raw ledger") })
 
-	sock := filepath.Join(t.TempDir(), "ledger.sock")
+	sock := filepath.Join(sockDir(t), "ledger.sock")
 	go func() { _ = svc.Listen(sock) }()
 	t.Cleanup(func() { _ = svc.Shutdown() })
 

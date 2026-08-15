@@ -35,7 +35,7 @@ type addOut struct {
 // counter keyed on a goroutine id parsed out of runtime.Stack. The cure here is
 // not calling the router at all: [Here] enters one op.
 func TestHereRunsTheOpWithoutTheSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	var ran atomic.Int64
@@ -125,7 +125,7 @@ func TestHereRefusesAnUnknownOp(t *testing.T) {
 // caller would be handed an app on its way out while the socket beside it was
 // already refusing connections.
 func TestServingFollowsTheListener(t *testing.T) {
-	dir := t.TempDir()
+	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	app := zip.New(zip.Config{AppName: "meter"})

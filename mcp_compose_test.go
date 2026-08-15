@@ -85,7 +85,7 @@ func running(t *testing.T, app *zip.App) []string {
 func TestMCP_ComposedListWakesNothing(t *testing.T) {
 	bin := buildPluginBin(t, "v1")
 	tools := catalogue(t, bin)
-	if !strings.Contains(string(tools), "get_v1_demo_version") {
+	if !strings.Contains(string(tools), "get_demo_version") {
 		t.Fatalf("plugin catalogue does not name its own op: %s", tools)
 	}
 
@@ -125,7 +125,7 @@ func TestMCP_ComposedListWakesNothing(t *testing.T) {
 	}
 	var found bool
 	for _, n := range names {
-		if n == "get_v1_demo_version" {
+		if n == "get_demo_version" {
 			found = true
 		}
 	}
@@ -150,7 +150,7 @@ func TestMCP_ComposedListWakesNothing(t *testing.T) {
 
 	// tools/call — the ONE trigger, and it wakes ONE child.
 	status, body := call(t, app, "POST", "/v1/mcp",
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_v1_demo_version","arguments":{}}}`)
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_demo_version","arguments":{}}}`)
 	if status != 200 {
 		t.Fatalf("tools/call: status %d body=%s", status, body)
 	}
@@ -182,7 +182,7 @@ func TestMCP_DuplicateToolNameRefusedAtBuild(t *testing.T) {
 	if err == nil {
 		t.Fatal("two plugins claiming one tool name must be refused")
 	}
-	if !strings.Contains(err.Error(), "get_v1_demo_") ||
+	if !strings.Contains(err.Error(), "get_demo_") ||
 		!strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
 		t.Fatalf("the refusal must name the tool and BOTH claimants: %v", err)
 	}

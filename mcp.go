@@ -103,7 +103,20 @@ type Source interface {
 const mimeJSON = "application/json"
 
 // mcpProtocolVersion is the MCP spec revision zip implements.
-const mcpProtocolVersion = "2025-06-18"
+//
+// 2026-07-28 made MCP STATELESS, and zip already was: there is no
+// Mcp-Session-Id anywhere in this file, nothing is remembered between requests,
+// and tools/list answers without a preceding initialize. So this door met the
+// new revision's central requirement before the revision existed, and went on
+// announcing the old one — which is the version a client negotiates against.
+//
+// Announcing it is therefore a statement about what is implemented, not an
+// upgrade: stateless transport, no mandatory handshake, server/discover
+// answered, and initialize kept for older clients.
+//
+// What this revision DEPRECATES, zip never had — roots, sampling, logging, and
+// the HTTP+SSE transport are absent here, so nothing needs a migration window.
+const mcpProtocolVersion = "2026-07-28"
 
 // defaultMCPPath is where an app serves its own MCP door unless MCPConfig moves
 // it, and therefore where a host forwards a composed tools/call.
@@ -325,7 +338,21 @@ func (a *App) MCP(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 	// possible way for an inversion to be incomplete.
 	a.mcpOnce.Do(a.renderTools)
 	switch f.Method {
-	case "initialize":
+	// initialize and server/discover answer the SAME thing, because under a
+	// stateless protocol they ask the same question.
+	//
+	// 2026-07-28 removed the mandatory handshake: there is no session to open, so
+	// `initialize` stopped being a lifecycle step and became one more way to ask
+	// "what are you". `server/discover` is the name the new spec gives that
+	// question, and it is optional — which is exactly why it must be answered
+	// rather than skipped. A client that uses it to inspect a server before
+	// committing gets `method not found` from a server that is otherwise fully
+	// stateless, and reads the whole door as pre-2026.
+	//
+	// `initialize` stays for every client still speaking the older revision. It
+	// costs one case and keeps them working, which is the compatibility the spec's
+	// own migration path assumes.
+	case "initialize", "server/discover":
 		return f.Answer(mcpJSON(map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
