@@ -254,6 +254,22 @@ func (a *App) buildOpenAPI() map[string]any {
 			opObj["responses"] = resp
 		}
 
+		// A gated service can park ANY op for approval, so the document publishes
+		// the pending body beside every op's success response: a generated SDK
+		// reads the pair as Result<T> = Done<T> | Approval and cannot mistake a
+		// parked op for a finished one. Declared only when a hook is installed —
+		// an ungated service never parks, so its document says nothing about it.
+		if a.authorizer != nil {
+			if resp, ok := opObj["responses"].(map[string]any); ok {
+				resp["202"] = map[string]any{
+					"description": "pending approval",
+					"content": map[string]any{
+						"application/json": map[string]any{"schema": schemaOf(heldType, reg, nil)},
+					},
+				}
+			}
+		}
+
 		paths[path][strings.ToLower(op.Method)] = opObj
 	}
 

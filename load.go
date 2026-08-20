@@ -258,6 +258,7 @@ func (p *plugin) retire(in *instance, grace time.Duration) {
 type instance struct {
 	cmd     *exec.Cmd
 	dir     string
+	sockDir string
 	sock    string
 	client  Client
 	started time.Time
@@ -584,11 +585,23 @@ func (a *App) Unload(name string) error {
 // start extracts (if embedded), launches, and waits for the child to listen.
 // Every failure path releases what it already took.
 func start(spec Plugin) (*instance, error) {
-	// One private directory per instance holds the extracted binary and the
-	// socket, so a reload's new instance never collides with the old one's
-	// socket path and cleanup is a single RemoveAll.
+	// Two private directories per instance, because the binary and the socket
+	// pull the path in opposite directions. The binary extracts under spec.Dir,
+	// chosen for where a tens-to-hundreds-of-megabyte file belongs (disk, not a
+	// RAM tmpfs). The socket instead must stay SHORT: an AF_UNIX address is
+	// capped near 104 bytes (sun_path), and spec.Dir can be arbitrarily deep, so
+	// a socket beneath it fails to bind with EINVAL — the failure reads as "never
+	// began listening" and is really a path-length one. The socket therefore
+	// lives in its own short base (the system temp dir), independent of spec.Dir.
+	// A reload's new instance gets fresh dirs, so socket paths never collide, and
+	// each directory is one RemoveAll at retire.
 	dir, err := os.MkdirTemp(spec.Dir, "zip-"+spec.Name+"-")
 	if err != nil {
+		return nil, err
+	}
+	sockDir, err := os.MkdirTemp("", "zip")
+	if err != nil {
+		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 	bin := spec.Path
@@ -597,6 +610,7 @@ func start(spec Plugin) (*instance, error) {
 		bin = filepath.Join(dir, spec.Name)
 		if err := os.WriteFile(bin, spec.Bin, 0o700); err != nil {
 			_ = os.RemoveAll(dir)
+			_ = os.RemoveAll(sockDir)
 			return nil, fmt.Errorf("write binary: %w", err)
 		}
 	case spec.URL != "":
@@ -606,11 +620,12 @@ func start(spec Plugin) (*instance, error) {
 		bin, err = fetch(spec)
 		if err != nil {
 			_ = os.RemoveAll(dir)
+			_ = os.RemoveAll(sockDir)
 			return nil, err
 		}
 	}
 
-	sock := socketIn(dir, spec.Name)
+	sock := socketIn(sockDir, spec.Name)
 	cmd := exec.Command(bin, spec.Args...)
 	cmd.Env = append(append(os.Environ(), spec.Env...), AddrEnv+"="+sock)
 	// The child's output is the operator's only window into it, so it goes where
@@ -623,12 +638,13 @@ func start(spec Plugin) (*instance, error) {
 	tieToHost(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
 	// Exactly one Wait for this process's lifetime; everyone else observes the
 	// close. Two Waits is an error, and a child nobody waits on is a zombie.
-	in := &instance{cmd: cmd, dir: dir, sock: sock, started: time.Now(), done: make(chan struct{})}
+	in := &instance{cmd: cmd, dir: dir, sockDir: sockDir, sock: sock, started: time.Now(), done: make(chan struct{})}
 	go func() {
 		in.exitErr = cmd.Wait()
 		close(in.done)
@@ -738,7 +754,10 @@ func stop(in *instance, grace time.Duration) {
 		ic.CloseIdleConnections()
 	}
 	if in.dir != "" {
-		_ = os.RemoveAll(in.dir) // takes the binary and the socket with it
+		_ = os.RemoveAll(in.dir) // the extracted binary
+	}
+	if in.sockDir != "" {
+		_ = os.RemoveAll(in.sockDir) // the socket and its .http upgrade sibling
 	}
 }
 
