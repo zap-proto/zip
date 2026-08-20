@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -200,13 +199,13 @@ func TestGraft_MiddlewareStaysInsideTheChild(t *testing.T) {
 func TestGraft_ChildAuthorizerStillFires(t *testing.T) {
 	child := childApp(t, "iam", nil)
 	var seen []string
-	child.Authorize(func(_ context.Context, op zip.Op, _ any) error {
+	child.Authorize(func(_ context.Context, op zip.Op, _ any) (zip.Decision, error) {
 		seen = append(seen, op.OperationID)
-		return errors.New("denied by iam")
+		return zip.Deny_("iam", "denied by iam"), nil
 	})
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	// A host authorizer that would ALLOW, to prove whose rule ran.
-	host.Authorize(func(context.Context, zip.Op, any) error { return nil })
+	host.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) { return zip.Grant(), nil })
 	host.Use(child)
 	if err := host.Build(); err != nil {
 		t.Fatalf("Build: %v", err)

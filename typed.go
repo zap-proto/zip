@@ -454,10 +454,25 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		}
 		// Authorize the DECODED input — the exact value the handler will bind — so
 		// the decision cannot diverge from execution. Runs for REST and MCP alike.
+		// The three-valued Decision is resolved HERE, at the one seam every
+		// projection funnels through, so allow/deny/approve reach REST, MCP, the
+		// call plane and the CLI without a per-projection or per-handler branch.
 		if auth := app.authorizer; auth != nil {
-			if err := auth(ctx, meta, in); err != nil {
-				return nil, err
+			d, err := auth(ctx, meta, in)
+			if err != nil {
+				return nil, err // a genuine internal failure of the check itself
 			}
+			switch d.Effect {
+			case Deny:
+				return nil, denyError(d)
+			case Approve:
+				// Hold the op: return the held body as the result and do NOT run the
+				// handler. One value, four renderings — REST and the call plane give
+				// it a 202, MCP and the CLI carry it in the value, and a Go caller
+				// reads it off the error lane with [HeldOf].
+				return held(d), nil
+			}
+			// Allow falls through to the handler.
 		}
 		out, err := fn(ctx, in)
 		if err != nil {
@@ -539,6 +554,15 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path, header)
 		if err != nil {
 			return err
+		}
+		// A held op renders its own status: 202 and the held body, not the handler's
+		// 200. It is checked before the declared-status path because an Approval is a
+		// framework value, not the op's Out — statusOf would refuse a 202 the op
+		// never declared, which is exactly the right answer for the Out type and the
+		// wrong one for this.
+		if a, ok := out.(*Approval); ok {
+			c.Status(202)
+			return c.JSON(a)
 		}
 		if out == nil {
 			// A void op answers with the status it DECLARED, else the 204 a nil
