@@ -315,7 +315,30 @@ func (p *plugin) startOnDemand() (Client, string) {
 		p.app.logger.Error("zip lazy plugin failed to start", "name", p.name, "err", err)
 		return nil, ""
 	}
-	p.cur.Store(in)
+	// PUBLISHED BY COMPARE-AND-SWAP, because p.mu does not exclude the supervisor.
+	//
+	// A restart swaps its own instance in without taking this lock (supervise holds
+	// p.mu only long enough to read closed/spec), so between the nil check above and
+	// this line the current instance can become non-nil. A plain Store then
+	// OVERWRITES a live child, and the overwritten one is referenced by nothing:
+	// no cur, no supervise loop that can reach it, nothing to stop it on Unload or
+	// Shutdown. It keeps running, keeps its socket, and keeps writing whatever
+	// per-process state it owns.
+	//
+	// Measured in production: 15 live `ai` children in one pod, accumulating over
+	// two hours, every one of them appending to the same audit chain and racing for
+	// its sequence — which the audit gate correctly fails closed on, so audited
+	// POSTs were refused fleet-wide.
+	//
+	// Losing the swap is not an error. The winner is a started, supervised instance
+	// serving this same plugin, so this caller stops the child it opened and uses it.
+	if !p.cur.CompareAndSwap(nil, in) {
+		stop(in, 0)
+		if cur := p.cur.Load(); cur != nil {
+			return cur.client, cur.sock
+		}
+		return nil, ""
+	}
 	p.app.logger.Info("zip lazy plugin started on first request",
 		"name", p.name, "pid", in.cmd.Process.Pid, "addr", in.sock)
 	go p.app.supervise(p, in)
