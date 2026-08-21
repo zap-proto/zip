@@ -19,10 +19,17 @@ import (
 	"github.com/zap-proto/zip"
 )
 
-// Recover catches handler panics and turns them into a 500 JSON response.
-// Always include this first in the chain.
+// Recover catches handler panics and turns them into a 500. Always include this
+// first in the chain.
+//
+// It RETURNS the refusal rather than writing one, so a panic leaves by the same
+// door every other failure does: the app's error handler, which is what knows
+// the vocabulary the address answers in and the media type that names it. A
+// middleware writing its own body would be a second error surface speaking only
+// the default, and a panic at an OAuth endpoint would answer a shape no OAuth
+// client parses.
 func Recover() zip.Handler {
-	return func(c *zip.Ctx) error {
+	return func(c *zip.Ctx) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				c.Log().Error("zip panic recovered",
@@ -31,10 +38,7 @@ func Recover() zip.Handler {
 					"method", c.Method(),
 					"stack", string(debug.Stack()),
 				)
-				_ = c.JSON(500, &zip.HTTPError{
-					Status: 500,
-					Msg:    "internal server error",
-				})
+				err = zip.ErrInternal("internal server error")
 			}
 		}()
 		return c.Continue()

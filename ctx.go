@@ -3,7 +3,6 @@ package zip
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 
 	luxlog "github.com/luxfi/log"
@@ -197,12 +196,19 @@ func (c *Ctx) Continue() error { return c.fc.Next() }
 // Errors — handlers return one of these to control status code
 // =============================================================================
 
-// HTTPError is the canonical error type zip understands. Returning one
-// causes the error handler to send a JSON {error, code, status} body.
+// HTTPError is the canonical error type zip understands. Returning one is how
+// a handler refuses; how the refusal is WRITTEN belongs to the address it
+// happened at, and lives in problem.go.
+//
+// The three members map onto RFC 9457 exactly: Status is `status`, Msg is
+// `detail`, and Code is the extension member a client dispatches on. They map
+// onto RFC 6749 §5.2 just as exactly — Code is `error`, Msg is
+// `error_description` — which is why an OAuth endpoint needs no error type of
+// its own. One value, two vocabularies, chosen by the endpoint.
 type HTTPError struct {
-	Status int    `json:"status"`
-	Code   string `json:"code,omitempty"`
-	Msg    string `json:"error"`
+	Status int
+	Code   string
+	Msg    string
 
 	// Detail is what a refusal carries BESIDES its message, and it exists
 	// because a typed op's only way to refuse is to RETURN an error — so
@@ -220,9 +226,9 @@ type HTTPError struct {
 	// It is an EXTENSION in the RFC 9457 sense: the members a problem document
 	// may carry beyond its own. Rendered by MERGING rather than nesting, so a
 	// reader sees one object instead of a body filed under a key it has to know
-	// to look in — and the envelope is written last, so a domain key called
-	// status cannot displace the refusal's own.
-	Detail map[string]any `json:"-"`
+	// to look in — and the document's own members are written last, so a domain
+	// key called status cannot displace the refusal's own.
+	Detail map[string]any
 }
 
 // With attaches extension members to a refusal and returns it, so an op refuses
@@ -246,24 +252,11 @@ func (e *HTTPError) With(detail map[string]any) *HTTPError {
 	return e
 }
 
-// MarshalJSON merges the extension members under the envelope. A refusal
-// carrying no detail marshals byte-identically to what it always did, which is
-// what makes this additive for every repository already rendering this type.
+// MarshalJSON writes the RFC 9457 problem document, with no `instance`: a value
+// marshalled on its own has no occurrence to name. Served through an address,
+// the same document gains one — see [HTTPError.problem].
 func (e *HTTPError) MarshalJSON() ([]byte, error) {
-	if len(e.Detail) == 0 {
-		type plain HTTPError // no method set, so no recursion
-		return jsonenc.Marshal((*plain)(e))
-	}
-	out := make(map[string]any, len(e.Detail)+3)
-	for k, v := range e.Detail {
-		out[k] = v
-	}
-	out["status"] = e.Status
-	if e.Code != "" {
-		out["code"] = e.Code
-	}
-	out["error"] = e.Msg
-	return jsonenc.Marshal(out)
+	return jsonenc.Marshal(e.problem(""))
 }
 
 func (e *HTTPError) Error() string { return e.Msg }
@@ -290,26 +283,6 @@ func ErrPaymentRequired(msg string) *HTTPError { return &HTTPError{Status: 402, 
 // diagnostics belong ON the refusal rather than beside it.
 func ErrUnprocessable(msg string) *HTTPError { return &HTTPError{Status: 422, Msg: msg} }
 func ErrInternal(msg string) *HTTPError      { return &HTTPError{Status: 500, Msg: msg} }
-
-// errorHandler is the default fiber.ErrorHandler — converts HTTPError
-// into a JSON response and falls back to 500 for anything else.
-func errorHandler(c fiber.Ctx, err error) error {
-	var he *HTTPError
-	if errors.As(err, &he) {
-		if he.Status == 0 {
-			he.Status = 500
-		}
-		c.Status(he.Status)
-		return c.JSON(he)
-	}
-	var fe *fiber.Error
-	if errors.As(err, &fe) {
-		c.Status(fe.Code)
-		return c.JSON(&HTTPError{Status: fe.Code, Msg: fe.Message})
-	}
-	c.Status(500)
-	return c.JSON(&HTTPError{Status: 500, Msg: err.Error()})
-}
 
 // Redirect sends an HTTP redirect to location with the given status code.
 func (c *Ctx) Redirect(code int, location string) error {
