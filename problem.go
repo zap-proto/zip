@@ -164,7 +164,7 @@ func refusal(err error) *HTTPError {
 // It returns a Router, so it takes typed ops the same way — zip.Post(oauth, …)
 // — and nests: a Group of it is still OAuth's. The vocabulary rides the route
 // ENTRY from here (see [App.addRoute]), which is what makes it survive
-// composition: a service grafted under a host answers the same way at its new
+// composition: a service composed under a host answers the same way at its new
 // path, where an address recorded at registration would name a path that no
 // longer exists.
 //

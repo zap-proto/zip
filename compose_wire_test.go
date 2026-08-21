@@ -27,9 +27,9 @@ func wireGET(t *testing.T, a *App, path string, headers ...string) (int, string)
 	return resp.StatusCode, string(body)
 }
 
-// guarded is a definition whose entire authentication seam is a pathless
-// app.Use — the shape that made route-copying unsafe and that [App.Graft]'s
-// delegation existed to protect.
+// guarded is a definition whose entire authentication is a pathless
+// app.Use — the shape that made route-copying unsafe and that the old
+// delegating verb existed to protect.
 func guarded(name string) *App {
 	a := quiet(name)
 	a.Use(H(func(c *Ctx) error {

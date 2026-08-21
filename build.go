@@ -65,7 +65,7 @@ func (a *App) mustBuild() *generation {
 // composition, at the path and under the id its occurrence gives it.
 //
 // This is the value that replaced five verbs with one. It used to be a FIELD
-// that Graft appended to at compose time, which is why composing an app
+// that composition appended to at compose time, which is why composing an app
 // needed a verb of its own and why type-erasing one into an http.Handler
 // destroyed the OpenAPI document, the MCP tool list, the CLI commands, the
 // by-name call plane and the [Declaration] all at once. A projection cannot be
@@ -165,7 +165,7 @@ func composeOps(occ []occurrence) []*registeredOp {
 //     CHAIN of that subtree's own routes instead. Router middleware here would
 //     escape the definition: a child's pathless app.Use(guard) registered on the
 //     host's router is a barrier for the whole host binary, which is precisely
-//     the failure Graft's delegation existed to avoid. Composing it into
+//     the failure the old delegating verb existed to avoid. Composing it into
 //     the subtree's routes keeps it inside the definition that declared it, and
 //     costs the definition's middleware its coverage of unmatched paths — a
 //     definition does not answer for addresses it does not declare.
