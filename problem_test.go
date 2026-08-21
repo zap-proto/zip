@@ -64,11 +64,10 @@ func TestARefusalIsAProblemDocument(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/problem+json — the suffix is what says the members mean what RFC 9457 says", ct)
 	}
 	for member, want := range map[string]any{
-		"type":     "about:blank",
-		"title":    "Payment Required",
-		"status":   float64(402),
-		"detail":   "spend cap exceeded",
-		"instance": "/capped",
+		"type":   "about:blank",
+		"title":  "Payment Required",
+		"status": float64(402),
+		"detail": "spend cap exceeded",
 	} {
 		if body[member] != want {
 			t.Errorf("%s = %v, want %v", member, body[member], want)
@@ -154,7 +153,7 @@ func TestAPanicIsAProblemDocument(t *testing.T) {
 	if ct := res.Header.Get("Content-Type"); ct != "application/problem+json" {
 		t.Errorf("Content-Type = %q, want application/problem+json", ct)
 	}
-	if body["status"] != float64(500) || body["instance"] != "/panic" {
+	if body["status"] != float64(500) {
 		t.Errorf("panic did not render as a problem document: %v", body)
 	}
 }
@@ -175,7 +174,7 @@ func TestTheOAuthFamilyKeepsItsOwnVocabulary(t *testing.T) {
 	if body["error"] != "invalid_grant" || body["error_description"] != "code already redeemed" {
 		t.Errorf("token endpoint answered %v, which no OAuth client parses", body)
 	}
-	for _, member := range []string{"type", "title", "detail", "instance", "status"} {
+	for _, member := range []string{"type", "title", "detail", "status"} {
 		if _, ok := body[member]; ok {
 			t.Errorf("problem member %q leaked into an OAuth error", member)
 		}
@@ -285,5 +284,33 @@ func TestOAuthTakesTypedOpsToo(t *testing.T) {
 	}
 	if len(app.Routes()) != 1 || app.Routes()[0].Op == "" {
 		t.Errorf("the op was not registered as an op: %v", app.Routes())
+	}
+}
+
+// A REFUSAL SAYS NOTHING ABOUT WHERE IT HAPPENED, so two addresses that refuse
+// for the same reason answer identically. That is what lets "a real name and an
+// invented one are answered the same" be compared strictly rather than loosened
+// until it passes. RFC 9457 §3.1.4 makes `instance` optional; filling it with the
+// request path would tell the caller what the caller just said.
+func TestTwoAddressesRefuseIdentically(t *testing.T) {
+	a := zip.New(zip.Config{AppName: "same", DisableStartupMessage: true})
+	deny := func(c *zip.Ctx) error { return zip.ErrNotFound("no such thing") }
+	a.Get("/thing/real", deny)
+	a.Get("/quite/another", deny)
+	if err := a.Build(); err != nil {
+		t.Fatal(err)
+	}
+	one, oneBody := answered(t, a, "GET", "/thing/real")
+	two, twoBody := answered(t, a, "GET", "/quite/another")
+	if one.StatusCode != 404 || two.StatusCode != 404 {
+		t.Fatalf("status = %d and %d, want 404", one.StatusCode, two.StatusCode)
+	}
+	if _, ok := oneBody["instance"]; ok {
+		t.Errorf("the document names its occurrence: %v", oneBody)
+	}
+	x, _ := json.Marshal(oneBody)
+	y, _ := json.Marshal(twoBody)
+	if string(x) != string(y) {
+		t.Errorf("two addresses refused differently:\n  %s\n  %s", x, y)
 	}
 }
