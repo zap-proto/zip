@@ -129,6 +129,11 @@ func SocketPath(name string) string { return sock.Path(name) }
 // service's socket is <dir>/<name>.sock" is stated once.
 func socketIn(dir, name string) string { return sock.In(dir, name) }
 
+// socketFits is the length rule, kept beside the shape rule because both are
+// properties of the same address: minting one is not enough, it also has to be
+// bindable, and whoever mints it is the only one positioned to say so.
+func socketFits(path string) error { return sock.Fits(path) }
+
 // installCallPlane mounts the by-name op plane when there are ops to call.
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.
 func (a *App) installCallPlane() {

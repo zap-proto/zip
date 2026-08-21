@@ -13,6 +13,7 @@
 package sock
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -50,3 +51,28 @@ func Path(name string) string { return In(Dir(), name) }
 // child's private socket with it too, so "a service's socket is
 // <dir>/<name>.sock" has one definition.
 func In(dir, name string) string { return filepath.Join(dir, name+".sock") }
+
+// Max is how long a socket path may be. sun_path is a fixed-size field inside
+// the address struct — 104 bytes on Darwin, 108 on Linux — and it holds a
+// TERMINATED string, so the usable length is one less than the field: 103 and
+// 107. The smaller is the one number here, so an address that binds on Darwin
+// binds on Linux.
+//
+// Measured, not read off a header: on Darwin a 103-byte path binds and a
+// 104-byte path fails. Off by one here is not a rounding error — it is a
+// plugin that starts everywhere except the one machine whose temp directory is
+// a byte longer.
+const Max = 103
+
+// Fits reports whether a path is short enough to bind, naming the overrun when
+// it is not. The kernel's own answer is EINVAL, which arrives as "invalid
+// argument" and mentions neither the length nor the path — so the first guess
+// is always permissions, and the directory looks fine, and the real cause is a
+// deep parent directory nobody thought to count.
+func Fits(path string) error {
+	if len(path) <= Max {
+		return nil
+	}
+	return fmt.Errorf("socket path is %d bytes, %d over the %d-byte limit: %s",
+		len(path), len(path)-Max, Max, path)
+}

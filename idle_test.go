@@ -19,7 +19,7 @@ func TestIdle_EvictsAndComesBack(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
 		zip.Plugin{
-			Name: "demo", Bin: bin, Dir: t.TempDir(), Lazy: true,
+			Name: "demo", Bin: bin, Dir: sockDir(t), Lazy: true,
 			IdleAfter: 50 * time.Millisecond,
 		}, "/v1/demo",
 	)))
@@ -75,7 +75,7 @@ func TestIdle_ZeroNeverEvicts(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: bin, Dir: t.TempDir(), Lazy: true}, // IdleAfter unset
+		zip.Plugin{Name: "demo", Bin: bin, Dir: sockDir(t), Lazy: true}, // IdleAfter unset
 		"/v1/demo",
 	)))
 	defer func() { _ = app.Shutdown() }()
@@ -103,7 +103,7 @@ func TestIdle_EagerIsNeverEvicted(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
 		zip.Plugin{
-			Name: "demo", Bin: bin, Dir: t.TempDir(), // Lazy false
+			Name: "demo", Bin: bin, Dir: sockDir(t), // Lazy false
 			IdleAfter: 10 * time.Millisecond,
 		}, "/v1/demo",
 	)))
@@ -137,7 +137,7 @@ func TestIdle_ReapRunsAndStops(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
 		zip.Plugin{
-			Name: "demo", Bin: bin, Dir: t.TempDir(), Lazy: true,
+			Name: "demo", Bin: bin, Dir: sockDir(t), Lazy: true,
 			IdleAfter: 20 * time.Millisecond,
 		}, "/v1/demo",
 	)))

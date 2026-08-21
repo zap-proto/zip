@@ -610,7 +610,12 @@ func start(spec Plugin) (*instance, error) {
 	// One private directory per instance holds the extracted binary and the
 	// socket, so a reload's new instance never collides with the old one's
 	// socket path and cleanup is a single RemoveAll.
-	dir, err := os.MkdirTemp(spec.Dir, "zip-"+spec.Name+"-")
+	//
+	// The directory does not repeat the plugin's name. Everything inside it is
+	// already named for the plugin — the binary and the socket both — and the
+	// address they sit at has only 103 bytes total, so spending len(name)+1 of
+	// them on a second copy is what pushes a long name over the limit.
+	dir, err := os.MkdirTemp(spec.Dir, "zip-")
 	if err != nil {
 		return nil, err
 	}
@@ -634,6 +639,14 @@ func start(spec Plugin) (*instance, error) {
 	}
 
 	sock := socketIn(dir, spec.Name)
+	// The child opens sock+".http" for the upgrade listener too, so that is the
+	// longest address in play and the one that has to fit. Checking here turns a
+	// child that dies with "bind: invalid argument" into a host that refuses to
+	// launch it and says why.
+	if err := socketFits(sock + ".http"); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
 	cmd := exec.Command(bin, spec.Args...)
 	cmd.Env = append(append(os.Environ(), spec.Env...), AddrEnv+"="+sock)
 	// The child's output is the operator's only window into it, so it goes where
