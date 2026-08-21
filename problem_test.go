@@ -236,7 +236,7 @@ func TestTheVocabularySurvivesComposition(t *testing.T) {
 		t.Fatalf("status = %d, want 401", res.StatusCode)
 	}
 	if body["error"] != "invalid_client" || body["error_description"] != "bad secret" {
-		t.Errorf("the grafted token endpoint answered %v — the vocabulary did not follow the route", body)
+		t.Errorf("the composed token endpoint answered %v — the vocabulary did not follow the route", body)
 	}
 }
 

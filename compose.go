@@ -43,7 +43,7 @@ import (
 // # Why this replaces four verbs
 //
 // Listen served here, Mount delegated there, Add composed a registrar and
-// Graft composed an App in process. Graft existed for exactly one reason: the
+// a fourth composed an App in process. That verb existed for one reason: the
 // op registry was EAGER, so composing two apps meant merging two registries at
 // call time, and the only other way in — [AdaptNetHTTP] — type-erased an *App
 // into a closure and destroyed five projections with it. Once the registry is
