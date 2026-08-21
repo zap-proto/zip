@@ -284,8 +284,8 @@ func (a *App) buildOpenAPI() map[string]any {
 // "everything non-alphanumeric becomes _" rule, collapsed the two onto one id.
 // Hyphenated addresses are permanent (…/git-upload-pack, …/documents/delete-batch),
 // so '-' and '.' — both legal in an operationId — are PRESERVED rather than
-// folded, which keeps such a pair distinct: get_v1_pricing-policy is not
-// get_v1_pricing_policy.
+// folded, which keeps such a pair distinct: get_pricing-policy is not
+// get_pricing_policy.
 //
 // A parameter contributes "by_<name>", so /v1/a/{b} and /v1/a/b do not collapse
 // either. Every spelling of one parameter reaches the same name: the router's
@@ -297,13 +297,31 @@ func (a *App) buildOpenAPI() map[string]any {
 // '/' (/v1/a/b_c against /v1/a/b/c). The walk VERIFIES uniqueness across the
 // whole program and refuses to publish a duplicate — that check, not this
 // encoding, is what makes the ids trustworthy.
+//
+// THE LEADING v1 IS DROPPED, because it distinguishes nothing. A segment earns
+// its place in an id by telling two operations apart, and this one is on every
+// address in the program: it is a constant, and a constant repeated 2,000 times
+// is noise carried by four surfaces at once — the document, the tool name an
+// agent reads on every turn, the by-name key and the CLI's spelling.
+//
+// Only v1 goes. A later version is the EXCEPTION and keeps its segment, which
+// is both how it stays honest and how it stays unique: get_agents is /v1/agents
+// and get_v2_agents is /v2/agents, so the two cannot collapse onto one name the
+// walk would then refuse. The default is implicit; a departure from it is not.
 func ID(method, path string) string {
 	var b strings.Builder
 	b.WriteString(strings.ToLower(method))
 	stars := 0
+	first := true
 	for _, seg := range strings.Split(path, "/") {
 		if seg == "" {
 			continue
+		}
+		if first {
+			first = false
+			if seg == defaultVersion {
+				continue // says nothing: every address carries it
+			}
 		}
 		b.WriteByte('_')
 		switch {
@@ -323,6 +341,11 @@ func ID(method, path string) string {
 	}
 	return b.String()
 }
+
+// defaultVersion is the version every address is expected to carry, and so the
+// one [ID] leaves out of a name. It is a value here rather than a rule spread
+// across callers: one place decides what "unversioned by default" means.
+const defaultVersion = "v1"
 
 // sanitize reduces a path segment to [a-z0-9.-], the characters that are legal
 // in an operationId and cannot be confused with the '_' path separator.

@@ -127,6 +127,13 @@ type Plugin struct {
 	// requests already in flight on it finish. Zero means 5s.
 	Drain time.Duration
 
+	// IdleAfter stops a LAZY plugin that has not served for this long, to be
+	// started again by the next request that needs it. Zero means never, which
+	// is the historical behaviour. See idle.go: without it a host pays for
+	// every plugin it has ever served, so resident memory tracks the size of
+	// the catalog rather than the traffic.
+	IdleAfter time.Duration
+
 	// Lazy defers starting the child until the first request actually reaches
 	// one of its prefixes. Routes register at Load either way, so the surface
 	// is identical — only the process is deferred.
@@ -201,12 +208,23 @@ type plugin struct {
 	prefixes []string // every subtree this plugin answers
 	spec     Plugin
 
-	app      *App // for logging and supervision when started on demand
+	app *App // for logging and supervision when started on demand
+	// owner is the ROOT app of the composition this plugin ended up in, stamped
+	// when a generation is built. app is the definition that Load'ed it, which for
+	// a composed service is a sub-app holding one plugin and no ceiling — so it is
+	// the wrong thing to ask "how many are running" or "what is the budget".
+	owner    atomic.Pointer[App]
 	cur      atomic.Pointer[instance]
 	mu       sync.Mutex
 	reloads  atomic.Int64
 	restarts atomic.Int64
-	closed   bool // Shutdown ran; the supervisor must stop resurrecting it
+
+	// lastUse is the unix-nano of the most recent target() resolve, and
+	// evictions counts idle stops. Together they are what Evict reads: a
+	// plugin nothing has asked for is one nothing needs running.
+	lastUse   atomic.Int64
+	evictions atomic.Int64
+	closed    bool // Shutdown ran; the supervisor must stop resurrecting it
 
 	// disabled means Unload took it down deliberately. Without this a LAZY
 	// plugin — the affordable default for a host composing many services — is
@@ -257,6 +275,11 @@ type instance struct {
 // keeps the steady-state cost to one load once it is running.
 func (p *plugin) target() (Client, string) {
 	if in := p.cur.Load(); in != nil {
+		// One store on the hot path, and only when idle eviction is armed:
+		// a plugin that can never be evicted has no reason to be timed.
+		if p.spec.IdleAfter > 0 {
+			p.lastUse.Store(time.Now().UnixNano())
+		}
 		return in.client, in.sock
 	}
 	if p.app == nil || !p.spec.Lazy || p.disabled.Load() {
@@ -310,6 +333,10 @@ func (p *plugin) startOnDemand() (Client, string) {
 	if p.closed || p.disabled.Load() {
 		return nil, ""
 	}
+	// The ceiling is applied HERE, before another process exists, so warm bounds
+	// what this host holds rather than what a sweep restores a minute later.
+	p.host().makeRoom(p)
+
 	in, err := start(p.spec)
 	if err != nil {
 		p.app.logger.Error("zip lazy plugin failed to start", "name", p.name, "err", err)
@@ -339,6 +366,7 @@ func (p *plugin) startOnDemand() (Client, string) {
 		}
 		return nil, ""
 	}
+	p.lastUse.Store(time.Now().UnixNano()) // or the next sweep evicts what just started
 	p.app.logger.Info("zip lazy plugin started on first request",
 		"name", p.name, "pid", in.cmd.Process.Pid, "addr", in.sock)
 	go p.app.supervise(p, in)

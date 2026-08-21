@@ -140,7 +140,7 @@ func TestSchema_SelfReferentialInputTerminates(t *testing.T) {
 func TestSchema_MCPToolSchemaIsSelfContained(t *testing.T) {
 	var tree map[string]any
 	for _, tool := range schemaApp(t).MCPTools() {
-		if tool["name"] == "post_v1_s_tree" {
+		if tool["name"] == "post_s_tree" {
 			tree, _ = tool["inputSchema"].(map[string]any)
 		}
 	}
