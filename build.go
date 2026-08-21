@@ -241,6 +241,7 @@ func (a *App) installRoute(f *fiber.App, prefix string, mw []Handler, r route) {
 // vocabulary reaches the entry once instead of at each of those.
 func (a *App) addRoute(site callsite, r route) {
 	r.oauth = a.oauth
+	r.undeclared = a.undeclared
 	a.appendEntry(entry{n: r, site: site})
 }
 

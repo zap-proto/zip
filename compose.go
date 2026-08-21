@@ -133,6 +133,11 @@ type route struct {
 	// error_description} and not problem documents. It rides the ENTRY rather
 	// than a table of addresses because composition moves paths — see [OAuth].
 	oauth bool
+
+	// undeclared is this address serving without appearing in
+	// [App.Declaration] — and so in no projection built from it. See
+	// [App.Undeclared].
+	undeclared bool
 }
 
 // entry is one element of an App's program: a payload, and where it was
@@ -347,6 +352,7 @@ func (a *App) group(site callsite, prefix string, handlers ...Handler) *App {
 	// is still inside the RFC 6749 family, and a nested scope that answered its
 	// parent's neighbours' shape would be the same silently-lost property.
 	g.oauth = a.oauth
+	g.undeclared = a.undeclared
 	for _, h := range handlers {
 		if h == nil {
 			continue
