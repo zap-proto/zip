@@ -179,6 +179,13 @@ func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
 	if h := a.telemetryHandler(); h != nil {
 		f.Use(h)
 	}
+	// Beside the report and for the same reason: an app says where its own
+	// description lives by being BUILT, so there is no call to forget. It runs
+	// after the report so the report still observes every request, and before
+	// every route so it covers the answers no route matched. See [App.linkHandler].
+	if h := a.linkHandler(); h != nil {
+		f.Use(h)
+	}
 	for _, o := range occ {
 		switch o.kind() {
 		case kindMiddleware:
