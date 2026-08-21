@@ -158,7 +158,7 @@ func containsStr(hay, needle string) bool {
 func TestUndeclaredServesAndIsNotDeclared(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "u", DisableStartupMessage: true})
 	a.Get("/v1/kept", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"a": "b"}) })
-	a.Undeclared().All("/v1/retired", func(c *zip.Ctx) error {
+	zip.Undeclared(a).All("/v1/retired", func(c *zip.Ctx) error {
 		return c.JSON(410, map[string]string{"successor": "/v1/kept"})
 	})
 	if err := a.Build(); err != nil {
