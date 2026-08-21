@@ -306,8 +306,10 @@ func (a *App) project(mode Projection, dest string) error {
 // The fact rides the route ENTRY (see [App.addRoute]), so it survives
 // composition — a service composed under a host stays undeclared at its new
 // path.
-func (a *App) Undeclared() Router {
-	g := a.group(here(1), "")
+func Undeclared(on OpTarget) Router {
+	s := on.OpScope()
+	g := s.App.group(here(1), s.Prefix)
+	g.wrap = s.Middleware
 	g.undeclared = true
 	return g
 }
