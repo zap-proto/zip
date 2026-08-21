@@ -235,9 +235,9 @@ func defaultFailureClassifier(err error, status int) bool {
 // Breaker returns the zip middleware form of b. The middleware:
 //
 //  1. Calls b.Allow() before delegating to the next handler.
-//  2. If Allow returns false, short-circuits with 503 and a brief
-//     {"error":"upstream unavailable"} body. NO retry. NO queue. Fail
-//     fast — let the client back off.
+//  2. If Allow returns false, short-circuits by RETURNING a 503 naming the
+//     upstream, which the app renders in the vocabulary the address answers
+//     in. NO retry. NO queue. Fail fast — let the client back off.
 //  3. Otherwise runs c.Continue() and reports the outcome.
 //
 // The breaker is single-purpose: it sheds load when the protected

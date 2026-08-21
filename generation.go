@@ -293,7 +293,7 @@ func (a *App) liveOrBuild() *generation {
 	at := version.Load() // BEFORE the build: an append during it must invalidate
 	g, err := a.build()
 	if g == nil {
-		g = &generation{router: fiber.New(a.fiberConfig())}
+		g = &generation{router: fiber.New(a.fiberConfig(nil))}
 	}
 	// The error is REMEMBERED, not swallowed. An invalid program used to render
 	// as an empty one — Registry() 0 ops, Declaration() 0 routes, and

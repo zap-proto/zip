@@ -82,8 +82,11 @@ func TestRuntimeRoute(t *testing.T) {
 		if resp.StatusCode != 404 {
 			t.Fatalf("status = %d, want 404", resp.StatusCode)
 		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+			t.Fatalf("Content-Type = %q, want the RFC 9457 media type", ct)
+		}
 		body, _ := io.ReadAll(resp.Body)
-		assertContainsAll(t, string(body), `"error":"unknown language"`)
+		assertContainsAll(t, string(body), `"detail":"unknown language"`, `"status":404`)
 	})
 
 	// The op is in the document because it IS an op — the assertion that says

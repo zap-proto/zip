@@ -170,7 +170,7 @@ func composeOps(occ []occurrence) []*registeredOp {
 //     costs the definition's middleware its coverage of unmatched paths — a
 //     definition does not answer for addresses it does not declare.
 func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
-	f := fiber.New(a.fiberConfig())
+	f := fiber.New(a.fiberConfig(composeOAuth(occ)))
 	// The report goes on FIRST, so it is outermost: it observes every request
 	// this router answers, including the ones that match no route and the ones a
 	// later middleware refuses. An app gets it by being built, which is the whole
@@ -237,8 +237,10 @@ func (a *App) installRoute(f *fiber.App, prefix string, mw []Handler, r route) {
 
 // addRoute is the ONE place a route entry is appended, so every route method,
 // every typed registration and zip's own control plane record the same thing in
-// the same shape with a real call site.
+// the same shape with a real call site — and so the definition's error
+// vocabulary reaches the entry once instead of at each of those.
 func (a *App) addRoute(site callsite, r route) {
+	r.oauth = a.oauth
 	a.appendEntry(entry{n: r, site: site})
 }
 
@@ -299,8 +301,10 @@ func (a *App) Lint() []string {
 }
 
 // fiberConfig is the App's Config as fiber wants it. One place, so New and
-// every rematerialisation agree.
-func (a *App) fiberConfig() fiber.Config {
+// every rematerialisation agree. oauth is the address set the error handler
+// answers RFC 6749 at, which is a property of the routes this generation holds
+// and so arrives with them.
+func (a *App) fiberConfig(oauth map[string]bool) fiber.Config {
 	fcfg := fiber.Config{
 		AppName:         a.cfg.AppName,
 		BodyLimit:       a.cfg.BodyLimit,
@@ -323,7 +327,7 @@ func (a *App) fiberConfig() fiber.Config {
 	if a.cfg.ErrorHandler != nil {
 		fcfg.ErrorHandler = a.cfg.ErrorHandler
 	} else {
-		fcfg.ErrorHandler = errorHandler
+		fcfg.ErrorHandler = refusing(oauth)
 	}
 	return fcfg
 }

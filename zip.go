@@ -229,6 +229,11 @@ type App struct {
 	// nothing for it.
 	wrap Middleware
 
+	// oauth: every route registered on this definition answers RFC 6749 §5.2.
+	// Set by [OAuth] on the group it hands back, so the vocabulary is a property
+	// of where a route was declared and not of what its handler returns.
+	oauth bool
+
 	servers []Server // the running transport listeners, set by Listen
 
 	// unbind withdraws this app from the by-address table [Serving] reads, one

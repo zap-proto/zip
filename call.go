@@ -312,10 +312,6 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 	return &out, nil
 }
 
-// remoteError reconstructs the callee's error. The wire form is the one
-// zip.errorHandler writes for every route — {status, code, error} — so an
-// HTTPError survives the crossing whole rather than being flattened into a
-// string the caller has to parse.
 // remoteError rebuilds the refusal the callee chose, so errors.As on this side
 // sees the *HTTPError the other side returned with its status intact. The body
 // is ZAP like everything else on this plane; a body that does not decode leaves
