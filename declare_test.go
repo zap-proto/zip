@@ -3,6 +3,7 @@ package zip_test
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,4 +149,48 @@ func containsStr(hay, needle string) bool {
 		}
 		return false
 	})()
+}
+
+// AN UNDECLARED ROUTE SERVES AND IS NOT IN THE CONTRACT — both halves, because
+// either alone is a different bug: absent from the document but also absent
+// from the router is a dead address, and present in both is what Undeclared
+// exists to avoid.
+func TestUndeclaredServesAndIsNotDeclared(t *testing.T) {
+	a := zip.New(zip.Config{AppName: "u", DisableStartupMessage: true})
+	a.Get("/v1/kept", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"a": "b"}) })
+	a.Undeclared().All("/v1/retired", func(c *zip.Ctx) error {
+		return c.JSON(410, map[string]string{"successor": "/v1/kept"})
+	})
+	if err := a.Build(); err != nil {
+		t.Fatal(err)
+	}
+
+	// It serves — every method, which is the point of registering it with All.
+	for _, m := range []string{"GET", "POST", "DELETE"} {
+		res, err := a.Fiber().Test(httptest.NewRequest(m, "/v1/retired", nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != 410 {
+			t.Errorf("%s /v1/retired = %d, want 410 — an undeclared route still serves", m, res.StatusCode)
+		}
+	}
+
+	// And it is in no declaration, while the ordinary route beside it is.
+	var kept, retired bool
+	for _, r := range a.Declaration().Routes {
+		switch r.Pattern {
+		case "/v1/kept":
+			kept = true
+		case "/v1/retired":
+			retired = true
+		}
+	}
+	if !kept {
+		t.Error("the ordinary route is missing from the declaration — the test proves nothing")
+	}
+	if retired {
+		t.Error("an undeclared route reached the declaration, and so every projection built from it")
+	}
 }

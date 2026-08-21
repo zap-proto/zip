@@ -107,6 +107,9 @@ func (a *App) Declaration() Declaration {
 		if !ok || r.method == "" {
 			continue
 		}
+		if r.undeclared {
+			continue
+		}
 		for _, m := range declaredMethods(r.method) {
 			k := m + " " + o.abs(r.path)
 			if seen[k] {
@@ -280,4 +283,31 @@ func (a *App) project(mode Projection, dest string) error {
 		return fmt.Errorf("zip: %s: %w", mode, err)
 	}
 	return nil
+}
+
+// Undeclared returns a Router whose routes SERVE but do not appear in
+// [App.Declaration] — and so in none of the projections built from it: the
+// OpenAPI document, the MCP tool list, the CLI commands, the by-name call
+// plane.
+//
+// It is for an address that answers without being part of the contract. A
+// retirement is the case it was built for: an address that is GONE answers 410
+// and names its successor, for every method, because 410 is a statement about
+// the target resource and a caller who sent the wrong verb still needs the
+// successor. Published, that is one operation per method per address, most of
+// them calls that never existed — a contract listing dead endpoints, which is
+// a contract nobody can read.
+//
+// It is deliberately narrow. An address that DOES something and hides is a
+// door nobody can find and nobody reviews, which is why this returns a Router
+// rather than taking a path: the routes that use it are grouped, visible in
+// one place, and read together.
+//
+// The fact rides the route ENTRY (see [App.addRoute]), so it survives
+// composition — a service composed under a host stays undeclared at its new
+// path.
+func (a *App) Undeclared() Router {
+	g := a.group(here(1), "")
+	g.undeclared = true
+	return g
 }

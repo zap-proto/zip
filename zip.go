@@ -234,6 +234,10 @@ type App struct {
 	// of where a route was declared and not of what its handler returns.
 	oauth bool
 
+	// undeclared: every route registered on this definition serves but is left
+	// out of [App.Declaration]. See [App.Undeclared].
+	undeclared bool
+
 	servers []Server // the running transport listeners, set by Listen
 
 	// unbind withdraws this app from the by-address table [Serving] reads, one
