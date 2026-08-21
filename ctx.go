@@ -8,6 +8,7 @@ import (
 
 	luxlog "github.com/luxfi/log"
 	"github.com/zap-proto/fiber/v3"
+	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
 // Ctx wraps fiber.Ctx and adds the Hanzo identity surface (Org/User/Email
@@ -202,6 +203,67 @@ type HTTPError struct {
 	Status int    `json:"status"`
 	Code   string `json:"code,omitempty"`
 	Msg    string `json:"error"`
+
+	// Detail is what a refusal carries BESIDES its message, and it exists
+	// because a typed op's only way to refuse is to RETURN an error — so
+	// without it, a route whose non-2xx answer has a shape cannot be a typed op
+	// at all.
+	//
+	// That is not hypothetical. Six subsystems route around its absence: a
+	// prepaid gate answers 402 naming the cap and the balance, a plugin build
+	// answers 422 carrying the diagnostics that say why it failed, a degraded
+	// probe answers 503 carrying its report. Each was left untyped for this one
+	// reason — losing its schema, its prose, its MCP tool and its CLI command —
+	// and three separate envelopes were hand-rolled to carry a body beside an
+	// error that could not.
+	//
+	// It is an EXTENSION in the RFC 9457 sense: the members a problem document
+	// may carry beyond its own. Rendered by MERGING rather than nesting, so a
+	// reader sees one object instead of a body filed under a key it has to know
+	// to look in — and the envelope is written last, so a domain key called
+	// status cannot displace the refusal's own.
+	Detail map[string]any `json:"-"`
+}
+
+// With attaches extension members to a refusal and returns it, so an op refuses
+// in one expression:
+//
+//	return zip.ErrPaymentRequired("spend cap exceeded").
+//		With(map[string]any{"cap": 5000, "spent": 5127})
+//
+// It MERGES rather than replaces: a gate naming the cap and a meter naming the
+// ledger are two facts about one refusal.
+func (e *HTTPError) With(detail map[string]any) *HTTPError {
+	if len(detail) == 0 {
+		return e
+	}
+	if e.Detail == nil {
+		e.Detail = make(map[string]any, len(detail))
+	}
+	for k, v := range detail {
+		e.Detail[k] = v
+	}
+	return e
+}
+
+// MarshalJSON merges the extension members under the envelope. A refusal
+// carrying no detail marshals byte-identically to what it always did, which is
+// what makes this additive for every repository already rendering this type.
+func (e *HTTPError) MarshalJSON() ([]byte, error) {
+	if len(e.Detail) == 0 {
+		type plain HTTPError // no method set, so no recursion
+		return jsonenc.Marshal((*plain)(e))
+	}
+	out := make(map[string]any, len(e.Detail)+3)
+	for k, v := range e.Detail {
+		out[k] = v
+	}
+	out["status"] = e.Status
+	if e.Code != "" {
+		out["code"] = e.Code
+	}
+	out["error"] = e.Msg
+	return jsonenc.Marshal(out)
 }
 
 func (e *HTTPError) Error() string { return e.Msg }
@@ -217,7 +279,17 @@ func ErrUnauthorized(msg string) *HTTPError { return &HTTPError{Status: 401, Msg
 func ErrForbidden(msg string) *HTTPError    { return &HTTPError{Status: 403, Msg: msg} }
 func ErrNotFound(msg string) *HTTPError     { return &HTTPError{Status: 404, Msg: msg} }
 func ErrConflict(msg string) *HTTPError     { return &HTTPError{Status: 409, Msg: msg} }
-func ErrInternal(msg string) *HTTPError     { return &HTTPError{Status: 500, Msg: msg} }
+
+// ErrPaymentRequired is the prepaid gate's refusal, and it is a shortcut here
+// because the surfaces that refuse this way are exactly the ones that must say
+// WHY — a cap, a balance, a ledger — which is what [HTTPError.With] carries.
+func ErrPaymentRequired(msg string) *HTTPError { return &HTTPError{Status: 402, Msg: msg} }
+
+// ErrUnprocessable is the refusal for a request that parsed and cannot be acted
+// on — source that will not build, a document failing its own schema. Its
+// diagnostics belong ON the refusal rather than beside it.
+func ErrUnprocessable(msg string) *HTTPError { return &HTTPError{Status: 422, Msg: msg} }
+func ErrInternal(msg string) *HTTPError      { return &HTTPError{Status: 500, Msg: msg} }
 
 // errorHandler is the default fiber.ErrorHandler — converts HTTPError
 // into a JSON response and falls back to 500 for anything else.
