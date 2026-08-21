@@ -200,7 +200,27 @@ func TestSetLogReachesDownstream(t *testing.T) {
 // Each iteration calls ResetUserValues, which is exactly what both transports
 // do before dispatching (zap-proto/http's serveConn; fasthttp's keep-alive
 // loop via Request.Reset), so one iteration is one real request.
+//
+// SO THE MEASURE IS THE DELTA, NOT THE TOTAL. This asserted `total <= 1` and was
+// therefore red on every commit for as long as anyone can remember, reporting 34
+// at every depth — which is the invariant PASSING and the bound failing. A total
+// counts everything a request pays, and the wrapper does not own most of it: with
+// the logger replaced by luxlog.NewNoOpLogger the figure is 32, so the access log
+// is 2, and an alloc profile of the remaining 32 attributes them to TELEMETRY —
+// zip.describe with its strings.Builder (~47% of objects, cumulative), the metric
+// library's labelsKeyFromLabels (~27%), plus the hex trace/span ids, net.IP.String
+// and a strconv.FormatInt. Per-request metrics and spans are a feature, so no
+// arrangement of the wrapper reaches one, and a bound nothing can satisfy gates
+// nothing: it trains a reader to skip a red line.
+//
+// The delta is the claim above, it is exactly measurable, and it holds: five
+// middlewares cost the same as none. The total is held separately as a RATCHET so
+// the constant cannot grow unnoticed — lower it when describe or the label key
+// gets cheaper, and raise it only with a reason written down.
 func TestServePathAllocsAreChainDepthInvariant(t *testing.T) {
+	// Indexed by middleware depth, so the assertions below compare depths rather
+	// than each depth against a literal.
+	allocs := map[int]float64{}
 	for _, mw := range []int{0, 1, 5} {
 		app := zip.New(zip.Config{DisableStartupMessage: true, ServerHeader: "-"})
 		for i := 0; i < mw; i++ {
@@ -220,10 +240,29 @@ func TestServePathAllocsAreChainDepthInvariant(t *testing.T) {
 		if fctx.Response.StatusCode() != 204 {
 			t.Fatalf("mw=%d: status %d", mw, fctx.Response.StatusCode())
 		}
-		if got > 1 {
-			t.Errorf("mw=%d: %.0f allocs/request, want <= 1 (the *Ctx); "+
-				"the wrapper must not allocate per handler", mw, got)
+		allocs[mw] = got
+		t.Logf("mw=%d: %.0f allocs/request", mw, got)
+	}
+
+	// THE CLAIM: the wrapper allocates per REQUEST, not per HANDLER. Before
+	// one-Ctx-per-request a five-middleware stack paid six, so a regression here
+	// shows up as a depth-proportional climb.
+	for _, mw := range []int{1, 5} {
+		if grew := allocs[mw] - allocs[0]; grew > 0.5 {
+			t.Errorf("mw=%d costs %.0f allocs against %.0f at mw=0 — the wrapper is "+
+				"allocating per handler again (%.0f more for %d handlers)",
+				mw, allocs[mw], allocs[0], grew, mw)
 		}
+	}
+
+	// THE RATCHET: sync.Pool's pinSlow shows up in the profile, so the figure can
+	// wobble with GOMAXPROCS; the margin is for that and not for drift.
+	const ceiling = 36
+	if allocs[0] > ceiling {
+		t.Errorf("a bare request costs %.0f allocs, over the %d ceiling — profile it "+
+			"(go test -bench . -memprofile) before raising this: the constant is "+
+			"telemetry, chiefly zip.describe and the metric label key",
+			allocs[0], ceiling)
 	}
 }
 

@@ -1,11 +1,16 @@
 package zip
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/http"
@@ -221,6 +226,14 @@ func (a *App) listenOn(addrs []string) error {
 			t.applyConfig(a.cfg)
 		}
 		servers = append(servers, s)
+		// The plain-HTTP listener that lets an upgrade reach this app. [plain]
+		// derives its address and the host dials it; this is the half that
+		// answers. Appended to servers so it shuts down with the rest, and NOT
+		// bound: it is the same app at a derived address, not a second place to
+		// find it.
+		if p := a.plainSibling(addr, h); p != nil {
+			servers = append(servers, p)
+		}
 		// This app now answers at this address, and a caller in THIS process can
 		// reach its ops without the address (see [Serving] and [Here]). Recorded
 		// here rather than at Serve because binding is what makes it true.
@@ -289,6 +302,9 @@ func (a *App) mount(prefix, addr string) error {
 func (a *App) mountVia(prefix string, to func() (Client, string)) {
 	h := func(c *Ctx) error {
 		client, host := to()
+		if upgrading(c.fc.Request()) {
+			return relay(c.fc.RequestCtx(), host, "mount "+prefix)
+		}
 		return forward(c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
 	}
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
@@ -335,6 +351,153 @@ func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host
 		return Errorf(502, "%s: %v", what, err)
 	}
 	return nil
+}
+
+// upgradeWait bounds reaching a plugin for an upgrade. It is a dial on a socket
+// in this pod, so a second is already generous; what it exists to stop is a
+// caller hanging on a plugin that is not listening yet.
+const upgradeWait = time.Second
+
+// plain is where a mounted plugin speaks ordinary HTTP, derived from the address
+// it speaks ZAP on.
+//
+// A plugin's socket carries ZAP frames: one length-prefixed request, one
+// length-prefixed reply. That shape has no room for a connection that STOPS being
+// request-and-reply, which is exactly what an upgrade is — so a websocket cannot
+// cross it, and the frames a client sends after the handshake arrive at an HTTP
+// parser as nonsense ("error when reading request headers", the first byte being
+// 0x81). The plugin therefore listens a second time, in plain HTTP, beside the
+// first. This DERIVES that address instead of configuring it, so a mount is still
+// one address and there is no second value to keep in step with the first.
+//
+// Only over a unix socket, because that is the one place the sibling is known to
+// be the same process. A tcp mount would need a port nobody has agreed on.
+func plain(addr string) string {
+	if networkOf(addr) != "unix" {
+		return ""
+	}
+	return addr + ".http"
+}
+
+// plainSibling is the listener that answers at [plain] — the second, ordinary
+// HTTP listener a mounted app needs because an upgrade cannot cross ZAP framing.
+// Without it the host dials a socket nobody created and every websocket through
+// a mount fails the handshake.
+//
+// nil when the address has no sibling. A tcp address has none (no port both ends
+// have agreed on), and neither does an app that is ITSELF a sibling — ops and
+// peer are reached by name from inside the fleet, never mounted, so a second
+// socket beside them would be one nothing dials.
+func (a *App) plainSibling(addr string, h fasthttp.RequestHandler) Server {
+	if a.sibling {
+		return nil
+	}
+	to := plain(addr)
+	if to == "" {
+		return nil
+	}
+	// Resolved through the registry rather than constructed here, so the sibling
+	// is the same HTTP transport a caller gets from an http:// address and there
+	// is one implementation of "serve plain HTTP" to keep correct.
+	_, at, t, err := transportFor("http://" + to)
+	if err != nil || t.Serve == nil {
+		a.logger.Error("zip: no http transport for the upgrade sibling", "addr", to, "err", err)
+		return nil
+	}
+	s := t.Serve(at, h)
+	if t, ok := s.(tunableServer); ok {
+		t.applyConfig(a.cfg)
+	}
+	a.logger.Info("zip listening", "transport", "http", "addr", at, "for", "upgrade")
+	return s
+}
+
+// upgrading reports whether a request is asking to stop being HTTP.
+func upgrading(req *fasthttp.Request) bool {
+	return len(req.Header.Peek(fasthttp.HeaderUpgrade)) > 0 &&
+		bytes.Contains(bytes.ToLower(req.Header.Peek(fasthttp.HeaderConnection)),
+			[]byte("upgrade"))
+}
+
+// relay carries an upgraded connection between a caller and a mounted plugin.
+//
+// Everything up to the switch is ordinary — the request goes up as it arrived,
+// and a plugin that declines (an unauthorized socket is refused BEFORE it opens)
+// answers an ordinary reply that comes straight back. What is different is what
+// happens after 101: neither end is speaking HTTP any more, so there is nothing
+// left to parse and the only correct act is to move bytes until one side stops.
+//
+// The switch reply is written verbatim, from the bytes the plugin sent, rather
+// than through the response object — fasthttp would frame a body onto a message
+// that has none. Bytes the plugin has already sent past the header are held in
+// the reader, so the copy starts there and not at the socket.
+func relay(rc *fasthttp.RequestCtx, addr, what string) error {
+	to := plain(addr)
+	if to == "" {
+		return Errorf(502, "%s: no upgrade path over %s", what, networkOf(addr))
+	}
+	up, err := net.DialTimeout(networkOf(to), to, upgradeWait)
+	if err != nil {
+		return Errorf(502, "%s: upgrade: %v", what, err)
+	}
+	bw := bufio.NewWriter(up)
+	if err := rc.Request.Write(bw); err == nil {
+		err = bw.Flush()
+	}
+	if err != nil {
+		_ = up.Close()
+		return Errorf(502, "%s: upgrade: %v", what, err)
+	}
+
+	br := bufio.NewReader(up)
+	var head fasthttp.ResponseHeader
+	if err := head.Read(br); err != nil {
+		_ = up.Close()
+		return Errorf(502, "%s: upgrade: %v", what, err)
+	}
+	if head.StatusCode() != fasthttp.StatusSwitchingProtocols {
+		defer func() { _ = up.Close() }()
+		head.CopyTo(&rc.Response.Header)
+		body, err := body(br, head.ContentLength())
+		if err != nil {
+			return Errorf(502, "%s: upgrade: %v", what, err)
+		}
+		rc.Response.SetBody(body)
+		return nil
+	}
+
+	switched := head.Header()
+	rc.HijackSetNoResponse(true)
+	rc.Hijack(func(down net.Conn) {
+		defer func() { _ = up.Close() }()
+		defer func() { _ = down.Close() }()
+		if _, err := down.Write(switched); err != nil {
+			return
+		}
+		go func() {
+			_, _ = io.Copy(up, down)
+			// The caller is gone. Close write so the plugin's read sees EOF and
+			// ends its session rather than holding a shell nobody is watching.
+			if c, ok := up.(interface{ CloseWrite() error }); ok {
+				_ = c.CloseWrite()
+			}
+		}()
+		_, _ = io.Copy(down, br)
+	})
+	return nil
+}
+
+// body reads a reply's body given the length its header declared. A negative
+// length is "until the connection ends", which is what identity encoding means.
+func body(br *bufio.Reader, n int) ([]byte, error) {
+	if n < 0 {
+		return io.ReadAll(br)
+	}
+	b := make([]byte, n)
+	if _, err := io.ReadFull(br, b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // makeSocketDir creates the directory a unix socket will be bound in, so
@@ -392,8 +555,21 @@ type httpServer struct {
 	srv  *fasthttp.Server
 }
 
-func (h *httpServer) ListenAndServe() error { return h.srv.ListenAndServe(h.addr) }
-func (h *httpServer) Close() error          { return h.srv.Shutdown() }
+// ListenAndServe binds the address, over tcp or over a unix socket.
+//
+// A PATH IS A SOCKET on this transport for the same reason it is on the ZAP one:
+// the address names where the bytes are spoken and the shape of the address says
+// which kind of place that is. It earns its keep next to a plugin — an upgraded
+// connection cannot cross ZAP framing, so a plugin listens HTTP beside its socket
+// and the host relays to it — and a path there must not mean "a tcp host called
+// /var/lib/…", which is what binding it as tcp amounts to.
+func (h *httpServer) ListenAndServe() error {
+	if networkOf(h.addr) == "unix" {
+		return h.srv.ListenAndServeUNIX(h.addr, 0o600)
+	}
+	return h.srv.ListenAndServe(h.addr)
+}
+func (h *httpServer) Close() error { return h.srv.Shutdown() }
 
 // tunableServer is a transport whose underlying server accepts the App's
 // per-conn wire tuning. Listen applies it after construction so zip.Config's
@@ -409,6 +585,14 @@ type tunableServer interface{ applyConfig(cfg Config) }
 func (h *httpServer) applyConfig(cfg Config) {
 	if cfg.ReadBufferSize > 0 {
 		h.srv.ReadBufferSize = cfg.ReadBufferSize
+	}
+	// The body ceiling reaches the wire only here. fiber binds its own BodyLimit
+	// when fiber owns the listener, and on this transport it does not, so without
+	// this the socket keeps fasthttp's 4 MiB default. fasthttp refuses an
+	// oversized body before any handler runs, answering 400 "Error when parsing
+	// request".
+	if cfg.BodyLimit > 0 {
+		h.srv.MaxRequestBodySize = cfg.BodyLimit
 	}
 	if cfg.WriteBufferSize > 0 {
 		h.srv.WriteBufferSize = cfg.WriteBufferSize

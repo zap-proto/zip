@@ -95,6 +95,17 @@ func (a *App) build() (*generation, error) {
 	g.serve = g.router.Handler()
 	g.ops = composeOps(occ)
 	g.hosts = computeHosts(a, occ)
+	// Adopt: every plugin in this composition learns which app is the ROOT of it.
+	// This is the only place that knows, and a plugin needs it to ask the two
+	// questions its own definition cannot answer — how many processes are running
+	// across the whole host, and what the host's ceiling is.
+	for _, h := range g.hosts {
+		h.plugMu.Lock()
+		for _, pl := range h.plugins {
+			pl.owner.Store(a)
+		}
+		h.plugMu.Unlock()
+	}
 	g.routes = len(g.router.GetRoutes(false))
 	return g, nil
 }

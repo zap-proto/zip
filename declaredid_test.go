@@ -104,7 +104,7 @@ func TestUndeclaredOperationIDComesFromTheAbsolutePath(t *testing.T) {
 	for _, op := range host.Registry() {
 		got[op.OperationID] = true
 	}
-	for _, want := range []string{"get_v1_invoices_by_id", "get_admin_invoices_by_id"} {
+	for _, want := range []string{"get_invoices_by_id", "get_admin_invoices_by_id"} {
 		if !got[want] {
 			t.Errorf("id %q missing from %v — an UNDECLARED id must be derived from the "+
 				"absolute path its occurrence answers at", want, got)

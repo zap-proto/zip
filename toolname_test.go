@@ -32,7 +32,7 @@ func TestToolNames_RideTheOperationIDRule(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("two occurrences produced %d tool names, want 2: %v", len(got), got)
 	}
-	for _, want := range []string{"get_v1_invoices_by_id", "get_admin_invoices_by_id"} {
+	for _, want := range []string{"get_invoices_by_id", "get_admin_invoices_by_id"} {
 		if !names[want] {
 			t.Errorf("tool name %q missing — own-op tool names must be the occurrence's operation id: %v", want, got)
 		}

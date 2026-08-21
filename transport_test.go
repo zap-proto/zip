@@ -130,6 +130,56 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 	}
 }
 
+// TestHTTPTransport_BodyLimitReachesTheSocket asserts zip.Config.BodyLimit binds
+// the socket in both directions: raised, a body past fasthttp's 4 MiB default is
+// served; lowered, a body past the App's own ceiling is refused. It drives a real
+// listener, because fiber's config and this transport's server are separate
+// objects and only the second one answers the wire.
+func TestHTTPTransport_BodyLimitReachesTheSocket(t *testing.T) {
+	post := func(n int) string {
+		return fmt.Sprintf("POST /v1/echo HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\n"+
+			"Content-Length: %d\r\nConnection: close\r\n\r\n%s", n, strings.Repeat("a", n))
+	}
+	serve := func(name string, limit int) string {
+		app := zip.New(zip.Config{AppName: name, DisableStartupMessage: true, BodyLimit: limit})
+		app.Post("/v1/echo", func(c *zip.Ctx) error { return c.JSON(200, map[string]int{"n": len(c.Body())}) })
+		addr := freeAddr(t)
+		go func() { _ = app.Listen("http://" + addr) }()
+		t.Cleanup(func() { _ = app.Shutdown() })
+		waitDialable(t, addr)
+		return addr
+	}
+
+	// Raised: 5 MiB is past fasthttp's 4 MiB default and inside an 8 MiB App.
+	if !answered200(t, serve("raised", 8<<20), post(5<<20)) {
+		t.Errorf("BodyLimit 8 MiB: 5 MiB body was refused, want 200")
+	}
+
+	// Lowered: 2 MiB is past a 1 MiB App and inside fasthttp's default, so a 200
+	// here means the socket is on the default rather than on Config.
+	if answered200(t, serve("lowered", 1<<20), post(2<<20)) {
+		t.Errorf("BodyLimit 1 MiB: 2 MiB body was served, want a refusal")
+	}
+}
+
+// answered200 reports whether the handler answered 200. A write or read failure is a
+// refusal, not a test failure: fasthttp drops the connection mid-body when the
+// limit is crossed, so the peer never gets a status line to parse.
+func answered200(t *testing.T, addr, rawRequest string) bool {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(c, rawRequest); err != nil {
+		return false
+	}
+	line, err := bufio.NewReader(c).ReadString('\n')
+	return err == nil && strings.HasPrefix(line, "HTTP/1.1 200")
+}
+
 // TestHTTPTransport_ServerHeaderCoversPreRoutingErrors proves fasthttp's OWN
 // pre-routing error responses (431 on header overflow) carry the App's
 // ServerHeader and NEVER the framework default "fasthttp"/"zip". Those bytes are

@@ -8,33 +8,33 @@ import "testing"
 func TestID(t *testing.T) {
 	for _, c := range []struct{ method, path, want string }{
 		// The method is a word, the path is the rest, '_' encodes '/'.
-		{"GET", "/v1/agents/targets", "get_v1_agents_targets"},
-		{"POST", "/v1/agents/targets", "post_v1_agents_targets"},
+		{"GET", "/v1/agents/targets", "get_agents_targets"},
+		{"POST", "/v1/agents/targets", "post_agents_targets"},
 
 		// A parameter is "by_<name>", which is what keeps it apart from a
 		// literal segment of the same name.
-		{"GET", "/v1/a/{b}", "get_v1_a_by_b"},
-		{"GET", "/v1/a/b", "get_v1_a_b"},
+		{"GET", "/v1/a/{b}", "get_a_by_b"},
+		{"GET", "/v1/a/b", "get_a_b"},
 
 		// Every spelling of ONE parameter reaches ONE name. The router's
 		// constraint and optional marker say how a segment is MATCHED, not what
 		// it is called (see Template), so they do not reach the id.
-		{"GET", "/v1/invoices/:id", "get_v1_invoices_by_id"},
-		{"GET", "/v1/invoices/{id}", "get_v1_invoices_by_id"},
-		{"GET", "/v1/invoices/:id?", "get_v1_invoices_by_id"},
-		{"GET", "/v1/invoices/:id<guid>", "get_v1_invoices_by_id"},
+		{"GET", "/v1/invoices/:id", "get_invoices_by_id"},
+		{"GET", "/v1/invoices/{id}", "get_invoices_by_id"},
+		{"GET", "/v1/invoices/:id?", "get_invoices_by_id"},
+		{"GET", "/v1/invoices/:id<guid>", "get_invoices_by_id"},
 
 		// '-' and '.' are legal in an operationId and are PRESERVED, because '_'
 		// is the separator and folding them collapsed these two onto one id once.
-		{"GET", "/v1/pricing-policy", "get_v1_pricing-policy"},
-		{"GET", "/v1/pricing/policy", "get_v1_pricing_policy"},
+		{"GET", "/v1/pricing-policy", "get_pricing-policy"},
+		{"GET", "/v1/pricing/policy", "get_pricing_policy"},
 
 		// Anything else folds to '_', including a literal '_' — which is the
 		// residual aliasing the encoding cannot remove and the walk's uniqueness
 		// check exists to catch.
-		{"GET", "/v1/a/b_c", "get_v1_a_b_c"},
-		{"GET", "/v1/a/b/c", "get_v1_a_b_c"},
-		{"GET", "/v1/Git/Upload-Pack", "get_v1_git_upload-pack"},
+		{"GET", "/v1/a/b_c", "get_a_b_c"},
+		{"GET", "/v1/a/b/c", "get_a_b_c"},
+		{"GET", "/v1/Git/Upload-Pack", "get_git_upload-pack"},
 
 		// A wildcard declares no name, so it takes the positional one the
 		// document gives it, numbered as the document numbers it.
@@ -48,6 +48,36 @@ func TestID(t *testing.T) {
 		if got := ID(c.method, c.path); got != c.want {
 			t.Errorf("ID(%q, %q) = %q, want %q", c.method, c.path, got, c.want)
 		}
+	}
+}
+
+// The default version is not in the name, because it is on every address and so
+// tells no two operations apart. It is dropped ONLY in the leading position and
+// ONLY when it is the default: a segment that merely reads like a version deeper
+// in a path is a real segment, and a later version is the exception that has to
+// stay visible.
+func TestIDDropsTheDefaultVersionOnly(t *testing.T) {
+	for _, c := range []struct{ path, want string }{
+		{"/v1/agents", "get_agents"},    // the default: gone
+		{"/agents", "get_agents"},       // an unversioned address already read this way
+		{"/v2/agents", "get_v2_agents"}, // the exception: kept, and so still unique
+		{"/v10/agents", "get_v10_agents"},
+		{"/api/v1/agents", "get_api_v1_agents"}, // not leading: a real segment
+		{"/v1/v1/agents", "get_v1_agents"},      // only the FIRST one is the version
+		{"/v1", "get"},                          // the version alone names the root
+	} {
+		if got := ID("GET", c.path); got != c.want {
+			t.Errorf("ID(GET, %q) = %q, want %q", c.path, got, c.want)
+		}
+	}
+}
+
+// Dropping the default version must not make two DIFFERENT addresses share one
+// name. A later version keeps its segment precisely so this holds, and the pair
+// below is the one that would otherwise collapse.
+func TestIDKeepsVersionsApart(t *testing.T) {
+	if a, b := ID("GET", "/v1/agents"), ID("GET", "/v2/agents"); a == b {
+		t.Fatalf("/v1/agents and /v2/agents both derive %q — two addresses, one name", a)
 	}
 }
 
