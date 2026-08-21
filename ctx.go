@@ -256,7 +256,7 @@ func (e *HTTPError) With(detail map[string]any) *HTTPError {
 // marshalled on its own has no occurrence to name. Served through an address,
 // the same document gains one — see [HTTPError.problem].
 func (e *HTTPError) MarshalJSON() ([]byte, error) {
-	return jsonenc.Marshal(e.problem(""))
+	return jsonenc.Marshal(e.problem())
 }
 
 func (e *HTTPError) Error() string { return e.Msg }

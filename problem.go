@@ -14,7 +14,7 @@ import (
 //
 // RFC 9457 is the one an HTTP API answers in: a problem document under the
 // registered media type application/problem+json, carrying `type`, `title`,
-// `status`, `detail` and `instance`, plus whatever extension members the
+// `status` and `detail`, plus whatever extension members the
 // refusal adds. A client that has never seen this service can read a 402 from
 // it and know what happened, which is the entire point of a registered type —
 // where `{"error":"..."}` is a shape you have to be told about first.
@@ -40,18 +40,19 @@ const mimeProblem = "application/problem+json"
 
 // problem renders a refusal as an RFC 9457 problem document.
 //
-// instance is the address the refusal happened at. It is a parameter and not a
-// field because a refusal does not know its own occurrence: the same
-// [ErrNotFound] value may be returned from two routes, and a package-level
-// sentinel is returned from all of them. Empty when the value is rendered
-// outside a request, and then the member is absent — a document that names no
-// occurrence is honest, one that names the wrong one is not.
+// The optional `instance` member (RFC 9457 §3.1.4) is not written. It would
+// name the address the refusal happened at — which the caller supplied and
+// already holds, so it tells them nothing. What it does do is make two refusals
+// at two addresses differ in their bodies, and the property worth testing about
+// a refusal is that asking about a real resource and a fabricated one produce
+// the SAME answer. Echoing the request path turns that comparison into one that
+// can only pass by being loosened, so the member is left out.
 //
 // Extension members MERGE at the top level (RFC 9457 §3.2) rather than nesting
 // under a key a reader would have to know to look in. The document's own
 // members are written LAST, so a domain key called `status` cannot displace the
 // refusal's.
-func (e *HTTPError) problem(instance string) map[string]any {
+func (e *HTTPError) problem() map[string]any {
 	out := make(map[string]any, len(e.Detail)+6)
 	for k, v := range e.Detail {
 		out[k] = v
@@ -71,9 +72,6 @@ func (e *HTTPError) problem(instance string) map[string]any {
 	out["detail"] = e.Msg
 	if e.Code != "" {
 		out["code"] = e.Code
-	}
-	if instance != "" {
-		out["instance"] = instance
 	}
 	return out
 }
@@ -127,7 +125,7 @@ func refusing(oauth map[string]bool) fiber.ErrorHandler {
 		if oauth[c.Method()+" "+c.Route().Path] {
 			return c.JSON(e.oauth(), mimeJSON)
 		}
-		return c.JSON(e.problem(c.Path()), mimeProblem)
+		return c.JSON(e.problem(), mimeProblem)
 	}
 }
 
