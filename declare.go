@@ -313,3 +313,19 @@ func Undeclared(on OpTarget) Router {
 	g.undeclared = true
 	return g
 }
+
+// Declares reports whether the app publishes method+path — whether it appears
+// in [App.Declaration], and so in the projections built from it.
+//
+// A host builds its document from the ROUTER, which is a strict superset: it
+// carries zip's own control routes and anything registered through
+// [Undeclared]. This is how it tells those apart from the app's contract
+// without keeping a second list of what to skip.
+func (a *App) Declares(method, path string) bool {
+	for _, r := range a.Declaration().Routes {
+		if r.Method == method && r.Pattern == path {
+			return true
+		}
+	}
+	return false
+}
