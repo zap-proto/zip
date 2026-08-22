@@ -157,12 +157,13 @@ func transportFor(raw string) (scheme, addr string, t Transport, err error) {
 }
 
 // prepare installs the deferred projections of the typed-op registry (the
-// OpenAPI document, the MCP tool surface, the op-call plane) before any
-// listener starts, so every transport exposes the same routes. Runs exactly
-// once even if Listen is called again.
+// OpenAPI document, the GraphQL schema, the MCP tool surface, the op-call
+// plane) before any listener starts, so every transport exposes the same
+// routes. Runs exactly once even if Listen is called again.
 func (a *App) prepare() {
 	a.prepareOnce.Do(func() {
 		a.installOpenAPIRoutes()
+		a.installGraph()
 		a.installMCP()
 		a.installCallPlane()
 		a.installPluginRoute()

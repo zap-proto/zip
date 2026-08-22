@@ -33,8 +33,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-
-	"github.com/zap-proto/zip/internal/jsontag"
 )
 
 // GraphQLSDL renders the schema this app's ops describe, in GraphQL's schema
@@ -124,17 +122,16 @@ func (g *sdl) field(op *registeredOp) string {
 // argument list — wrapping it would add a level no other projection has and make
 // the GraphQL call read differently from the same call over REST or the CLI.
 func (g *sdl) args(t reflect.Type) string {
-	t = deref(t)
-	if t == nil || t.Kind() != reflect.Struct {
-		return ""
-	}
 	var out []string
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if f.PkgPath != "" {
-			continue // unexported: not on any wire
+	for _, f := range wireFields(t) {
+		if headerFieldName(f) != "" {
+			// A header is AMBIENT, not an argument. Over REST its value comes from
+			// the request — set by whatever runs in front of the handler — so
+			// publishing it as an argument would invite a client to supply its own
+			// instead. The executor refuses it by the same rule.
+			continue
 		}
-		name := jsontag.Name(f.Name, f.Tag.Get("json"))
+		name := jsonFieldName(f)
 		if name == "-" {
 			continue
 		}
@@ -154,6 +151,18 @@ func (g *sdl) typeRef(t reflect.Type, hint string) string {
 		// An op with no Out still answers — it answers nothing. GraphQL has no
 		// void, so it is Boolean: the call either happened or it errored.
 		return "Boolean"
+	}
+	if t == timeType {
+		// time.Time writes itself as an RFC 3339 string, so a string is what a
+		// caller sees. Describing it by its fields would describe something that
+		// never crosses the wire.
+		return "String"
+	}
+	if isMarshaler(t) {
+		// The type writes its own JSON, so its Go fields say nothing about the
+		// shape that arrives. JSON is the honest name for a value only the type
+		// itself can describe.
+		return "JSON"
 	}
 	switch t.Kind() {
 	case reflect.Bool:
@@ -196,12 +205,8 @@ func (g *sdl) define(t reflect.Type, hint string) string {
 	var b strings.Builder
 	b.WriteString("type " + name + " {\n")
 	n := 0
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if f.PkgPath != "" {
-			continue
-		}
-		fname := jsontag.Name(f.Name, f.Tag.Get("json"))
+	for _, f := range wireFields(t) {
+		fname := jsonFieldName(f)
 		if fname == "-" {
 			continue
 		}
