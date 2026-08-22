@@ -3,7 +3,12 @@
 
 package zip
 
-import fiber "github.com/zap-proto/fiber/v3"
+import (
+	"bytes"
+
+	"github.com/valyala/fasthttp"
+	fiber "github.com/zap-proto/fiber/v3"
+)
 
 // EVERY ANSWER SAYS WHERE TO LEARN WHAT ELSE THIS API SERVES.
 //
@@ -59,9 +64,35 @@ func (a *App) linkHandler() fiber.Handler {
 		// the chain returns, so writing here still reaches the client.
 		err := fc.Next()
 		h := &fc.Response().Header
+		// Once per ANSWER, not once per app that touches it. A proxied answer is
+		// written by the far end INTO THIS RESPONSE, links and all, so a request
+		// that crosses a hop arrived here already carrying these — and the far
+		// end is the app that actually served, so its account is the true one.
+		// Measured in production: three self links on one answer, two of them
+		// this middleware running on both sides of a hop.
+		if hasSelf(h) {
+			return err
+		}
 		h.Add(fiber.HeaderLink, "<"+fc.Path()+`>; rel="`+relSelf+`"`)
 		h.Add(fiber.HeaderLink, desc)
 		h.Add(fiber.HeaderLink, doc)
 		return err
 	}
+}
+
+// hasSelf reports whether a self link is already on the answer. It reads the
+// HEADER rather than keeping a flag beside it, because the header is the thing
+// that must not be written twice — a flag would be a second account of it, and
+// the two could disagree across a hop, which is the only place this matters.
+func hasSelf(h *fasthttp.ResponseHeader) bool {
+	found := false
+	h.VisitAll(func(k, v []byte) {
+		if found || !bytes.EqualFold(k, []byte(fiber.HeaderLink)) {
+			return
+		}
+		if bytes.Contains(v, []byte(`rel="`+relSelf+`"`)) {
+			found = true
+		}
+	})
+	return found
 }

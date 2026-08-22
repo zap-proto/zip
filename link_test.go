@@ -155,3 +155,54 @@ func TestLink_AHandlersOwnLinksSurvive(t *testing.T) {
 		t.Error("the service description link is missing beside the handler's own")
 	}
 }
+
+// AN ANSWER THAT ALREADY NAMES ITSELF IS NOT NAMED AGAIN.
+//
+// This is the shape of a proxied answer: the far end served it and wrote its own
+// links into this very response, so by the time the near side's middleware runs
+// they are already here. Adding a second copy is what put three self links on one
+// production answer.
+func TestSelfLinkIsNotWrittenTwice(t *testing.T) {
+	a := New(Config{AppName: "hop", DisableStartupMessage: true})
+	// A handler standing in for the far end of a hop.
+	a.Get("/v1/relayed", func(c *Ctx) error {
+		c.Fiber().Response().Header.Add("Link", `</v1/relayed>; rel="self"`)
+		c.Fiber().Response().Header.Add("Link", `</.well-known/openapi.json>; rel="service-desc"`)
+		return c.JSON(200, map[string]bool{"ok": true})
+	})
+	Get(a, "/v1/own", func(_ context.Context, _ *struct{}) (*struct {
+		OK bool `json:"ok"`
+	}, error) {
+		return &struct {
+			OK bool `json:"ok"`
+		}{true}, nil
+	})
+	if err := a.Build(); err != nil {
+		t.Fatal(err)
+	}
+	count := func(path, rel string) int {
+		res, err := a.Fiber().Test(httptest.NewRequest("GET", path, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Body.Close() }()
+		n := 0
+		for _, v := range res.Header.Values("Link") {
+			if strings.Contains(v, `rel="`+rel+`"`) {
+				n++
+			}
+		}
+		return n
+	}
+	if n := count("/v1/relayed", "self"); n != 1 {
+		t.Errorf("a relayed answer carries %d self links, want 1", n)
+	}
+	if n := count("/v1/relayed", "service-desc"); n != 1 {
+		t.Errorf("a relayed answer carries %d service-desc links, want 1", n)
+	}
+	// And an answer this app served itself still gets them, or the guard has
+	// simply turned the header off.
+	if n := count("/v1/own", "self"); n != 1 {
+		t.Errorf("an answer this app served carries %d self links, want 1", n)
+	}
+}
