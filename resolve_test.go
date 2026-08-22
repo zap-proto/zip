@@ -484,3 +484,47 @@ func TestAnAmbiguousOperationIsRefused(t *testing.T) {
 		t.Fatalf("operationName did not choose the operation: %s", raw)
 	}
 }
+
+// A host publishes its own address space. What the projection answers is not the
+// host's to change; where it answers is — the same split that puts zip's OpenAPI
+// document at /.well-known and a product's at /v1.
+func TestAHostCanMountTheGraphAtItsOwnAddress(t *testing.T) {
+	app := resApp(t)
+	app.MountGraph("/v1/graph")
+
+	resp, err := app.Fiber().Test(httptest.NewRequest(http.MethodGet, "/v1/graph", nil))
+	if err != nil {
+		t.Fatalf("GET /v1/graph: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "type Query {") {
+		t.Fatalf("the host's address does not serve the schema (%d):\n%s", resp.StatusCode, body)
+	}
+
+	// And it EXECUTES there, so a caller told one address needs no other.
+	req := httptest.NewRequest(http.MethodPost, "/v1/graph",
+		bytes.NewReader([]byte(`{"query":"{ user(id: \"u1\") { id } }"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	run, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("POST /v1/graph: %v", err)
+	}
+	defer func() { _ = run.Body.Close() }()
+	raw, _ := io.ReadAll(run.Body)
+	var out resReply
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("reply is not JSON (%s): %v", raw, err)
+	}
+	if out.Data["user"].(map[string]any)["id"] != "u1" {
+		t.Fatalf("the host's address did not run the op: %s", raw)
+	}
+
+	// zip's own address still answers: mounting one does not move the other.
+	if own, err := app.Fiber().Test(httptest.NewRequest(http.MethodGet, GraphPath, nil)); err == nil {
+		defer func() { _ = own.Body.Close() }()
+		if own.StatusCode != http.StatusOK {
+			t.Errorf("mounting a host address took %s away (%d)", GraphPath, own.StatusCode)
+		}
+	}
+}

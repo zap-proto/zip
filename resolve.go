@@ -135,7 +135,8 @@ func (a *App) graphFields(kind string) map[string]*registeredOp {
 	return out
 }
 
-// installGraph wires GET and POST on [GraphPath].
+// installGraph wires the projection at [GraphPath], where zip's own control
+// plane lives.
 //
 // It follows the OpenAPI document's condition rather than carrying one of its
 // own: the projections are one control plane seen six ways, and an app that
@@ -144,13 +145,26 @@ func (a *App) installGraph() {
 	if a.cfg.OpenAPI.Disabled || len(a.Registry()) == 0 {
 		return
 	}
-	schema := a.GraphQLSDL()
+	a.MountGraph(GraphPath)
+}
 
-	a.control(fiber.MethodGet, GraphPath, func(fc fiber.Ctx) error {
+// MountGraph serves the graph projection at path: GET renders the schema, POST
+// runs a request against it.
+//
+// A host publishes its own address space, so where the projection ANSWERS is the
+// host's decision while what it answers is not — the same split that puts zip's
+// OpenAPI document at /.well-known and a product's at /v1. One implementation,
+// mounted wherever a caller is told to look.
+//
+// The schema is rendered per request rather than captured here, so a host may
+// mount this before it finishes registering: the document always describes the
+// registry as it stands when someone asks.
+func (a *App) MountGraph(path string) {
+	a.control(fiber.MethodGet, path, func(fc fiber.Ctx) error {
 		fc.Set("Content-Type", "text/plain; charset=utf-8")
-		return fc.SendString(schema)
+		return fc.SendString(a.GraphQLSDL())
 	})
-	a.control(fiber.MethodPost, GraphPath, func(fc fiber.Ctx) error {
+	a.control(fiber.MethodPost, path, func(fc fiber.Ctx) error {
 		var req GraphRequest
 		resp := GraphResponse{}
 		if err := jsonenc.Unmarshal(fc.Body(), &req); err != nil {
