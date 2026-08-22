@@ -183,9 +183,7 @@ func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
 	// description lives by being BUILT, so there is no call to forget. It runs
 	// after the report so the report still observes every request, and before
 	// every route so it covers the answers no route matched. See [App.linkHandler].
-	if h := a.linkHandler(); h != nil {
-		f.Use(h)
-	}
+	f.Use(a.linkHandler())
 	for _, o := range occ {
 		switch o.kind() {
 		case kindMiddleware:
