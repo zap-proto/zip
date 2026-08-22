@@ -42,22 +42,30 @@ const (
 	relDoc  = "service-doc"
 )
 
-// linkHandler returns the middleware that names this app's own description on
-// every answer, or nil when there is nothing to name.
+// linkHandler returns the middleware that names an answer's own address, and
+// this app's description alongside it when there is one.
 //
-// The condition is the SAME map installOpenAPIRoutes writes, not a second guess
-// at it: the header is present exactly when the address it points at is served,
-// so a link can never advertise a document this app 404s. An app whose document
-// is Disabled, or which registers no typed op, gets no middleware at all rather
-// than one that checks a flag on every request.
+// SELF IS TRUE OF EVERY ANSWER. It is the path the request arrived on, and
+// nothing has to be installed for it to be so. Only the description relations
+// depend on a document existing, so only they are conditional — on the SAME map
+// installOpenAPIRoutes writes, not a second guess at it, so a link can never
+// advertise a document this app 404s.
+//
+// The two used to be one condition, and that cost more than the description:
+// installOpenAPIRoutes returns early for an app that registers no typed op, so
+// every such app — and most of ours are, serving plain routes — named nothing
+// at all, not even itself. Whether an app happens to use typed ops is not a
+// statement about whether its answers have addresses.
 func (a *App) linkHandler() fiber.Handler {
-	if !a.controls[fiber.MethodGet+" "+SpecPath] {
-		return nil
-	}
-	// Built once, at materialise: these two are constants of the app, and
+	// Built once, at materialise: these are constants of the app, and
 	// re-rendering them per request would allocate on every answer.
-	desc := "<" + SpecPath + `>; rel="` + relDesc + `"`
-	doc := "<" + DocsPath + `>; rel="` + relDoc + `"`
+	var described []string
+	if a.controls[fiber.MethodGet+" "+SpecPath] {
+		described = []string{
+			"<" + SpecPath + `>; rel="` + relDesc + `"`,
+			"<" + DocsPath + `>; rel="` + relDoc + `"`,
+		}
+	}
 	return func(fc fiber.Ctx) error {
 		// After the handler, so a handler's own Link header is already in place
 		// and these join it rather than racing it. fiber buffers headers until
@@ -74,8 +82,9 @@ func (a *App) linkHandler() fiber.Handler {
 			return err
 		}
 		h.Add(fiber.HeaderLink, "<"+fc.Path()+`>; rel="`+relSelf+`"`)
-		h.Add(fiber.HeaderLink, desc)
-		h.Add(fiber.HeaderLink, doc)
+		for _, l := range described {
+			h.Add(fiber.HeaderLink, l)
+		}
 		return err
 	}
 }

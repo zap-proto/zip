@@ -103,10 +103,10 @@ func TestLink_SelfIsTheAddressReached(t *testing.T) {
 	}
 }
 
-// AN APP WITH NO DESCRIPTION SAYS NOTHING. The middleware is absent rather than
-// present-and-quiet, so an app that disabled its document pays nothing per
-// request and advertises nothing that would 404.
-func TestLink_AnAppWithNoDocumentAdvertisesNothing(t *testing.T) {
+// AN APP WITH NO DESCRIPTION STILL NAMES ITSELF. Disabling the document says
+// nothing about whether an answer has an address, so self stays and only the
+// relations that would 404 are withheld.
+func TestLink_AnAppWithNoDocumentStillNamesItself(t *testing.T) {
 	a := New(Config{AppName: "silent", DisableStartupMessage: true,
 		OpenAPI: OpenAPIConfig{Disabled: true}})
 	Get(a, "/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
@@ -120,8 +120,35 @@ func TestLink_AnAppWithNoDocumentAdvertisesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /thing: %v", err)
 	}
-	if got := resp.Header.Values("Link"); len(got) != 0 {
-		t.Errorf("an app serving no document sent %v", got)
+	got := resp.Header.Values("Link")
+	if len(got) != 1 || !strings.Contains(got[0], `rel="self"`) {
+		t.Errorf("want self alone, got %v", got)
+	}
+	for _, l := range got {
+		if strings.Contains(l, "service-desc") || strings.Contains(l, "service-doc") {
+			t.Errorf("advertised a document it does not serve: %s", l)
+		}
+	}
+}
+
+// A ROUTE IS NOT A TYPED OP, AND AN ANSWER IS STILL AN ANSWER. installOpenAPIRoutes
+// returns early for an app with an empty registry, and self used to ride that
+// same condition — so an app serving plain routes, which most of ours do,
+// named nothing. This is the case that was silently uncovered.
+func TestLink_PlainRoutesAreNamedToo(t *testing.T) {
+	a := New(Config{AppName: "plain", DisableStartupMessage: true})
+	a.Get("/plain", func(c *Ctx) error { return c.String(200, "ok") })
+	a.installOpenAPIRoutes() // returns early: nothing typed to describe
+	if err := a.Build(); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	resp, err := a.Fiber().Test(httptest.NewRequest("GET", "/plain", nil))
+	if err != nil {
+		t.Fatalf("GET /plain: %v", err)
+	}
+	got := resp.Header.Values("Link")
+	if len(got) != 1 || !strings.Contains(got[0], `</plain>; rel="self"`) {
+		t.Errorf("a plain route must name its own address, got %v", got)
 	}
 }
 
