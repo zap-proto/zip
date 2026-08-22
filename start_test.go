@@ -1,27 +1,11 @@
 package zip_test
 
 import (
-	"os"
 	"sync"
 	"testing"
 
 	"github.com/zap-proto/zip"
 )
-
-// shortDir is sockDir(t) with a SHORT name. A plugin's socket lives inside
-// Plugin.Dir, and a unix socket path is capped at 108 bytes by the kernel —
-// sockDir(t) spends most of that budget on the test's own name, so a
-// descriptively-named test silently fails to bind and reports the child as
-// "exited before listening".
-func shortDir(t *testing.T) string {
-	t.Helper()
-	d, err := os.MkdirTemp("", "zs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(d) })
-	return d
-}
 
 // A lazy plugin has exactly ONE trigger today: a request reaching one of its
 // prefixes. A host that reaches its plugins another way — Hanzo's fleet calls
@@ -32,7 +16,7 @@ func shortDir(t *testing.T) string {
 func TestStart_BringsUpALazyPluginThatNoRequestHasReached(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: sockDir(t), Lazy: true}, "/v1/demo",
 	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
@@ -58,7 +42,7 @@ func TestStart_BringsUpALazyPluginThatNoRequestHasReached(t *testing.T) {
 func TestStart_OnARunningPluginIsANoOp(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: sockDir(t), Lazy: true}, "/v1/demo",
 	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
@@ -86,7 +70,7 @@ func TestStart_OnARunningPluginIsANoOp(t *testing.T) {
 func TestStart_ConcurrentFirstCallersProduceOneChild(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: sockDir(t), Lazy: true}, "/v1/demo",
 	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 
@@ -118,7 +102,7 @@ func TestStart_ConcurrentFirstCallersProduceOneChild(t *testing.T) {
 func TestStart_WillNotResurrectAnUnloadedPlugin(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	app.Use(must(zip.Load(
-		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: shortDir(t), Lazy: true}, "/v1/demo",
+		zip.Plugin{Name: "demo", Bin: buildPlugin(t, "v1"), Dir: sockDir(t), Lazy: true}, "/v1/demo",
 	)))
 	t.Cleanup(func() { _ = app.Shutdown() })
 

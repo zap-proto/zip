@@ -3,11 +3,11 @@ package zip
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 
 	luxlog "github.com/luxfi/log"
 	"github.com/zap-proto/fiber/v3"
+	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
 // Ctx wraps fiber.Ctx and adds the Hanzo identity surface (Org/User/Email
@@ -196,12 +196,67 @@ func (c *Ctx) Continue() error { return c.fc.Next() }
 // Errors — handlers return one of these to control status code
 // =============================================================================
 
-// HTTPError is the canonical error type zip understands. Returning one
-// causes the error handler to send a JSON {error, code, status} body.
+// HTTPError is the canonical error type zip understands. Returning one is how
+// a handler refuses; how the refusal is WRITTEN belongs to the address it
+// happened at, and lives in problem.go.
+//
+// The three members map onto RFC 9457 exactly: Status is `status`, Msg is
+// `detail`, and Code is the extension member a client dispatches on. They map
+// onto RFC 6749 §5.2 just as exactly — Code is `error`, Msg is
+// `error_description` — which is why an OAuth endpoint needs no error type of
+// its own. One value, two vocabularies, chosen by the endpoint.
 type HTTPError struct {
-	Status int    `json:"status"`
-	Code   string `json:"code,omitempty"`
-	Msg    string `json:"error"`
+	Status int
+	Code   string
+	Msg    string
+
+	// Detail is what a refusal carries BESIDES its message, and it exists
+	// because a typed op's only way to refuse is to RETURN an error — so
+	// without it, a route whose non-2xx answer has a shape cannot be a typed op
+	// at all.
+	//
+	// That is not hypothetical. Six subsystems route around its absence: a
+	// prepaid gate answers 402 naming the cap and the balance, a plugin build
+	// answers 422 carrying the diagnostics that say why it failed, a degraded
+	// probe answers 503 carrying its report. Each was left untyped for this one
+	// reason — losing its schema, its prose, its MCP tool and its CLI command —
+	// and three separate envelopes were hand-rolled to carry a body beside an
+	// error that could not.
+	//
+	// It is an EXTENSION in the RFC 9457 sense: the members a problem document
+	// may carry beyond its own. Rendered by MERGING rather than nesting, so a
+	// reader sees one object instead of a body filed under a key it has to know
+	// to look in — and the document's own members are written last, so a domain
+	// key called status cannot displace the refusal's own.
+	Detail map[string]any
+}
+
+// With attaches extension members to a refusal and returns it, so an op refuses
+// in one expression:
+//
+//	return zip.ErrPaymentRequired("spend cap exceeded").
+//		With(map[string]any{"cap": 5000, "spent": 5127})
+//
+// It MERGES rather than replaces: a gate naming the cap and a meter naming the
+// ledger are two facts about one refusal.
+func (e *HTTPError) With(detail map[string]any) *HTTPError {
+	if len(detail) == 0 {
+		return e
+	}
+	if e.Detail == nil {
+		e.Detail = make(map[string]any, len(detail))
+	}
+	for k, v := range detail {
+		e.Detail[k] = v
+	}
+	return e
+}
+
+// MarshalJSON writes the RFC 9457 problem document, with no `instance`: a value
+// marshalled on its own has no occurrence to name. Served through an address,
+// the same document gains one — see [HTTPError.problem].
+func (e *HTTPError) MarshalJSON() ([]byte, error) {
+	return jsonenc.Marshal(e.problem())
 }
 
 func (e *HTTPError) Error() string { return e.Msg }
@@ -217,27 +272,17 @@ func ErrUnauthorized(msg string) *HTTPError { return &HTTPError{Status: 401, Msg
 func ErrForbidden(msg string) *HTTPError    { return &HTTPError{Status: 403, Msg: msg} }
 func ErrNotFound(msg string) *HTTPError     { return &HTTPError{Status: 404, Msg: msg} }
 func ErrConflict(msg string) *HTTPError     { return &HTTPError{Status: 409, Msg: msg} }
-func ErrInternal(msg string) *HTTPError     { return &HTTPError{Status: 500, Msg: msg} }
 
-// errorHandler is the default fiber.ErrorHandler — converts HTTPError
-// into a JSON response and falls back to 500 for anything else.
-func errorHandler(c fiber.Ctx, err error) error {
-	var he *HTTPError
-	if errors.As(err, &he) {
-		if he.Status == 0 {
-			he.Status = 500
-		}
-		c.Status(he.Status)
-		return c.JSON(he)
-	}
-	var fe *fiber.Error
-	if errors.As(err, &fe) {
-		c.Status(fe.Code)
-		return c.JSON(&HTTPError{Status: fe.Code, Msg: fe.Message})
-	}
-	c.Status(500)
-	return c.JSON(&HTTPError{Status: 500, Msg: err.Error()})
-}
+// ErrPaymentRequired is the prepaid gate's refusal, and it is a shortcut here
+// because the surfaces that refuse this way are exactly the ones that must say
+// WHY — a cap, a balance, a ledger — which is what [HTTPError.With] carries.
+func ErrPaymentRequired(msg string) *HTTPError { return &HTTPError{Status: 402, Msg: msg} }
+
+// ErrUnprocessable is the refusal for a request that parsed and cannot be acted
+// on — source that will not build, a document failing its own schema. Its
+// diagnostics belong ON the refusal rather than beside it.
+func ErrUnprocessable(msg string) *HTTPError { return &HTTPError{Status: 422, Msg: msg} }
+func ErrInternal(msg string) *HTTPError      { return &HTTPError{Status: 500, Msg: msg} }
 
 // Redirect sends an HTTP redirect to location with the given status code.
 func (c *Ctx) Redirect(code int, location string) error {

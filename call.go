@@ -129,6 +129,11 @@ func SocketPath(name string) string { return sock.Path(name) }
 // service's socket is <dir>/<name>.sock" is stated once.
 func socketIn(dir, name string) string { return sock.In(dir, name) }
 
+// socketFits is the length rule, kept beside the shape rule because both are
+// properties of the same address: minting one is not enough, it also has to be
+// bindable, and whoever mints it is the only one positioned to say so.
+func socketFits(path string) error { return sock.Fits(path) }
+
 // installCallPlane mounts the by-name op plane when there are ops to call.
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.
 func (a *App) installCallPlane() {
@@ -307,10 +312,6 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 	return &out, nil
 }
 
-// remoteError reconstructs the callee's error. The wire form is the one
-// zip.errorHandler writes for every route — {status, code, error} — so an
-// HTTPError survives the crossing whole rather than being flattened into a
-// string the caller has to parse.
 // remoteError rebuilds the refusal the callee chose, so errors.As on this side
 // sees the *HTTPError the other side returned with its status intact. The body
 // is ZAP like everything else on this plane; a body that does not decode leaves

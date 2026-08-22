@@ -87,8 +87,8 @@ func (a *App) buildOpenAPI() map[string]any {
 
 	for _, op := range ops {
 		// Whose types these are. Empty for this app's own ops, so a document
-		// with nothing grafted into it is byte-identical to the one before
-		// Graft existed.
+		// with nothing composed into it is byte-identical to one from an app
+		// that composes nothing.
 		reg.origin = op.Origin
 
 		path := op.Path
@@ -556,7 +556,7 @@ type schemaRegistry struct {
 	refs   map[string]int          // name → how many $refs point at it
 
 	// origin is the app that DECLARED the op currently being described, when
-	// that op arrived through Graft — empty for the host's own. It
+	// that op arrived through composition — empty for the host's own. It
 	// qualifies the names of the types that op reaches, so a composed document
 	// can carry two apps' Application without one overwriting the other. See
 	// nameFor. Set by buildOpenAPI, once per op; a type is qualified by
@@ -590,7 +590,7 @@ func (r *schemaRegistry) define(t reflect.Type, fields map[string]string) string
 }
 
 // nameFor is the name t is described under: its Go name, qualified by the app
-// that declared it when it came in on a graft, and qualified by its package
+// that declared it when it came in through composition, and qualified by its package
 // when a DIFFERENT type already holds the name it would take. Two packages may
 // both call a type Config, and a registry that let the second overwrite the
 // first would publish one type's fields under the other's name — with both ops'
@@ -603,7 +603,7 @@ func (r *schemaRegistry) define(t reflect.Type, fields map[string]string) string
 // input — not a second naming scheme.
 func (r *schemaRegistry) nameFor(t reflect.Type) string {
 	// Qualifiers, outermost first: the app that DECLARED the type — always,
-	// when it came in on a graft — then its package, only when a different type
+	// when it came in through composition — then its package, only when a different type
 	// already holds the name, then an ordinal, only when even that collides.
 	qual := ""
 	if r.origin != "" {
