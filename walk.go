@@ -17,7 +17,8 @@ import (
 // keeps traversal logic of its own.
 //
 // That is the entire reason this design has one composition verb and the old
-// one had five. Graft existed because the op registry was computed EAGERLY, at
+// one had five. Composing in process needed a verb of its own because the op
+// registry was computed EAGERLY, at
 // compose time, so composing two apps meant merging two registries and every
 // projection needed its own merge rule. A projection over a walk needs no merge
 // rule at all.
@@ -127,7 +128,7 @@ type scope struct {
 	// because [App.Group] is an App with its name stripped ([App.groupConfig]).
 	// Reading the enclosing definition credited a group with declaring what its
 	// app declared — and a group has no name, so the answer was "nobody". A
-	// grafted app that declares its routes in groups (every real one does)
+	// composed app that declares its routes in groups (every real one does)
 	// published every type UNQUALIFIED: hanzoai/iam's 95 schemas arrived as
 	// bare Application and Role, colliding with the host's own.
 	origin string

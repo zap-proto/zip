@@ -766,7 +766,7 @@ func recoverish() Handler { return func(c *Ctx) error { return c.Continue() } }
 
 // ── the union ───────────────────────────────────────────────────────────────
 
-// TestCompose_DocumentIsTheUnion is the property behind "Graft took iam from 4
+// TestCompose_DocumentIsTheUnion is the property behind "composing iam took it from 4
 // paths to 164": composing is what makes a host's document the whole surface
 // rather than the wildcard it hung a closure on. Under AdaptNetHTTP the child
 // went in as an http.Handler and the count stayed at the host's own.

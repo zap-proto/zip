@@ -43,7 +43,7 @@ import (
 // # Why this replaces four verbs
 //
 // Listen served here, Mount delegated there, Add composed a registrar and
-// Graft composed an App in process. Graft existed for exactly one reason: the
+// a fourth composed an App in process. That verb existed for one reason: the
 // op registry was EAGER, so composing two apps meant merging two registries at
 // call time, and the only other way in — [AdaptNetHTTP] — type-erased an *App
 // into a closure and destroyed five projections with it. Once the registry is
@@ -129,6 +129,15 @@ type route struct {
 	// and zip's own control routes. Exactly one of chain/serve is set.
 	serve fiber.Handler
 	op    *registeredOp
+	// oauth is this address speaking RFC 6749: its refusals are {error,
+	// error_description} and not problem documents. It rides the ENTRY rather
+	// than a table of addresses because composition moves paths — see [OAuth].
+	oauth bool
+
+	// undeclared is this address serving without appearing in
+	// [App.Declaration] — and so in no projection built from it. See
+	// [App.Undeclared].
+	undeclared bool
 }
 
 // entry is one element of an App's program: a payload, and where it was
@@ -339,6 +348,11 @@ func (a *App) group(site callsite, prefix string, handlers ...Handler) *App {
 	// (wrapRouter.Group used to return another wrapRouter, so the chain rode
 	// down every level) — an auth seam quietly lost at the second nesting.
 	g.wrap = a.wrap
+	// And for the same reason the error vocabulary: a group of an [OAuth] router
+	// is still inside the RFC 6749 family, and a nested scope that answered its
+	// parent's neighbours' shape would be the same silently-lost property.
+	g.oauth = a.oauth
+	g.undeclared = a.undeclared
 	for _, h := range handlers {
 		if h == nil {
 			continue

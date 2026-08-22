@@ -43,7 +43,7 @@ func childApp(t *testing.T, name string, guard zip.Handler) *zip.App {
 	return c
 }
 
-func graftGET(t *testing.T, app *zip.App, path string) (int, string) {
+func probe(t *testing.T, app *zip.App, path string) (int, string) {
 	t.Helper()
 	resp, err := app.Fiber().Test(httptest.NewRequest("GET", path, nil))
 	if err != nil {
@@ -57,12 +57,12 @@ func graftGET(t *testing.T, app *zip.App, path string) (int, string) {
 	return resp.StatusCode, string(out)
 }
 
-// TestGraft_OneComposeFourProjections is the whole point in one test: a child
-// composed with Graft appears in ALL FOUR projections of the parent's registry
+// TestNest_OneComposeFourProjections is the whole point in one test: a child
+// composed with Use appears in ALL FOUR projections of the parent's registry
 // — the OpenAPI document, the MCP tool list, the CLI commands and the by-name
 // call plane — from one call and with no per-projection wiring. Under
 // AdaptNetHTTP every one of these is empty.
-func TestGraft_OneComposeFourProjections(t *testing.T) {
+func TestNest_OneComposeFourProjections(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	child := childApp(t, "iam", nil)
 	host.Use(child)
@@ -83,7 +83,7 @@ func TestGraft_OneComposeFourProjections(t *testing.T) {
 		t.Errorf("operationId rewritten to %v — an id is a published SDK method name", getOp["operationId"])
 	}
 	if getOp["summary"] != "Read one user by id" {
-		t.Errorf("summary lost in the graft: %v", getOp["summary"])
+		t.Errorf("summary lost in composition: %v", getOp["summary"])
 	}
 	resp := getOp["responses"].(map[string]any)["200"].(map[string]any)
 	ref := resp["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["$ref"]
@@ -93,7 +93,7 @@ func TestGraft_OneComposeFourProjections(t *testing.T) {
 	if _, ok := spec["components"].(map[string]any)["schemas"].(map[string]any)["iam.userOut"]; !ok {
 		t.Errorf("components.schemas has no iam.userOut")
 	}
-	// The op carries the child's name as its tag, so a grafted product is a
+	// The op carries the child's name as its tag, so a composed product is a
 	// named group rather than an untagged blob.
 	if tags, _ := getOp["tags"].([]string); len(tags) != 1 || tags[0] != "iam" {
 		t.Errorf("tags = %v, want [iam]", getOp["tags"])
@@ -144,36 +144,36 @@ func TestGraft_OneComposeFourProjections(t *testing.T) {
 	}
 }
 
-// TestGraft_ServesWithoutSwallowing proves the two halves of "serving is
+// TestNest_ServesWithoutSwallowing proves the two halves of "serving is
 // unchanged": every pattern the child declares reaches the child (typed AND
 // untyped), and a path the child does NOT declare falls through to the parent.
 // The wildcard this replaces swallowed the whole subtree.
-func TestGraft_ServesWithoutSwallowing(t *testing.T) {
+func TestNest_ServesWithoutSwallowing(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	host.Get("/v1/iam/not-the-childs", func(x *zip.Ctx) error { return x.String(200, "host") })
 	host.Use(childApp(t, "iam", nil))
 
-	if code, b := graftGET(t, host, "/v1/iam/users/u-9"); code != 200 || !strings.Contains(b, "u-9") {
+	if code, b := probe(t, host, "/v1/iam/users/u-9"); code != 200 || !strings.Contains(b, "u-9") {
 		t.Errorf("typed child route: %d %s", code, b)
 	}
-	if code, b := graftGET(t, host, "/v1/iam/raw"); code != 200 || b != "raw iam" {
+	if code, b := probe(t, host, "/v1/iam/raw"); code != 200 || b != "raw iam" {
 		t.Errorf("untyped child route: %d %q", code, b)
 	}
-	if code, b := graftGET(t, host, "/v1/iam/not-the-childs"); code != 200 || b != "host" {
+	if code, b := probe(t, host, "/v1/iam/not-the-childs"); code != 200 || b != "host" {
 		t.Errorf("host route under the child's prefix: %d %q", code, b)
 	}
 	// The address neither app declares is a 404 from the HOST — not swallowed
 	// into the child, which is what the wildcard did.
-	if code, _ := graftGET(t, host, "/v1/iam/nobody-declares-this"); code != 404 {
-		t.Errorf("undeclared path answered %d, want 404 — the graft is swallowing", code)
+	if code, _ := probe(t, host, "/v1/iam/nobody-declares-this"); code != 404 {
+		t.Errorf("undeclared path answered %d, want 404 — composition is swallowing", code)
 	}
 }
 
-// TestGraft_MiddlewareStaysInsideTheChild is the test that justifies delegation
+// TestNest_MiddlewareStaysInsideTheChild is the test that justifies delegation
 // over route-copying. The child's pathless Use gates the CHILD's routes and no
 // others; copying its routes would drop the guard, and copying its Use would
 // gate every route in the host binary.
-func TestGraft_MiddlewareStaysInsideTheChild(t *testing.T) {
+func TestNest_MiddlewareStaysInsideTheChild(t *testing.T) {
 	guard := func(x *zip.Ctx) error {
 		if x.Header("Authorization") == "" {
 			return zip.Errorf(401, "no credentials")
@@ -185,19 +185,19 @@ func TestGraft_MiddlewareStaysInsideTheChild(t *testing.T) {
 	host.Use(childApp(t, "iam", guard))
 
 	// The guard DID come across: the child's own route is gated.
-	if code, _ := graftGET(t, host, "/v1/iam/raw"); code != 401 {
-		t.Errorf("child route answered %d without credentials — the guard was dropped by the graft", code)
+	if code, _ := probe(t, host, "/v1/iam/raw"); code != 401 {
+		t.Errorf("child route answered %d without credentials — the guard was dropped by composition", code)
 	}
 	// And it did NOT bleed: the host's own route is untouched.
-	if code, b := graftGET(t, host, "/v1/public"); code != 200 || b != "public" {
+	if code, b := probe(t, host, "/v1/public"); code != 200 || b != "public" {
 		t.Errorf("host route answered %d %q — the child's Use bled onto the whole binary", code, b)
 	}
 }
 
-// TestGraft_ChildAuthorizerStillFires proves the parent does not silently
+// TestNest_ChildAuthorizerStillFires proves the parent does not silently
 // re-authorize a child's op under its own rules: op.invoke closes over the
 // CHILD's Authorizer, over REST and over MCP alike.
-func TestGraft_ChildAuthorizerStillFires(t *testing.T) {
+func TestNest_ChildAuthorizerStillFires(t *testing.T) {
 	child := childApp(t, "iam", nil)
 	var seen []string
 	child.Authorize(func(_ context.Context, op zip.Op, _ any) error {
@@ -212,7 +212,7 @@ func TestGraft_ChildAuthorizerStillFires(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	if code, b := graftGET(t, host, "/v1/iam/users/u-1"); code == 200 {
+	if code, b := probe(t, host, "/v1/iam/users/u-1"); code == 200 {
 		t.Errorf("REST: the child's authorizer did not run (%d %s)", code, b)
 	}
 	out := rpcLocal(t, host,
@@ -234,10 +234,10 @@ type appBeta struct {
 	Company string `json:"company"`
 }
 
-// TestGraft_SameNameDifferentShape is the collision the fleet actually has:
+// TestNest_SameNameDifferentShape is the collision the fleet actually has:
 // two apps each own a type called Application and the shapes differ. Both must
 // publish, under distinct names, or one app's SDK binds the other's fields.
-func TestGraft_SameNameDifferentShape(t *testing.T) {
+func TestNest_SameNameDifferentShape(t *testing.T) {
 	// Both children name their type "Application" via the same Go identifier
 	// path is impossible in one package, so the shapes come in as distinct Go
 	// types whose SCHEMA name is what must not clash. Alias them to one name.
@@ -265,14 +265,14 @@ func TestGraft_SameNameDifferentShape(t *testing.T) {
 	}
 	// The child's OWN document is untouched: a copy went into the parent.
 	if _, ok := a.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)["appAlpha"]; !ok {
-		t.Errorf("the graft edited the CHILD's document; a child served standalone must be unchanged")
+		t.Errorf("composition edited the CHILD's document; a child served standalone must be unchanged")
 	}
 }
 
-// TestGraft_CollidingAddressRefusesEverything proves the refusal is
-// all-or-nothing and names both claimants. A half-grafted app is worse than a
+// TestNest_CollidingAddressRefusesEverything proves the refusal is
+// all-or-nothing and names both claimants. A half-composed app is worse than a
 // refused one.
-func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
+func TestNest_CollidingAddressRefusesEverything(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
 	host.Get("/v1/iam/raw", func(x *zip.Ctx) error { return x.String(200, "host owns this") })
 
@@ -288,7 +288,7 @@ func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
 	}
 	// NOTHING is obtainable. A program that does not compose has no projection —
 	// asking for one panics carrying this same error rather than answering with
-	// an empty document. That is stronger than the old "half-grafted" check: it
+	// an empty document. That is stronger than the old "half-composed" check: it
 	// is not that the routes are absent, it is that there is nothing to ask.
 	// NOTHING is live. A refused build installs no generation, so there is no
 	// half-composed router to serve from — which is the stronger form of the
@@ -300,9 +300,9 @@ func TestGraft_CollidingAddressRefusesEverything(t *testing.T) {
 	}
 }
 
-// TestGraft_SiblingsCollide proves the check covers children against each
+// TestNest_SiblingsCollide proves the check covers children against each
 // other, not only against the parent.
-func TestGraft_SiblingsCollide(t *testing.T) {
+func TestNest_SiblingsCollide(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
 	host.Use(childApp(t, "iam", nil), childApp(t, "iam", nil))
 	err := host.Build()
@@ -314,9 +314,9 @@ func TestGraft_SiblingsCollide(t *testing.T) {
 	}
 }
 
-// TestGraft_RefusesAfterPrepare: the document, the tool list and the call plane
-// are rendered once. An op grafted afterwards would serve and never describe,
-// which is the exact defect Graft exists to remove.
+// TestNest_RefusesAfterPrepare: the document, the tool list and the call plane
+// are rendered once. An op composed afterwards would serve and never describe,
+// which is the exact defect this composition removes.
 func TestCompose_RefusedAfterTheAppIsBuilt(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	zip.Get(host, "/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil })
@@ -340,9 +340,9 @@ func TestCompose_RefusedAfterTheAppIsBuilt(t *testing.T) {
 	host.Use(childApp(t, "iam", nil))
 }
 
-// TestGraft_UngraftedDocumentIsUnchanged pins the compatibility claim: an app
-// with nothing grafted names its types exactly as it did before Origin existed.
-func TestGraft_UngraftedDocumentIsUnchanged(t *testing.T) {
+// TestNest_UngraftedDocumentIsUnchanged pins the compatibility claim: an app
+// with nothing composed names its types exactly as it did before Origin existed.
+func TestNest_UngraftedDocumentIsUnchanged(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "solo", DisableStartupMessage: true})
 	zip.Post(a, "/v1/x", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
 	schemas := a.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)
@@ -351,7 +351,7 @@ func TestGraft_UngraftedDocumentIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestGraft_AGroupDoesNotEraseTheAuthor is the qualification rule at the only
+// TestNest_AGroupDoesNotEraseTheAuthor is the qualification rule at the only
 // depth real apps use. A child declares its routes in groups — that is what a
 // prefix IS here — and a group is an App with its name stripped
 // (App.groupConfig), so reading the ENCLOSING definition asked a nameless thing
@@ -362,7 +362,7 @@ func TestGraft_UngraftedDocumentIsUnchanged(t *testing.T) {
 // as a bare Application, Role, Input — colliding with the host's own types of
 // those names, one name for two shapes, in the document every SDK is generated
 // from.
-func TestGraft_AGroupDoesNotEraseTheAuthor(t *testing.T) {
+func TestNest_AGroupDoesNotEraseTheAuthor(t *testing.T) {
 	child := zip.New(zip.Config{AppName: "iam", DisableStartupMessage: true})
 	g := child.Group("/v1/iam")
 	zip.Post(g, "/users", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
@@ -377,7 +377,7 @@ func TestGraft_AGroupDoesNotEraseTheAuthor(t *testing.T) {
 	schemas := host.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)
 	for _, want := range []string{"iam.userIn", "iam.userOut"} {
 		if _, ok := schemas[want]; !ok {
-			t.Errorf("no %q — a type declared inside a grafted app's group lost its author: %v", want, keysOf(schemas))
+			t.Errorf("no %q — a type declared inside a composed app's group lost its author: %v", want, keysOf(schemas))
 		}
 	}
 	for _, unwanted := range []string{"userIn", "userOut"} {
@@ -387,10 +387,10 @@ func TestGraft_AGroupDoesNotEraseTheAuthor(t *testing.T) {
 	}
 }
 
-// TestGraft_ChildControlPlaneIsNotAdopted: the parent keeps its own /docs, MCP
+// TestNest_ChildControlPlaneIsNotAdopted: the parent keeps its own /docs, MCP
 // door, op plane and declaration. A child that took them would take the whole
 // composition's document.
-func TestGraft_ChildControlPlaneIsNotAdopted(t *testing.T) {
+func TestNest_ChildControlPlaneIsNotAdopted(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	zip.Get(host, "/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil },
 		zip.WithOperationID("host_own"))
@@ -404,7 +404,7 @@ func TestGraft_ChildControlPlaneIsNotAdopted(t *testing.T) {
 	}
 
 	// The host's document is the host's, and it carries both apps' ops.
-	_, body := graftGET(t, host, zip.SpecPath)
+	_, body := probe(t, host, zip.SpecPath)
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(body), &doc); err != nil {
 		t.Fatalf("%s is not JSON: %v", zip.SpecPath, err)
@@ -413,7 +413,7 @@ func TestGraft_ChildControlPlaneIsNotAdopted(t *testing.T) {
 		t.Errorf("the child took the host's document: title=%v", doc["info"])
 	}
 	if _, ok := doc["paths"].(map[string]any)["/v1/iam/users/{id}"]; !ok {
-		t.Errorf("the host's served document is missing the grafted op")
+		t.Errorf("the host's served document is missing the composed op")
 	}
 	// The host's declaration excludes control routes and includes the child's.
 	var hasChild bool
@@ -430,8 +430,8 @@ func TestGraft_ChildControlPlaneIsNotAdopted(t *testing.T) {
 	}
 }
 
-// TestGraft_ChildShutdownIsAdopted: a graft must not leak the child's store.
-func TestGraft_ChildShutdownIsAdopted(t *testing.T) {
+// TestNest_ChildShutdownIsAdopted: composition must not leak the child's store.
+func TestNest_ChildShutdownIsAdopted(t *testing.T) {
 	child := childApp(t, "iam", nil)
 	var torn bool
 	child.OnShutdown(func(context.Context) error { torn = true; return nil })
@@ -441,7 +441,7 @@ func TestGraft_ChildShutdownIsAdopted(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 	if !torn {
-		t.Error("the host's Shutdown did not tear the grafted child down")
+		t.Error("the host's Shutdown did not tear the composed child down")
 	}
 }
 

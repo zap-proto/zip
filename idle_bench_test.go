@@ -31,7 +31,7 @@ func TestIdle_ReclaimsRealMemory(t *testing.T) {
 		name := fmt.Sprintf("demo%d", i)
 		app.Use(must(zip.Load(
 			zip.Plugin{
-				Name: name, Bin: bin, Dir: t.TempDir(), Lazy: true,
+				Name: name, Bin: bin, Dir: sockDir(t), Lazy: true,
 				IdleAfter: 50 * time.Millisecond,
 			}, "/v1/"+name,
 		)))

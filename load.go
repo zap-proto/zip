@@ -342,7 +342,30 @@ func (p *plugin) startOnDemand() (Client, string) {
 		p.app.logger.Error("zip lazy plugin failed to start", "name", p.name, "err", err)
 		return nil, ""
 	}
-	p.cur.Store(in)
+	// PUBLISHED BY COMPARE-AND-SWAP, because p.mu does not exclude the supervisor.
+	//
+	// A restart swaps its own instance in without taking this lock (supervise holds
+	// p.mu only long enough to read closed/spec), so between the nil check above and
+	// this line the current instance can become non-nil. A plain Store then
+	// OVERWRITES a live child, and the overwritten one is referenced by nothing:
+	// no cur, no supervise loop that can reach it, nothing to stop it on Unload or
+	// Shutdown. It keeps running, keeps its socket, and keeps writing whatever
+	// per-process state it owns.
+	//
+	// Measured in production: 15 live `ai` children in one pod, accumulating over
+	// two hours, every one of them appending to the same audit chain and racing for
+	// its sequence — which the audit gate correctly fails closed on, so audited
+	// POSTs were refused fleet-wide.
+	//
+	// Losing the swap is not an error. The winner is a started, supervised instance
+	// serving this same plugin, so this caller stops the child it opened and uses it.
+	if !p.cur.CompareAndSwap(nil, in) {
+		stop(in, 0)
+		if cur := p.cur.Load(); cur != nil {
+			return cur.client, cur.sock
+		}
+		return nil, ""
+	}
 	p.lastUse.Store(time.Now().UnixNano()) // or the next sweep evicts what just started
 	p.app.logger.Info("zip lazy plugin started on first request",
 		"name", p.name, "pid", in.cmd.Process.Pid, "addr", in.sock)
@@ -587,7 +610,12 @@ func start(spec Plugin) (*instance, error) {
 	// One private directory per instance holds the extracted binary and the
 	// socket, so a reload's new instance never collides with the old one's
 	// socket path and cleanup is a single RemoveAll.
-	dir, err := os.MkdirTemp(spec.Dir, "zip-"+spec.Name+"-")
+	//
+	// The directory does not repeat the plugin's name. Everything inside it is
+	// already named for the plugin — the binary and the socket both — and the
+	// address they sit at has only 103 bytes total, so spending len(name)+1 of
+	// them on a second copy is what pushes a long name over the limit.
+	dir, err := os.MkdirTemp(spec.Dir, "zip-")
 	if err != nil {
 		return nil, err
 	}
@@ -611,6 +639,14 @@ func start(spec Plugin) (*instance, error) {
 	}
 
 	sock := socketIn(dir, spec.Name)
+	// The child opens sock+".http" for the upgrade listener too, so that is the
+	// longest address in play and the one that has to fit. Checking here turns a
+	// child that dies with "bind: invalid argument" into a host that refuses to
+	// launch it and says why.
+	if err := socketFits(sock + ".http"); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
 	cmd := exec.Command(bin, spec.Args...)
 	cmd.Env = append(append(os.Environ(), spec.Env...), AddrEnv+"="+sock)
 	// The child's output is the operator's only window into it, so it goes where

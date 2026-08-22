@@ -418,8 +418,8 @@ the transport, not to the contract.
 **The compatibility rule follows from the layout: reordering, inserting or
 retyping a field changes the wire. Append at the end, and only at the end.**
 
-Errors cross whole. The wire form is what `errorHandler` writes for every route
-(`{status, code, error}`), so `errors.As(err, &he)` on the caller's side sees the
+Errors cross whole: status, code and message travel as ZAP like everything else
+on this plane, so `errors.As(err, &he)` on the caller's side sees the
 `*HTTPError` the callee returned, status intact. A void op yields `(nil, nil)`.
 
 **Generic, not generated — deliberately.** A generated per-op Go client would
@@ -730,6 +730,80 @@ It is HTTP-only by construction: the REST route and the document read it, and th
 MCP tool, the CLI command and the op-call plane are untouched, because each of
 those carries its own outcome. A non-2xx panics at declaration — an error status
 is the error a handler returns, and two places to say it is one too many.
+
+## A refusal is written in the vocabulary its address speaks (WIRE CHANGE)
+
+Every non-2xx zip answers is an **RFC 9457 problem document** under
+`application/problem+json`:
+
+```
+HTTP 402
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Payment Required","status":402,
+ "detail":"spend cap exceeded","instance":"/v1/chat","cap":5000,"spent":5127}
+```
+
+`HTTPError` is unchanged as a value and maps onto the document exactly: `Status`
+is `status`, `Msg` is `detail`, `Code` is the extension member a client
+dispatches on, and `With(...)` members merge at the top level (§3.2) with the
+document's own written last so a domain key called `status` cannot displace the
+refusal's. `title` is the status phrase, omitted for a status that has none.
+`instance` is present when the document was served and absent when the value was
+marshalled on its own — a refusal does not know its own occurrence, and a
+package-level `var ErrGone = zip.ErrNotFound(…)` is one value shared by every
+request that returns it.
+
+This REPLACES `{status, code, error}`. A client reading `body.error` reads
+`body.detail` now; there is no second spelling.
+
+**405 carries `Allow`** (RFC 9110 §15.5.6), listing the methods that address
+does serve. It comes from the fiber fork's own method-mismatch scan and survives
+the error handler; `TestAWrongVerbSaysWhichVerbsWork` drives a real request and
+pins both directions — every method the address serves is listed, and no method
+it does not.
+
+### The one carve-out, and how an address declares it
+
+RFC 6749 §5.2 STATES the token endpoint's error body as
+`{error, error_description}` under `application/json`; RFC 7662 §2.3 and RFC
+7009 §2.2.1 send introspection and revocation to that same section. A problem
+document there is not a nicer error, it is a broken authorization server. So
+that family declares its vocabulary where it is registered:
+
+```go
+oauth := zip.OAuth(r)
+oauth.Post("/v1/iam/oauth/token", token)
+oauth.Post("/v1/iam/oauth/introspect", introspect)
+oauth.Post("/v1/iam/oauth/revoke", revoke)
+```
+
+`OAuth` returns a **Router**, so it takes typed ops the same way
+(`zip.Post(oauth, …)`) and nests through `Group`. There is no flag, no config
+field and no second error type: the same `HTTPError` renders as
+`{error: Code, error_description: Msg}`, and a refusal the framework produced
+gets the code its status implies — `invalid_client` for 401, `server_error` for
+5xx, `invalid_request` otherwise.
+
+It is a property of the ADDRESS and not of the returned value, because the
+refusals that most need translating are the ones no handler wrote: a body that
+will not bind, a panic recovered above the handler, a gate refusing in front of
+it. There is no return statement to attach a type to for any of those.
+
+The fact rides the route ENTRY (`route.oauth`, stamped once in `App.addRoute`
+from the definition it was declared on) and is reduced to an address set by
+`composeOAuth` at materialise, alongside `composeOps`. That is what makes it
+survive composition: a service grafted under a host answers the same way at its
+new path, where an address recorded at registration time would name a path that
+no longer exists — pinned by `TestTheVocabularySurvivesComposition`.
+
+The pair is METHOD+path, so a verb the endpoint does not serve is the ROUTER
+refusing, and answers a problem document with `Allow` — which is the answer that
+client actually needs.
+
+`middleware.Recover` RETURNS its refusal rather than writing one. Writing a body
+made it a second error surface that spoke only the default, so a panic at an
+OAuth address answered a shape no OAuth client parses.
 
 ## The schema derivation — one type, one definition (v1.17.8)
 
@@ -1062,10 +1136,10 @@ response to put them on — the declared set still appears in the schema,
 and the answer's value is identical on every transport.
 
 **A failure with a body.** A declared status may be non-2xx, for an op
-whose failure carries a TYPED BODY the error envelope cannot express — a
+whose failure carries a TYPED BODY a problem document cannot express — a
 409 with the conflicting record, a 404 with what was searched for. An
-error RETURN still renders the standard `{status, code, error}` envelope
-and is still the way to answer a failure that has nothing extra to say.
+error RETURN still renders the RFC 9457 problem document and is still the
+way to answer a failure that has nothing extra to say.
 
 **A verbatim body.** A passthrough that forwards bytes to an upstream
 owning the contract takes `json.RawMessage` as its input: every unnamed

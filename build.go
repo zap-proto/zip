@@ -65,7 +65,7 @@ func (a *App) mustBuild() *generation {
 // composition, at the path and under the id its occurrence gives it.
 //
 // This is the value that replaced five verbs with one. It used to be a FIELD
-// that Graft appended to at compose time, which is why composing an app
+// that composition appended to at compose time, which is why composing an app
 // needed a verb of its own and why type-erasing one into an http.Handler
 // destroyed the OpenAPI document, the MCP tool list, the CLI commands, the
 // by-name call plane and the [Declaration] all at once. A projection cannot be
@@ -165,18 +165,25 @@ func composeOps(occ []occurrence) []*registeredOp {
 //     CHAIN of that subtree's own routes instead. Router middleware here would
 //     escape the definition: a child's pathless app.Use(guard) registered on the
 //     host's router is a barrier for the whole host binary, which is precisely
-//     the failure Graft's delegation existed to avoid. Composing it into
+//     the failure the old delegating verb existed to avoid. Composing it into
 //     the subtree's routes keeps it inside the definition that declared it, and
 //     costs the definition's middleware its coverage of unmatched paths — a
 //     definition does not answer for addresses it does not declare.
 func (a *App) materialise(occ []occurrence, ctl []route) *fiber.App {
-	f := fiber.New(a.fiberConfig())
+	f := fiber.New(a.fiberConfig(composeOAuth(occ)))
 	// The report goes on FIRST, so it is outermost: it observes every request
 	// this router answers, including the ones that match no route and the ones a
 	// later middleware refuses. An app gets it by being built, which is the whole
 	// of what "no per-app code" means — there is no call to forget and no order
 	// to get wrong. See [App.report].
 	if h := a.telemetryHandler(); h != nil {
+		f.Use(h)
+	}
+	// Beside the report and for the same reason: an app says where its own
+	// description lives by being BUILT, so there is no call to forget. It runs
+	// after the report so the report still observes every request, and before
+	// every route so it covers the answers no route matched. See [App.linkHandler].
+	if h := a.linkHandler(); h != nil {
 		f.Use(h)
 	}
 	for _, o := range occ {
@@ -230,8 +237,11 @@ func (a *App) installRoute(f *fiber.App, prefix string, mw []Handler, r route) {
 
 // addRoute is the ONE place a route entry is appended, so every route method,
 // every typed registration and zip's own control plane record the same thing in
-// the same shape with a real call site.
+// the same shape with a real call site — and so the definition's error
+// vocabulary reaches the entry once instead of at each of those.
 func (a *App) addRoute(site callsite, r route) {
+	r.oauth = a.oauth
+	r.undeclared = a.undeclared
 	a.appendEntry(entry{n: r, site: site})
 }
 
@@ -292,8 +302,10 @@ func (a *App) Lint() []string {
 }
 
 // fiberConfig is the App's Config as fiber wants it. One place, so New and
-// every rematerialisation agree.
-func (a *App) fiberConfig() fiber.Config {
+// every rematerialisation agree. oauth is the address set the error handler
+// answers RFC 6749 at, which is a property of the routes this generation holds
+// and so arrives with them.
+func (a *App) fiberConfig(oauth map[string]bool) fiber.Config {
 	fcfg := fiber.Config{
 		AppName:         a.cfg.AppName,
 		BodyLimit:       a.cfg.BodyLimit,
@@ -316,7 +328,7 @@ func (a *App) fiberConfig() fiber.Config {
 	if a.cfg.ErrorHandler != nil {
 		fcfg.ErrorHandler = a.cfg.ErrorHandler
 	} else {
-		fcfg.ErrorHandler = errorHandler
+		fcfg.ErrorHandler = refusing(oauth)
 	}
 	return fcfg
 }

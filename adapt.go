@@ -39,12 +39,16 @@ import (
 // Migration tool — costs ~5% perf vs native Fiber. Replace with native
 // zip handlers when feasible.
 func AdaptNetHTTP(h http.Handler) Handler {
-	wrapped := adaptor.HTTPHandler(h)
+	// Streams — see adapt_stream.go. ONE adapter rather than a buffering one and
+	// a streaming one, because "which adapter did this route get" is exactly the
+	// question nobody should have to ask to explain why server-sent events
+	// arrive all at once on one mount and incrementally on another.
+	//
 	// TERMINAL: an http.Handler writes the response, so this answers whatever
 	// address it is registered at. In Use position it would answer every one of
 	// them, which is why the wildcard route above is THE spelling and this is
 	// refused at build time — see [Terminal].
-	return Terminal("zip.AdaptNetHTTP", func(c *Ctx) error { return wrapped(c.fc) })
+	return Terminal("zip.AdaptNetHTTP", adaptStreaming(h))
 }
 
 // AdaptNetHTTPMiddleware wraps a stdlib middleware (func(http.Handler) http.Handler)
