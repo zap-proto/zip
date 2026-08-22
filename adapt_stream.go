@@ -30,27 +30,54 @@ type streamWriter struct {
 	hdr    http.Header
 	status int
 	pw     *io.PipeWriter
-	once   sync.Once
+	code   sync.Once // the status is the FIRST WriteHeader's
+	commit sync.Once // the head is final once: at the first write, or at return
 	ready  chan struct{}
 }
 
 func (w *streamWriter) Header() http.Header { return w.hdr }
 
-func (w *streamWriter) WriteHeader(code int) {
-	w.once.Do(func() {
-		w.status = code
+// WriteHeader records the status and nothing more. net/http finalises the head
+// at the first body write rather than here, and that is not an accident of its
+// implementation — it is what lets it sniff a Content-Type the handler did not
+// set. Releasing the head on this call would commit it before there was a body
+// to sniff.
+func (w *streamWriter) WriteHeader(code int) { w.code.Do(func() { w.status = code }) }
+
+// commit finalises the head. b is the first body bytes, or nil when the handler
+// returned or flushed without writing any.
+func (w *streamWriter) commitHead(b []byte) {
+	w.commit.Do(func() {
+		// net/http sniffs the first write when the handler set no Content-Type,
+		// and handlers rely on it: a debug index that writes an HTML page and
+		// sets no header arrived as text/plain, so a browser showed the markup
+		// instead of the page. Adapting an http.Handler means adopting its
+		// contract, and this is part of it.
+		//
+		// A Content-Type that is PRESENT BUT EMPTY means the handler asked for
+		// no sniffing — also net/http's rule — so the test is presence, not
+		// emptiness.
+		if _, set := w.hdr["Content-Type"]; !set && len(b) > 0 {
+			w.hdr.Set("Content-Type", http.DetectContentType(b))
+		}
 		close(w.ready)
 	})
 }
 
 func (w *streamWriter) Write(b []byte) (int, error) {
 	w.WriteHeader(http.StatusOK) // net/http's implicit 200, same rule
+	// Before the pipe write, never after: the reader is blocked on the head and
+	// the pipe is synchronous, so writing first would deadlock.
+	w.commitHead(b)
 	return w.pw.Write(b)
 }
 
 // Flush satisfies http.Flusher, which every streaming handler asserts before it
-// will emit a frame.
-func (w *streamWriter) Flush() { w.WriteHeader(http.StatusOK) }
+// will emit a frame. Nothing has been written yet, so there is nothing to sniff.
+func (w *streamWriter) Flush() {
+	w.WriteHeader(http.StatusOK)
+	w.commitHead(nil)
+}
 
 func adaptStreaming(h http.Handler) func(*Ctx) error {
 	return func(c *Ctx) error {
@@ -76,6 +103,7 @@ func adaptStreaming(h http.Handler) func(*Ctx) error {
 					_ = pw.Close()
 				}
 				w.WriteHeader(http.StatusOK) // a handler that wrote nothing still answered
+				w.commitHead(nil)
 			}()
 			h.ServeHTTP(w, req)
 		}()
