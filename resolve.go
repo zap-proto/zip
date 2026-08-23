@@ -77,6 +77,10 @@ type GraphError struct {
 // an op declares. That is what lets the same executor serve an HTTP POST, a
 // test, or an in-process caller without any of them holding a transport.
 func (a *App) GraphQL(ctx context.Context, req GraphRequest) GraphResponse {
+	return a.graph(ctx, req, nil)
+}
+
+func (a *App) graph(ctx context.Context, req GraphRequest, foreign Resolver) GraphResponse {
 	doc, err := parseGraph(req.Query)
 	if err != nil {
 		return GraphResponse{Errors: []GraphError{{Message: err.Error()}}}
@@ -105,6 +109,8 @@ func (a *App) GraphQL(ctx context.Context, req GraphRequest) GraphResponse {
 		case strings.HasPrefix(s.name, "__"):
 			e.fail(at, "introspection is not served here; the schema is published at GET "+GraphPath)
 			data[key] = nil
+		case foreign != nil:
+			data[key] = e.callForeign(ctx, foreign, op.kind, s, at)
 		default:
 			f, ok := fields[s.name]
 			if !ok {
@@ -148,6 +154,31 @@ func (a *App) installGraph() {
 	a.MountGraph(GraphPath)
 }
 
+// Resolver answers one root field for a graph this app serves but does not own.
+//
+// kind is "query" or "mutation" — the operation the field was selected under. It
+// is passed because only the resolver knows whether a foreign field is safe to
+// read: this app has no registry entry to check, so the rule that a write is not
+// reachable as a read has to be enforced where the knowledge is.
+//
+// args arrive with variables already substituted, named as the schema publishes
+// them. The value returned is projected through the selection set exactly as a
+// local op's result is.
+type Resolver func(ctx context.Context, kind, field string, args map[string]any) (any, error)
+
+// MountGraphFor serves a graph whose schema and resolver come from elsewhere.
+//
+// The parsing, the variables, the fragments, the directives and the projection
+// are the same ones a local graph gets — only the answer to "what is this field"
+// changes. That is the whole reason this exists: a deployment that answers with
+// many processes has one surface and should not grow a second GraphQL
+// implementation to describe it.
+//
+// schema is called per request, so a composed schema stays current.
+func (a *App) MountGraphFor(path string, schema func() string, resolve Resolver) {
+	a.mountGraph(path, schema, resolve)
+}
+
 // MountGraph serves the graph projection at path: GET renders the schema, POST
 // runs a request against it.
 //
@@ -160,9 +191,13 @@ func (a *App) installGraph() {
 // mount this before it finishes registering: the document always describes the
 // registry as it stands when someone asks.
 func (a *App) MountGraph(path string) {
+	a.mountGraph(path, a.GraphQLSDL, nil)
+}
+
+func (a *App) mountGraph(path string, schema func() string, resolve Resolver) {
 	a.control(fiber.MethodGet, path, func(fc fiber.Ctx) error {
 		fc.Set("Content-Type", "text/plain; charset=utf-8")
-		return fc.SendString(a.GraphQLSDL())
+		return fc.SendString(schema())
 	})
 	a.control(fiber.MethodPost, path, func(fc fiber.Ctx) error {
 		var req GraphRequest
@@ -170,7 +205,7 @@ func (a *App) MountGraph(path string) {
 		if err := jsonenc.Unmarshal(fc.Body(), &req); err != nil {
 			resp.Errors = []GraphError{{Message: "invalid request body: " + err.Error()}}
 		} else {
-			resp = a.GraphQL(callerContext(fc), req)
+			resp = a.graph(callerContext(fc), req, resolve)
 		}
 		body, err := jsonenc.Marshal(resp)
 		if err != nil {
@@ -234,6 +269,45 @@ func (e *graph) call(ctx context.Context, op *registeredOp, s *gqlSel, path []an
 		return nil
 	}
 	return e.project(node, op.OutType, s.sel, path)
+}
+
+// callForeign resolves one field this app does not own.
+//
+// The resolver receives the operation kind as well as the field, because there is
+// no registry entry here to check a write against. Everything after the answer is
+// identical to a local field: the value is normalised through JSON and projected
+// through the selection set, so a caller cannot tell which side answered.
+func (e *graph) callForeign(ctx context.Context, r Resolver, kind string, s *gqlSel, path []any) any {
+	args := make(map[string]any, len(s.args))
+	for k, v := range s.args {
+		rv, err := e.resolve(v)
+		if err != nil {
+			e.fail(path, err.Error())
+			return nil
+		}
+		args[k] = rv
+	}
+	out, err := r(ctx, kind, s.name, args)
+	if err != nil {
+		e.fail(path, err.Error())
+		return nil
+	}
+	if out == nil {
+		return nil
+	}
+	raw, err := jsonenc.Marshal(out)
+	if err != nil {
+		e.fail(path, err.Error())
+		return nil
+	}
+	var node any
+	if err := jsonenc.Unmarshal(raw, &node); err != nil {
+		e.fail(path, err.Error())
+		return nil
+	}
+	// No Go type: the resolver answered with a shape only it knows, so the decoded
+	// JSON is the whole description and projection reads it directly.
+	return e.project(node, nil, s.sel, path)
 }
 
 // input builds the op's In from the field's arguments.
@@ -343,7 +417,7 @@ func (e *graph) project(node any, t reflect.Type, sel []*gqlSel, path []any) any
 		}
 		return node
 	}
-	if leaf && node != nil {
+	if t != nil && leaf && node != nil {
 		if _, obj := node.(map[string]any); !obj {
 			e.fail(path, "field of scalar type cannot have a selection of subfields")
 			return nil
@@ -384,6 +458,19 @@ func (e *graph) object(n map[string]any, t reflect.Type, sel []*gqlSel, path []a
 			}
 			continue
 		}
+		if t == nil {
+			// Nothing declares this value's shape, so a field that is absent is
+			// absent — not a mistake. With a Go type the two are distinguishable
+			// and a missing field IS named; here there is nothing to name it
+			// against, and inventing an error would refuse valid answers.
+			jk, found := keyOf(n, s.name)
+			if !found {
+				out[key] = nil
+				continue
+			}
+			out[key] = e.project(n[jk], nil, s.sel, sub(path, key))
+			continue
+		}
 		f, ok := fieldOf(t, s.name)
 		if !ok {
 			e.fail(sub(path, key), fmt.Sprintf("no field %q on this type", s.name))
@@ -393,6 +480,20 @@ func (e *graph) object(n map[string]any, t reflect.Type, sel []*gqlSel, path []a
 		out[key] = e.project(n[jsonFieldName(f)], f.Type, s.sel, sub(path, key))
 	}
 	return out
+}
+
+// keyOf finds the decoded key a selected name refers to. The schema spells a
+// field with gqlName, so the key it came from is the one that spells the same.
+func keyOf(n map[string]any, name string) (string, bool) {
+	if _, ok := n[name]; ok {
+		return name, true
+	}
+	for k := range n {
+		if gqlName(k) == name {
+			return k, true
+		}
+	}
+	return "", false
 }
 
 // fieldOf finds the struct field a selected name refers to, by the same name the
