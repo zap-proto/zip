@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,7 +100,13 @@ func MaxBody(n int) zip.Handler {
 
 // CORSConfig configures the CORS middleware.
 type CORSConfig struct {
-	AllowOrigins  []string // "*" or explicit list. Default: ["*"]
+	// AllowOrigins is "*" or an explicit allowlist. Default: ["*"].
+	//
+	// An allowlist is checked against the REQUEST's Origin and the matching one
+	// is echoed back, because Access-Control-Allow-Origin names exactly one
+	// origin — a browser rejects a list, and sending the whole allowlist would
+	// publish it to every caller besides.
+	AllowOrigins  []string
 	AllowMethods  []string // Default: GET,POST,PUT,DELETE,PATCH,OPTIONS
 	AllowHeaders  []string // Default: Content-Type,Authorization,X-Request-Id
 	ExposeHeaders []string
@@ -118,12 +125,31 @@ func CORS(cfg CORSConfig) zip.Handler {
 	if len(cfg.AllowHeaders) == 0 {
 		cfg.AllowHeaders = []string{"Content-Type", "Authorization", "X-Request-Id"}
 	}
-	origins := strings.Join(cfg.AllowOrigins, ",")
+	allowed := make(map[string]bool, len(cfg.AllowOrigins))
+	anyOrigin := false
+	for _, o := range cfg.AllowOrigins {
+		if o == "*" {
+			anyOrigin = true
+		}
+		allowed[o] = true
+	}
 	methods := strings.Join(cfg.AllowMethods, ",")
 	headers := strings.Join(cfg.AllowHeaders, ",")
 	expose := strings.Join(cfg.ExposeHeaders, ",")
 	return func(c *zip.Ctx) error {
-		c.SetHeader("Access-Control-Allow-Origin", origins)
+		// "*" is the wildcard answer, except alongside credentials, where the
+		// spec forbids it — there the echoed origin is the only correct answer,
+		// and an unlisted origin gets no header at all rather than a wrong one.
+		origin := c.Header("Origin")
+		switch {
+		case anyOrigin && !cfg.AllowCreds:
+			c.SetHeader("Access-Control-Allow-Origin", "*")
+		case origin != "" && (anyOrigin || allowed[origin]):
+			c.SetHeader("Access-Control-Allow-Origin", origin)
+			// The answer depends on the request's Origin, so a cache that
+			// ignored that would serve one origin's header to another.
+			c.SetHeader("Vary", "Origin")
+		}
 		c.SetHeader("Access-Control-Allow-Methods", methods)
 		c.SetHeader("Access-Control-Allow-Headers", headers)
 		if expose != "" {
@@ -133,7 +159,9 @@ func CORS(cfg CORSConfig) zip.Handler {
 			c.SetHeader("Access-Control-Allow-Credentials", "true")
 		}
 		if cfg.MaxAge > 0 {
-			c.SetHeader("Access-Control-Max-Age", time.Duration(cfg.MaxAge).String())
+			// Seconds, as a count. time.Duration(n).String() rendered the field
+			// as NANOSECONDS — a MaxAge of 3600 went out as "3.6µs".
+			c.SetHeader("Access-Control-Max-Age", strconv.Itoa(cfg.MaxAge))
 		}
 		if c.Method() == "OPTIONS" {
 			return c.NoContent(204)
