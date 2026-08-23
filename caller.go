@@ -122,6 +122,23 @@ func requestOf(ctx context.Context) *fasthttp.RequestCtx {
 	return in.rc
 }
 
+// Header reads one header of the request behind a handler's context, and "" when
+// there is no request behind it — a frame that arrived over ZAP, a command, a
+// background job.
+//
+// It exists for the caller that has to REACH another service over HTTP on this
+// caller's behalf and therefore needs the credential the caller presented, which
+// [CallerOf] deliberately does not carry: Caller is the identity a request was
+// resolved TO, and handing that back would let a service mint its own answer to
+// the question it was supposed to ask.
+func Header(ctx context.Context, name string) string {
+	get := headerOf(ctx)
+	if get == nil {
+		return ""
+	}
+	return get(name)
+}
+
 // headerOf is the declared-header reader an op's invoke seam takes, resolved
 // from the context rather than from a transport's own request object.
 //
