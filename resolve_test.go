@@ -528,3 +528,179 @@ func TestAHostCanMountTheGraphAtItsOwnAddress(t *testing.T) {
 		}
 	}
 }
+
+// A deployment that answers with many processes has ONE surface. These pin the
+// seam that lets a host describe and serve that surface without a second GraphQL
+// implementation: the schema and the answer come from elsewhere, everything else
+// — parsing, variables, fragments, directives, projection — is the same code a
+// local graph runs.
+
+func foreignApp(t *testing.T, r Resolver) *App {
+	t.Helper()
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	// One local op, so the app is a real one; the foreign fields are not in it.
+	Get(app, "/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) {
+		return &resUser{ID: "local"}, nil
+	}, WithOperationID("local"))
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	app.MountGraphFor("/v1/fleet", func() string {
+		return "type Query {\n  farUser(id: String!): FarUser\n}\n\ntype FarUser {\n  id: String\n  email: String\n}\n"
+	}, r)
+	return app
+}
+
+func askAt(t *testing.T, app *App, path, query string, vars ...map[string]any) resReply {
+	t.Helper()
+	var v map[string]any
+	if len(vars) > 0 {
+		v = vars[0]
+	}
+	body, _ := json.Marshal(GraphRequest{Query: query, Variables: v})
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	var out resReply
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("reply is not JSON (%s): %v", raw, err)
+	}
+	out.code = resp.StatusCode
+	return out
+}
+
+func TestAForeignFieldIsResolvedAndProjected(t *testing.T) {
+	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+		return map[string]any{"id": args["id"], "email": "far@example.com", "secret": "no"}, nil
+	})
+	r := askAt(t, app, "/v1/fleet", `{ farUser(id: "u1") { id email } }`)
+	if len(r.Errors) != 0 {
+		t.Fatalf("unexpected errors: %s", r.messages())
+	}
+	got, _ := r.Data["farUser"].(map[string]any)
+	if got["id"] != "u1" || got["email"] != "far@example.com" {
+		t.Fatalf("the resolver's answer did not survive: %#v", got)
+	}
+	// A selection is still a FILTER, even with nothing declaring the shape.
+	if _, leaked := got["secret"]; leaked {
+		t.Fatalf("a field nobody asked for was returned: %#v", got)
+	}
+}
+
+// ★ The resolver is told which operation selected the field, because this app has
+// no registry entry to check a write against — the rule that a write is not
+// reachable as a read has to be enforceable where the knowledge is.
+func TestAForeignResolverIsToldTheOperationKind(t *testing.T) {
+	var kinds []string
+	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+		kinds = append(kinds, kind)
+		if kind != "mutation" {
+			return nil, errors.New("that field is a write and this is a query")
+		}
+		return map[string]any{"id": "ok"}, nil
+	})
+
+	r := askAt(t, app, "/v1/fleet", `query { farUser(id: "u1") { id } }`)
+	if len(r.Errors) == 0 {
+		t.Fatalf("the resolver could not refuse a write selected as a read: %#v", r.Data)
+	}
+	if len(kinds) == 0 || kinds[0] != "query" {
+		t.Fatalf("the resolver was not told the kind: %#v", kinds)
+	}
+	m := askAt(t, app, "/v1/fleet", `mutation { farUser(id: "u1") { id } }`)
+	if len(m.Errors) != 0 {
+		t.Fatalf("the same field refused under mutation too: %s", m.messages())
+	}
+}
+
+// Variables, aliases and nesting are the executor's, not the resolver's — the
+// resolver sees plain arguments and answers a plain value.
+func TestAForeignResolverSeesResolvedArguments(t *testing.T) {
+	var seen map[string]any
+	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+		seen = args
+		return map[string]any{"id": "x", "boss": map[string]any{"id": "y", "email": "b@e"}}, nil
+	})
+	r := askAt(t, app, "/v1/fleet", `query F($who: String!) { a: farUser(id: $who) { boss { id } } }`,
+		map[string]any{"who": "u9"})
+	if seen["id"] != "u9" {
+		t.Fatalf("the variable did not reach the resolver: %#v", seen)
+	}
+	boss, _ := r.Data["a"].(map[string]any)["boss"].(map[string]any)
+	if boss["id"] != "y" {
+		t.Fatalf("a nested selection was not projected: %#v", r.Data)
+	}
+	if _, leaked := boss["email"]; leaked {
+		t.Fatalf("an unselected nested field came back: %#v", boss)
+	}
+}
+
+// With no Go type there is nothing to tell a typo from an empty field, so an
+// absent field is null rather than an invented error. (A LOCAL field still names
+// it — see TestAFieldTheTypeDoesNotHaveIsNamed.)
+func TestAnAbsentForeignFieldIsNullNotAnError(t *testing.T) {
+	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+		return map[string]any{"id": "x"}, nil
+	})
+	r := askAt(t, app, "/v1/fleet", `{ farUser(id: "u1") { id email } }`)
+	if len(r.Errors) != 0 {
+		t.Fatalf("an absent field was reported as an error: %s", r.messages())
+	}
+	got, _ := r.Data["farUser"].(map[string]any)
+	if got["email"] != nil {
+		t.Fatalf("want null for the absent field, got %#v", got["email"])
+	}
+}
+
+// A composed schema changes as the deployment does, so it is rendered per request
+// rather than captured at mount.
+func TestTheForeignSchemaIsRenderedPerRequest(t *testing.T) {
+	n := 0
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	Get(app, "/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) { return nil, nil },
+		WithOperationID("local"))
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	app.MountGraphFor("/v1/fleet", func() string {
+		n++
+		return "type Query {\n  n" + strings.Repeat("x", n) + ": String\n}\n"
+	}, nil)
+
+	first, _ := io.ReadAll(mustGet(t, app, "/v1/fleet"))
+	second, _ := io.ReadAll(mustGet(t, app, "/v1/fleet"))
+	if string(first) == string(second) {
+		t.Fatalf("the schema was captured at mount, not rendered per request:\n%s", first)
+	}
+}
+
+func mustGet(t *testing.T, app *App, path string) io.Reader {
+	t.Helper()
+	resp, err := app.Fiber().Test(httptest.NewRequest(http.MethodGet, path, nil))
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return bytes.NewReader(b)
+}
+
+// The local graph is unchanged by any of this: same app, same door, same answer.
+func TestTheLocalGraphStillAnswers(t *testing.T) {
+	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+		return nil, errors.New("should not be asked")
+	})
+	app.MountGraph("/v1/own")
+	r := askAt(t, app, "/v1/own", `{ local(id: "x") { id } }`)
+	if len(r.Errors) != 0 {
+		t.Fatalf("the local graph broke: %s", r.messages())
+	}
+	if r.Data["local"].(map[string]any)["id"] != "local" {
+		t.Fatalf("local op did not run: %#v", r.Data)
+	}
+}
