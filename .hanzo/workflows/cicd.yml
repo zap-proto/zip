@@ -9,7 +9,11 @@ on:
   pull_request:
 jobs:
   cicd:
+    # No runner override. The fleet carries org-prefixed labels for hanzo,
+    # hanzoai, lux, zoo, pars, zen and luxfi and NONE for zap-proto, so asking
+    # for zap-proto-build-linux-amd64 asked for a pool that does not exist and
+    # both runs this repo has ever had sat queued with no runner while 27 sat
+    # idle. The default is hanzo-build-linux-amd64, which 28 of 30 carry and
+    # which zap-proto/http already builds on.
     uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
-    with:
-      runner: '["zap-proto-build-linux-amd64"]'
     secrets: inherit
