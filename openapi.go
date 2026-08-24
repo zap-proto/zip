@@ -163,11 +163,16 @@ func (a *App) buildOpenAPI() map[string]any {
 		// live in, and an example that only survives for methods with a body is
 		// an example missing from every GET and DELETE in the document.
 		example := exampleFields(doc.Example)
-		describe := func(decl map[string]any, field string) map[string]any {
-			if help := fields[inName+"."+field]; help != "" {
+		// Two keys, because the two lookups are filed under different names. Prose
+		// is filed by the GO FIELD, which is what a doc comment documents; an
+		// example is a value in the op's own example document, so it is keyed by
+		// the name that value carries on the WIRE. They coincide for most
+		// parameters and do not for a wildcard, whose wire name is fiber's *N.
+		describe := func(decl map[string]any, docField, wire string) map[string]any {
+			if help := fields[inName+"."+docField]; help != "" {
 				decl["description"] = help
 			}
-			if v, ok := example[field]; ok {
+			if v, ok := example[wire]; ok {
 				decl["example"] = v
 			}
 			return decl
@@ -190,7 +195,7 @@ func (a *App) buildOpenAPI() map[string]any {
 			decls = append(decls, describe(map[string]any{
 				"name": p.Name, "in": "path", "required": true,
 				"schema": url.paramSchema(p.Key),
-			}, p.Key))
+			}, url.docKey(p.Key), p.Key))
 		}
 		// Header parameters. A field carrying `header:"X-Foo"` is a REQUEST FACT
 		// the op declared, so the document names it — that is what makes reading
@@ -204,7 +209,7 @@ func (a *App) buildOpenAPI() map[string]any {
 			decls = append(decls, describe(map[string]any{
 				"name": h.header, "in": "header", "required": h.required,
 				"schema": h.schema,
-			}, h.field))
+			}, h.field, h.field))
 		}
 
 		// Query parameters. A bodyless method binds its input from the URL
@@ -221,7 +226,7 @@ func (a *App) buildOpenAPI() map[string]any {
 				decls = append(decls, describe(map[string]any{
 					"name": f.name, "in": "query", "required": f.required,
 					"schema": f.schema,
-				}, f.name))
+				}, url.docKey(f.name), f.name))
 			}
 		}
 		if len(decls) > 0 {
@@ -443,9 +448,15 @@ func hasRequestBody(op *registeredOp) bool {
 }
 
 // urlField is one URL-bindable input field: the name a caller writes in the URL,
-// the schema of the value, and whether the handler refuses to run without it.
+// the Go field it binds to, the schema of the value, and whether the handler
+// refuses to run without it.
 type urlField struct {
-	name     string
+	name string
+	// field is the name the field carries on the WIRE, which is the key zipdoc
+	// files its doc comment under. It is not always the URL name — a wildcard
+	// binds under fiber's *N — so looking prose up by the URL name finds nothing
+	// for exactly the segment that carries the address.
+	field    string
 	schema   map[string]any
 	required bool
 }
@@ -483,6 +494,7 @@ func urlFields(t reflect.Type) urlFieldList {
 			reflect.Float32, reflect.Float64:
 			out = append(out, urlField{
 				name:   name,
+				field:  jsonFieldName(f),
 				schema: schemaOf(ft, nil, nil),
 				// The same `validate:"required"` that makes a body field
 				// required in its schema makes a URL-borne one required in its
@@ -498,6 +510,20 @@ func urlFields(t reflect.Type) urlFieldList {
 }
 
 type urlFieldList []urlField
+
+// docKey is the wire name of the field bound under the given URL name, which is
+// the key zipdoc files its doc comment under. The two differ only where a `url:`
+// tag renames the binding — a wildcard's *N being the case that matters. Falls
+// back to the URL name, which is right whenever they coincide and is all there is
+// to try for a field that carries no wire name at all.
+func (l urlFieldList) docKey(name string) string {
+	for _, f := range l {
+		if strings.EqualFold(f.name, name) && f.field != "" && f.field != "-" {
+			return f.field
+		}
+	}
+	return name
+}
 
 // paramSchema is the schema of the field a URL-borne name binds to, matched the
 // way bindURL matches it. A name the input does not declare is a string: the
