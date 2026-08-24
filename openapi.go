@@ -562,20 +562,31 @@ type pathParam struct {
 // pathParams lists the segments a fiber route pattern matches on, in order —
 // every `:name` and every wildcard.
 //
-// The wildcards are numbered exactly as [Template] numbers them, so a declaration
-// made here lands on the brace written there. It used to read `:name` alone, which
-// was right while a wildcard could not be a typed op at all: once one could, the
-// path carried a {wildcardN} that nothing declared, and the value the address IS
-// went undeclared or arrived as a query parameter.
+// The two names a wildcard goes by are counted on DIFFERENT sequences, which is
+// the whole reason both are carried. The document's name is positional, exactly as
+// [Template] numbers it, so a declaration made here lands on the brace written
+// there. The router's key is fiber's own, and fiber counts each marker separately
+// and keeps the marker in the key — measured: `/p/+/q/*` matches under `+1` and
+// `*1`, and `/p/+/q/+` under `+1` and `+2`. One counter for both would name a `+`
+// route's capture `*1`, which binds nothing and suppresses no query parameter.
+//
+// It read `:name` alone until a wildcard could be a typed op: after that the path
+// carried a {wildcardN} nothing declared, and the value the address IS went
+// undeclared or arrived as a query parameter.
 func pathParams(path string) []pathParam {
 	var out []pathParam
-	stars := 0
+	seen := map[byte]int{}
+	all := 0
 	for i, seg := range strings.Split(path, "/") {
 		switch {
 		case seg == "*" || seg == "+":
-			stars++
-			n := strconv.Itoa(stars)
-			out = append(out, pathParam{Name: "wildcard" + n, Key: "*" + n, At: i})
+			all++
+			seen[seg[0]]++
+			out = append(out, pathParam{
+				Name: "wildcard" + strconv.Itoa(all),
+				Key:  seg + strconv.Itoa(seen[seg[0]]),
+				At:   i,
+			})
 		case len(seg) > 1 && seg[0] == ':':
 			name := paramName(seg)
 			out = append(out, pathParam{Name: name, Key: name, At: i})

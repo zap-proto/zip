@@ -232,3 +232,100 @@ func TestAWildcardIsDECLAREDAndNotJustSpelled(t *testing.T) {
 	// parameter is looked up by the ROUTER's key, which differ for exactly this
 	// segment — and the place that can measure it is a package with real ops.
 }
+
+// TestTheRouterKeyIsFibersOwn pins the half of pathParam that cannot be reasoned
+// out: fiber counts each wildcard marker on its OWN sequence and keeps the marker
+// in the key, so `+` matches under `+1` and never `*1`.
+//
+// It is measured against the ROUTER rather than asserted, because it is a fact
+// about fiber and not about zip. A single counter shared by both markers reads as
+// obviously right and names a `+` route's capture `*1` — which binds nothing, and
+// leaves the phantom query parameter in place because the suppression looks under
+// a key that is not there.
+func TestTheRouterKeyIsFibersOwn(t *testing.T) {
+	for _, c := range []struct {
+		pattern string
+		want    []string // the Key of each param, in order
+	}{
+		{"/v1/star/*", []string{"*1"}},
+		{"/v1/plus/+", []string{"+1"}},
+		{"/v1/two/*/and/*", []string{"*1", "*2"}},
+		{"/v1/p/+/q/+", []string{"+1", "+2"}},
+		{"/v1/mix/+/and/*", []string{"+1", "*1"}},
+		{"/v1/named/:id/then/*", []string{"id", "*1"}},
+	} {
+		var got []string
+		for _, p := range pathParams(c.pattern) {
+			got = append(got, p.Key)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("pathParams(%q) keys = %v, want %v", c.pattern, got, c.want)
+		}
+	}
+}
+
+// TestTheDocumentNameIsPositional is the other sequence, and the one that has to
+// agree with [Template] — a declaration is looked up by the brace the path
+// carries, so the two counters must not be confused for each other.
+func TestTheDocumentNameIsPositional(t *testing.T) {
+	const pattern = "/v1/mix/+/and/*"
+	var got []string
+	for _, p := range pathParams(pattern) {
+		got = append(got, p.Name)
+	}
+	if want := []string{"wildcard1", "wildcard2"}; !slices.Equal(got, want) {
+		t.Errorf("pathParams(%q) names = %v, want %v", pattern, got, want)
+	}
+	if tpl := Template(pattern); tpl != "/v1/mix/{wildcard1}/and/{wildcard2}" {
+		t.Errorf("Template disagrees with the declaration: %q", tpl)
+	}
+}
+
+// plusIn binds a `+` route's capture, whose key is "+1" and not "*1".
+type plusIn struct {
+	// Secret is the whole remaining path, so a secret under a subpath addresses
+	// intact.
+	Secret string `json:"secret" url:"+1"`
+}
+
+// TestAPlusWildcardIsDeclaredToo is the `*` case one marker over, and it is
+// separate because the two are counted on different sequences: a shared counter
+// names a `+` capture "*1", which binds nothing, so the field falls through to the
+// query list and the path variable stays undeclared. Both symptoms at once, from
+// one wrong character.
+func TestAPlusWildcardIsDeclaredToo(t *testing.T) {
+	app := New(Config{AppName: "plus", DisableStartupMessage: true})
+	Get(app.Group("/v1/secrets"), "/+", func(context.Context, *plusIn) (*struct{}, error) { return nil, nil })
+
+	raw, err := json.Marshal(app.OpenAPISpec())
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			Parameters []struct {
+				Name string `json:"name"`
+				In   string `json:"in"`
+			} `json:"parameters"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal spec: %v", err)
+	}
+	op, served := doc.Paths["/v1/secrets/{wildcard1}"]["get"]
+	if !served {
+		t.Fatalf("the + op is not published at its template name; the document carries %v",
+			slices.Sorted(maps.Keys(doc.Paths)))
+	}
+	var declared bool
+	for _, p := range op.Parameters {
+		if p.In == "query" {
+			t.Errorf("the + capture leaked into the query as %q — the suppression looked under a "+
+				"key fiber does not use", p.Name)
+		}
+		declared = declared || (p.Name == "wildcard1" && p.In == "path")
+	}
+	if !declared {
+		t.Errorf("the + path variable is not declared; the op declares %v", op.Parameters)
+	}
+}
