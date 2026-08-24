@@ -248,8 +248,19 @@ type App struct {
 
 	// authorizer, when set via Authorize, runs at every typed op's invoke seam
 	// on the decoded In — the one place REST and MCP both funnel the value the
-	// handler will act on. nil leaves every decoded request unauthorized.
+	// handler will act on. nil defers to [App.over], and nil there too leaves
+	// every decoded request unauthorized. See [App.rule].
 	authorizer Authorizer
+
+	// over is the App whose rule this one answers to: the nearest definition
+	// ABOVE it in the composition that declared an Authorizer. Settled at build
+	// by [adopt], which is the only place that knows — a definition is written
+	// without knowing what will include it, and what includes it is what decides
+	// whose rule its ops serve under.
+	//
+	// Atomic because a build runs while the previous generation serves, the same
+	// reason a plugin learns its owner atomically.
+	over atomic.Pointer[App]
 
 	srvMu sync.Mutex
 

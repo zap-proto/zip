@@ -486,3 +486,129 @@ func pathKeys(m map[string]map[string]any) []string {
 	}
 	return out
 }
+
+// ── the rule over a composed definition ──────────────────────────────────────
+
+// TestNest_HostRuleReachesAComposedChild.
+//
+// A definition composed with Use answers at the HOST's addresses, at the host's
+// /mcp, at the host's call plane, in the host's graph and to the host's CLI.
+// They are the host's ops, so the host's rule is the rule over them.
+//
+// Before adopt they were not: registerTyped read the rule off the App the op was
+// DECLARED on, which is the child, and a child that declares none was open on
+// every one of those seams while the host's own ops were closed. Nothing about
+// the surface looked different, which is the whole difficulty — the tools listed,
+// the paths answered, the document published, and the rule the host installed was
+// consulted zero times.
+//
+// Driven over REST and over the two BY-NAME seams, because by-name is how MCP and
+// the call plane address an op and neither passes through a route.
+func TestNest_HostRuleReachesAComposedChild(t *testing.T) {
+	child := childApp(t, "iam", nil) // declares NO rule of its own
+	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+
+	var seen []string
+	host.Authorize(func(_ context.Context, op zip.Op, _ any) error {
+		seen = append(seen, op.OperationID)
+		return zip.ErrForbidden("refused by host")
+	})
+	host.Use(child)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if code, b := probe(t, host, "/v1/iam/users/u-1"); code != 403 {
+		t.Errorf("REST: %d %s — the host's rule did not reach the composed op", code, b)
+	}
+	out := rpcLocal(t, host,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iam_get_user","arguments":{"id":"u-1"}}}`)
+	if !strings.Contains(out, "refused by host") {
+		t.Errorf("MCP: the host's rule did not reach the composed op: %s", out)
+	}
+	in, err := zapenc.Marshal(&userIn{ID: "u-1"}) // the call plane's body is ZAP and only ZAP
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	plane := string(postZAP(t, host, zip.CallPath+"iam_get_user", in))
+	if !strings.Contains(plane, "refused by host") {
+		t.Errorf("call plane: the host's rule did not reach the composed op: %s", plane)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("the rule ran %d times, want 3 (REST + MCP + call plane): %v", len(seen), seen)
+	}
+}
+
+// TestNest_AChildRuleStillWins pairs with the test above: adopting a rule for a
+// definition that declares none must not overwrite one that declares its own.
+// Tighter wins, looser is not expressible.
+func TestNest_AChildRuleStillWins(t *testing.T) {
+	child := childApp(t, "iam", nil)
+	child.Authorize(func(context.Context, zip.Op, any) error { return zip.ErrForbidden("refused by iam") })
+	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	host.Authorize(func(context.Context, zip.Op, any) error { return nil }) // would allow
+	host.Use(child)
+	if err := host.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if code, b := probe(t, host, "/v1/iam/users/u-1"); code != 403 || !strings.Contains(b, "refused by iam") {
+		t.Errorf("REST: %d %s — the child's own rule must win over the host's", code, b)
+	}
+}
+
+// TestNest_TwoRulesThatDisagreeRefuseToCompose.
+//
+// One definition, two includers, each declaring a rule of its own. A composed
+// definition's ops are ONE closure — Use references it, it does not copy it — so
+// there is no implementation in which those ops answer to both rules. Keeping
+// whichever composition ran last would be a coin toss between them, and half the
+// time the coin lands on the looser one, leaving a surface that reads as governed
+// and is not.
+//
+// So the build stops and names both, which is the only answer that cannot be too
+// permissive and the only one anybody can see.
+func TestNest_TwoRulesThatDisagreeRefuseToCompose(t *testing.T) {
+	child := childApp(t, "iam", nil)
+	strict := zip.New(zip.Config{AppName: "strict", DisableStartupMessage: true})
+	strict.Authorize(func(context.Context, zip.Op, any) error { return zip.ErrForbidden("no") })
+	loose := zip.New(zip.Config{AppName: "loose", DisableStartupMessage: true})
+	loose.Authorize(func(context.Context, zip.Op, any) error { return nil })
+
+	strict.Use(child)
+	if err := strict.Build(); err != nil {
+		t.Fatalf("the first composition is fine: %v", err)
+	}
+	loose.Use(child)
+	err := loose.Build()
+	if err == nil {
+		t.Fatal("a definition composed under two rules that disagree must not build")
+	}
+	for _, want := range []string{"iam", "strict", "loose"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %q so it can be acted on: %v", want, err)
+		}
+	}
+}
+
+// TestNest_OneRuleAndNoRuleIsNotADisagreement. A definition composed under a rule
+// in one place and under nothing in another takes the rule: nothing was said in
+// the second place, so there is nothing to disagree with, and taking it is the
+// reading that cannot be too permissive.
+func TestNest_OneRuleAndNoRuleIsNotADisagreement(t *testing.T) {
+	child := childApp(t, "iam", nil)
+	open := zip.New(zip.Config{AppName: "open", DisableStartupMessage: true})
+	ruled := zip.New(zip.Config{AppName: "ruled", DisableStartupMessage: true})
+	ruled.Authorize(func(context.Context, zip.Op, any) error { return zip.ErrForbidden("refused by ruled") })
+
+	open.Use(child)
+	if err := open.Build(); err != nil {
+		t.Fatalf("Build open: %v", err)
+	}
+	ruled.Use(child)
+	if err := ruled.Build(); err != nil {
+		t.Fatalf("Build ruled: %v", err)
+	}
+	if code, b := probe(t, ruled, "/v1/iam/users/u-1"); code != 403 {
+		t.Errorf("the declared rule must govern: %d %s", code, b)
+	}
+}

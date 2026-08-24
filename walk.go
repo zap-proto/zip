@@ -536,8 +536,12 @@ func derived(occ []occurrence) error {
 	return errors.Join(errs...)
 }
 
-// verify runs both stages in order over ONE walk. Nothing publishes unless both
-// complete clean.
+// verify runs every stage in order over ONE walk. Nothing publishes unless they
+// all complete clean.
+//
+// [App.Build] asks this BEFORE it renders anything, so a composition that will
+// not serve is returned as an error rather than reached as a panic out of a
+// projection.
 func verify(root *App) error {
 	occ, err := walk(root)
 	if err != nil {
@@ -546,7 +550,10 @@ func verify(root *App) error {
 	if err := structural(occ); err != nil {
 		return err
 	}
-	return derived(occ)
+	if err := derived(occ); err != nil {
+		return err
+	}
+	return adopt(occ)
 }
 
 // routesUnder is the set of definitions with a route ANYWHERE beneath them.

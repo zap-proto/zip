@@ -348,6 +348,11 @@ func (a *App) group(site callsite, prefix string, handlers ...Handler) *App {
 	// (wrapRouter.Group used to return another wrapRouter, so the chain rode
 	// down every level) — an auth seam quietly lost at the second nesting.
 	g.wrap = a.wrap
+	// A group declares no rule of its own, so the one over the app it groups
+	// carries into it — see [adopt], which reads that off the walk rather than
+	// off a link, because the same question has the same answer for a definition
+	// composed by [App.Use] and one mechanism should answer both.
+	//
 	// And for the same reason the error vocabulary: a group of an [OAuth] router
 	// is still inside the RFC 6749 family, and a nested scope that answered its
 	// parent's neighbours' shape would be the same silently-lost property.
