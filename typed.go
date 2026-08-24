@@ -454,7 +454,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		}
 		// Authorize the DECODED input — the exact value the handler will bind — so
 		// the decision cannot diverge from execution. Runs for REST and MCP alike.
-		if auth := app.authorizer; auth != nil {
+		if auth := app.rule(); auth != nil {
 			if err := auth(ctx, meta, in); err != nil {
 				return nil, err
 			}

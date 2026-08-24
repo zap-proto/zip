@@ -86,6 +86,12 @@ func (a *App) build() (*generation, error) {
 	if err := derived(occ); err != nil {
 		return nil, err
 	}
+	// Which rule governs which definition. After both validation stages because
+	// a composition that will not serve has nothing to settle, and before any
+	// projection because an op must know its rule before it can be reached.
+	if err := adopt(occ); err != nil {
+		return nil, err
+	}
 	var n uint64
 	if prev := a.live.Load(); prev != nil {
 		n = prev.n + 1
