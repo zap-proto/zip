@@ -15,5 +15,10 @@ jobs:
     # both runs this repo has ever had sat queued with no runner while 27 sat
     # idle. The default is hanzo-build-linux-amd64, which 28 of 30 carry and
     # which zap-proto/http already builds on.
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
+    # Pinned past v1 deliberately. v1 is at v1.0.89 and this repo needs
+    # v1.0.91, where the fallback registry sign-in warns instead of refusing —
+    # without it the gate dies at a GHCR login for a repo that publishes no
+    # image. hanzoai/ci pins ITSELF to a version for the same reason. Move to
+    # v1 once that tag carries v1.0.91 or later.
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.91
     secrets: inherit
