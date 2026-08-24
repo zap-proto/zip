@@ -91,13 +91,17 @@ func (a *App) buildOpenAPI() map[string]any {
 		// that composes nothing.
 		reg.origin = op.Origin
 
-		path := op.Path
-		// OpenAPI uses {name} for path params; fiber uses :name. Translate.
-		path = strings.ReplaceAll(path, "/:", "/{")
-		if strings.Contains(path, "{") && !strings.Contains(path, "}") {
-			// Was ":name" -> "{name" needs the closing brace.
-			path = closeColonParams(op.Path)
-		}
+		// The document's spelling of the router's pattern, from [Template], which
+		// is the one place that rule lives. This built its own along the way —
+		// replace "/:" with "/{", then repair the missing brace by calling
+		// Template anyway — and the shortcut answered for two shapes it was never
+		// asked about. A path carrying a parameter AND a literal "}" satisfied the
+		// repair's guard without being repaired, so it published "{name" unclosed;
+		// and a wildcard has no "/:" at all, so "*" reached the document verbatim,
+		// which no path template can mean. A caller reading a route table named
+		// that segment one thing and this named it another, and the two resolve as
+		// different operations rather than one address spelled twice.
+		path := Template(op.Path)
 
 		if _, ok := paths[path]; !ok {
 			paths[path] = map[string]any{}
@@ -514,10 +518,6 @@ func colonParams(path string) []string {
 	}
 	return out
 }
-
-// closeColonParams is the document's spelling of a router path — see [Template],
-// which is the same rule under its public name.
-func closeColonParams(path string) string { return Template(path) }
 
 func typeName(t reflect.Type) string {
 	if t == nil {
