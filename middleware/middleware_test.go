@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -56,6 +57,10 @@ func TestCORS_MaxAgeIsSeconds(t *testing.T) {
 }
 
 // ride drives one GET through h and returns the response.
+//
+// It asserts the ROUTE was reached, not merely that headers appeared. A
+// middleware that answered instead of chaining would set every header this file
+// checks and still be broken, and every assertion here would pass.
 func ride(t *testing.T, h zip.Handler, origin string) *http.Response {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "cors", DisableStartupMessage: true})
@@ -69,6 +74,10 @@ func ride(t *testing.T, h zip.Handler, origin string) *http.Response {
 	resp, err := a.Fiber().Test(req)
 	if err != nil {
 		t.Fatalf("GET /x: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok" {
+		t.Fatalf("the route was not reached: body %q, status %d", body, resp.StatusCode)
 	}
 	return resp
 }
