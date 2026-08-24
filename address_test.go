@@ -83,9 +83,40 @@ func TestTemplateIsThePublicSpelling(t *testing.T) {
 		{"/v1/x/:id?", "/v1/x/{id}"},
 		{"/v1/static", "/v1/static"},
 		{"/v1/a/:b/c/:d", "/v1/a/{b}/c/{d}"},
+
+		// A wildcard is a segment too. It is numbered in path order, which is
+		// what lets it share a name with a sibling on another path.
+		{"/v1/dns/*", "/v1/dns/{wildcard1}"},
+		{"/v1/kms/secrets/+", "/v1/kms/secrets/{wildcard1}"},
+		{"/v1/a/*/b/*", "/v1/a/{wildcard1}/b/{wildcard2}"},
+		{"/v1/:org/files/*", "/v1/{org}/files/{wildcard1}"},
+
+		// Only a segment that IS the marker; a literal that merely contains one
+		// is a name, not a wildcard.
+		{"/v1/a+b/c*d", "/v1/a+b/c*d"},
 	} {
 		if got := Template(c.pattern); got != c.want {
 			t.Errorf("Template(%q) = %q, want %q", c.pattern, got, c.want)
+		}
+	}
+}
+
+// TestTemplateAndIDSpellAWildcardTheSameWay is the property that makes the
+// wildcard case above safe rather than merely chosen: [ID] reads the ROUTER's
+// spelling and Template writes the DOCUMENT's, so a consumer holding either must
+// arrive at one operation. Both name the segment wildcardN and both number it in
+// path order, so the two cannot drift into naming one address two things.
+func TestTemplateAndIDSpellAWildcardTheSameWay(t *testing.T) {
+	for _, pattern := range []string{
+		"/v1/dns/*",
+		"/v1/kms/secrets/+",
+		"/v1/a/*/b/*",
+		"/v1/:org/files/*",
+	} {
+		router, doc := ID("GET", pattern), ID("GET", Template(pattern))
+		if router != doc {
+			t.Errorf("ID disagrees about %q: router spelling %q, document spelling %q",
+				pattern, router, doc)
 		}
 	}
 }

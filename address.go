@@ -58,16 +58,32 @@ func Address(pattern string, in any) string {
 // ":id?") and do not survive: they say how a segment is matched, not what it is
 // called, and a document that published them would name a parameter no client
 // ever writes.
+//
+// A WILDCARD IS A SEGMENT TOO, and it becomes "{wildcardN}", numbered in path
+// order. The router's "*" and "+" match greedily where a document's parameter
+// matches one segment, so the name is the closest thing a document can say — but
+// it is not a new judgement here: [ID] already spells a wildcard "wildcardN" and
+// numbers it the same way, so the two agree by construction and an operation id
+// derived from the router's spelling equals one derived from the document's.
+//
+// Returning "*" verbatim, as this did, published a path no document template can
+// mean, and left a caller that reads a route table and a caller that reads the
+// registry disagreeing about the SAME address — which resolves as "no such
+// operation" rather than as a difference of spelling.
 func Template(pattern string) string {
-	if !strings.Contains(pattern, ":") {
+	if !strings.ContainsAny(pattern, ":*+") {
 		return pattern
 	}
 	segments := strings.Split(pattern, "/")
+	stars := 0
 	for i, segment := range segments {
-		if len(segment) < 2 || segment[0] != ':' {
-			continue
+		switch {
+		case segment == "*" || segment == "+":
+			stars++
+			segments[i] = "{wildcard" + strconv.Itoa(stars) + "}"
+		case len(segment) >= 2 && segment[0] == ':':
+			segments[i] = "{" + paramName(segment) + "}"
 		}
-		segments[i] = "{" + paramName(segment) + "}"
 	}
 	return strings.Join(segments, "/")
 }
