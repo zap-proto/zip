@@ -115,7 +115,7 @@ func (a *App) Commands() []Command {
 		doc, has := docFor(op.Method, op.Path)
 		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op
-		c.Args, c.Flags = bindIn(op.InType, colonParams(op.Path), docFields(has, doc), hasBody(op.Method))
+		c.Args, c.Flags = bindIn(op.InType, pathParams(op.Path), docFields(has, doc), hasBody(op.Method))
 		cmds = append(cmds, c)
 	}
 	sortCommands(cmds)
@@ -147,10 +147,12 @@ func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
 // list the document reads. Offering the rest would offer flags the wire cannot
 // carry: a `--tags '["a"]'` on a DELETE marshalled fine, went out as a query
 // value, and was dropped by the binder, so the command silently did nothing.
-func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body bool) ([]Arg, []Flag) {
+func bindIn(in reflect.Type, params []pathParam, fieldDocs map[string]string, body bool) ([]Arg, []Flag) {
 	args := make([]Arg, 0, len(params))
 	for _, p := range params {
-		args = append(args, Arg{Name: p, Help: fieldDocs[typeName(in)+"."+p]})
+		// The argument a person types is the DOCUMENT's name: a wildcard's router
+		// key is *1, which is not something to ask anyone to write.
+		args = append(args, Arg{Name: p.Name, Help: fieldDocs[typeName(in)+"."+p.Name]})
 	}
 	if in == nil {
 		return args, nil
@@ -202,9 +204,9 @@ func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body 
 	return args, flags
 }
 
-func isParam(params []string, name string) bool {
+func isParam(params []pathParam, name string) bool {
 	for _, p := range params {
-		if strings.EqualFold(p, name) {
+		if strings.EqualFold(p.Name, name) || strings.EqualFold(p.Key, name) {
 			return true
 		}
 	}
