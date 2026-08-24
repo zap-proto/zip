@@ -179,15 +179,18 @@ func (a *App) buildOpenAPI() map[string]any {
 		// string while consulting the input for query params described the same
 		// value two different ways depending on which half of the URL it rode in.
 		url := urlFields(op.InType)
-		params := colonParams(op.Path)
+		params := pathParams(op.Path)
 		decls := make([]any, 0, len(params))
 		named := make(map[string]bool, len(params))
 		for _, p := range params {
-			named[strings.ToLower(p)] = true
+			// Both spellings are spoken for, so a field bound under either is not
+			// then described a second time as a query parameter.
+			named[strings.ToLower(p.Name)] = true
+			named[strings.ToLower(p.Key)] = true
 			decls = append(decls, describe(map[string]any{
-				"name": p, "in": "path", "required": true,
-				"schema": url.paramSchema(p),
-			}, p))
+				"name": p.Name, "in": "path", "required": true,
+				"schema": url.paramSchema(p.Key),
+			}, p.Key))
 		}
 		// Header parameters. A field carrying `header:"X-Foo"` is a REQUEST FACT
 		// the op declared, so the document names it — that is what makes reading
@@ -418,8 +421,9 @@ func hasRequestBody(op *registeredOp) bool {
 		return true // the body IS the whole value — a list, a raw message
 	}
 	named := map[string]bool{}
-	for _, p := range colonParams(op.Path) {
-		named[strings.ToLower(p)] = true
+	for _, p := range pathParams(op.Path) {
+		named[strings.ToLower(p.Name)] = true
+		named[strings.ToLower(p.Key)] = true
 	}
 	// wireFields, not NumField: an embedded struct's fields ARE in the body, and
 	// asking the outer type alone declared no body for an input whose own fields
@@ -508,12 +512,47 @@ func (l urlFieldList) paramSchema(name string) map[string]any {
 	return map[string]any{"type": "string"}
 }
 
-// colonParams lists the ":name" params of a fiber route pattern, in order.
-func colonParams(path string) []string {
-	var out []string
-	for _, p := range strings.Split(path, "/") {
-		if strings.HasPrefix(p, ":") && len(p) > 1 {
-			out = append(out, p[1:])
+// pathParam is one segment the ROUTE matches on, under both the names it goes by.
+//
+// The two differ for a wildcard and only for a wildcard: the document calls the
+// segment wildcardN, because that is what [Template] writes into the path and a
+// template variable must be declared under the name the path uses; the router
+// calls it *N, which is fiber's own capture key and therefore what an input's
+// `url:` tag has to say to bind it. Carrying both together is what stops one being
+// mistaken for the other — declared under Key, the document would name a parameter
+// no path contains; bound under Name, the input would bind nothing.
+type pathParam struct {
+	// Name is the document's spelling, and the name the parameter is declared by.
+	Name string
+	// Key is the router's spelling, and what `url:` binds against.
+	Key string
+	// At is which segment of the pattern this is, so a caller substituting a
+	// value into the address replaces the segment it found rather than searching
+	// for a spelling — the only one that works for a wildcard, whose segment is
+	// "*" and matches no name.
+	At int
+}
+
+// pathParams lists the segments a fiber route pattern matches on, in order —
+// every `:name` and every wildcard.
+//
+// The wildcards are numbered exactly as [Template] numbers them, so a declaration
+// made here lands on the brace written there. It used to read `:name` alone, which
+// was right while a wildcard could not be a typed op at all: once one could, the
+// path carried a {wildcardN} that nothing declared, and the value the address IS
+// went undeclared or arrived as a query parameter.
+func pathParams(path string) []pathParam {
+	var out []pathParam
+	stars := 0
+	for i, seg := range strings.Split(path, "/") {
+		switch {
+		case seg == "*" || seg == "+":
+			stars++
+			n := strconv.Itoa(stars)
+			out = append(out, pathParam{Name: "wildcard" + n, Key: "*" + n, At: i})
+		case len(seg) > 1 && seg[0] == ':':
+			name := paramName(seg)
+			out = append(out, pathParam{Name: name, Key: name, At: i})
 		}
 	}
 	return out

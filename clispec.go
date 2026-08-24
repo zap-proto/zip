@@ -40,7 +40,7 @@ func CommandsFromSpec(spec []byte) ([]Command, error) {
 			if c.Summary == "" {
 				c.Summary = firstSentence(op.Description)
 			}
-			c.Args, c.Flags = doc.bind(op, colonParams(route))
+			c.Args, c.Flags = doc.bind(op, pathParams(route))
 			c.Example = op.example()
 			cmds = append(cmds, c)
 		}
@@ -52,14 +52,14 @@ func CommandsFromSpec(spec []byte) ([]Command, error) {
 // bind splits one spec operation into positional args and flags, the same split
 // App.Commands makes over the Go type: path parameters address, everything else
 // modifies.
-func (d specDoc) bind(op specOp, params []string) ([]Arg, []Flag) {
+func (d specDoc) bind(op specOp, params []pathParam) ([]Arg, []Flag) {
 	help := map[string]string{}
 	for _, p := range op.Parameters {
 		help[p.Name] = p.Description
 	}
 	args := make([]Arg, 0, len(params))
 	for _, p := range params {
-		args = append(args, Arg{Name: p, Help: help[p]})
+		args = append(args, Arg{Name: p.Name, Help: help[p.Name]})
 	}
 
 	var flags []Flag

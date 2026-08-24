@@ -188,15 +188,23 @@ func remoteInvoke(client Client, host, method, pattern string) func(context.Cont
 		// The URL is the addressing authority, so a path parameter comes OUT of
 		// the arguments and goes INTO the path — sending it in both places would
 		// let the body contradict the address.
-		url := pattern
-		for _, name := range colonParams(pattern) {
-			v, ok := args[name]
+		// Substituted by SEGMENT rather than by name: a wildcard's segment is "*",
+		// which is not ":name" and so cannot be replaced by spelling one. The value
+		// may arrive under either name the segment goes by.
+		segs := strings.Split(pattern, "/")
+		for _, p := range pathParams(pattern) {
+			v, ok := args[p.Name]
 			if !ok {
-				return nil, ErrBadRequest("missing path parameter: " + name)
+				v, ok = args[p.Key]
 			}
-			url = strings.ReplaceAll(url, ":"+name, urlEscape(toStr(v)))
-			delete(args, name)
+			if !ok {
+				return nil, ErrBadRequest("missing path parameter: " + p.Name)
+			}
+			segs[p.At] = urlEscape(toStr(v))
+			delete(args, p.Name)
+			delete(args, p.Key)
 		}
+		url := strings.Join(segs, "/")
 
 		var body []byte
 		if len(args) > 0 {

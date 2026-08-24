@@ -161,3 +161,61 @@ func TestTheSpecSpellsAWildcardTheDocumentsWay(t *testing.T) {
 		}
 	}
 }
+
+// TestAWildcardIsDECLAREDAndNotJustSpelled is the half naming the segment does
+// not buy, and the half that decides whether the operation is usable.
+//
+// OpenAPI requires every variable in a path template to be declared as a path
+// parameter. Writing {wildcard1} into the path without declaring it leaves the
+// one value the address IS undeclared — and worse than undeclared, because the
+// field binding it is then described as a QUERY parameter named *1. A client
+// generated from that has no argument for the address, sends the braces
+// literally, and gets a 404 from the very route it was generated for.
+//
+// So this asks for the declaration, and asks that the router's own capture key
+// does NOT appear as a query parameter. Both halves matter: the first was
+// missing, and the second is how its absence showed up.
+func TestAWildcardIsDECLAREDAndNotJustSpelled(t *testing.T) {
+	app := New(Config{AppName: "declared", DisableStartupMessage: true})
+	type in struct {
+		Ref string `json:"-" url:"*1"`
+	}
+	Get(app.Group("/v1/probe"), "/*", func(context.Context, *in) (*struct{}, error) { return nil, nil })
+
+	raw, err := json.Marshal(app.OpenAPISpec())
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			Parameters []struct {
+				Name string `json:"name"`
+				In   string `json:"in"`
+				Req  bool   `json:"required"`
+			} `json:"parameters"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal spec: %v", err)
+	}
+
+	op, served := doc.Paths["/v1/probe/{wildcard1}"]["get"]
+	if !served {
+		t.Fatalf("the wildcard op is not published at its template name; the document carries %v",
+			slices.Sorted(maps.Keys(doc.Paths)))
+	}
+	var declared bool
+	for _, p := range op.Parameters {
+		if p.In == "query" {
+			t.Errorf("the capture is published as a QUERY parameter %q — it is the address, not a "+
+				"filter, so a generated client would have no argument for the path", p.Name)
+		}
+		if p.Name == "wildcard1" && p.In == "path" && p.Req {
+			declared = true
+		}
+	}
+	if !declared {
+		t.Errorf("the path carries {wildcard1} and declares no path parameter for it; it declares %v",
+			op.Parameters)
+	}
+}
