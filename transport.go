@@ -232,6 +232,18 @@ func (a *App) listenOn(addrs []string) error {
 		// answers. Appended to servers so it shuts down with the rest, and NOT
 		// bound: it is the same app at a derived address, not a second place to
 		// find it.
+		// The sibling's address is DERIVED, so its length is not something the
+		// caller chose and not something it can see. Asked here, where an error can
+		// still be returned, because the alternative is what it used to be: the bind
+		// fails inside the transport as "invalid argument", which names neither the
+		// limit nor the length, and reads like a broken socket rather than a long
+		// path. load.go asks the same question of the same address before it execs a
+		// child; this is the other half of one rule.
+		if to := plain(addr); to != "" {
+			if err := socketFits(to); err != nil {
+				return fmt.Errorf("zip: the upgrade sibling cannot be bound: %w", err)
+			}
+		}
 		if p := a.plainSibling(addr, h); p != nil {
 			servers = append(servers, p)
 		}
