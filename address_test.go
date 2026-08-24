@@ -1,6 +1,12 @@
 package zip
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"maps"
+	"slices"
+	"testing"
+)
 
 // THE INVERSE IS TESTED AGAINST THE THING IT INVERTS, not against a table of
 // strings someone wrote down. bindURL is the rule; Address has to be that rule
@@ -117,6 +123,41 @@ func TestTemplateAndIDSpellAWildcardTheSameWay(t *testing.T) {
 		if router != doc {
 			t.Errorf("ID disagrees about %q: router spelling %q, document spelling %q",
 				pattern, router, doc)
+		}
+	}
+}
+
+// TestTheSpecSpellsAWildcardTheDocumentsWay asks the DOCUMENT, not Template.
+// Template being right buys nothing on its own: buildOpenAPI used to translate
+// the path itself and only fall back to Template when its own attempt left an
+// unclosed brace, so a wildcard — which has no "/:" to replace — never reached
+// Template at all and "*" was published verbatim. Fixing the rule and fixing the
+// caller are two changes, and only this one can tell.
+func TestTheSpecSpellsAWildcardTheDocumentsWay(t *testing.T) {
+	app := New(Config{AppName: "spelling", DisableStartupMessage: true})
+	g := app.Group("/v1/probe")
+	Get(g, "/*", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
+	Get(g, "/traces/:traceId", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
+
+	// Read it the way a consumer does — through JSON — rather than by asserting a
+	// Go type onto it. A wrong assertion yields nil, and nil has no keys, so the
+	// test would report the document empty whatever the document says.
+	raw, err := json.Marshal(app.OpenAPISpec())
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	var doc struct {
+		Paths map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal spec: %v", err)
+	}
+	if len(doc.Paths) == 0 {
+		t.Fatal("the document carries no paths at all — this test would pass vacuously")
+	}
+	for _, want := range []string{"/v1/probe/{wildcard1}", "/v1/probe/traces/{traceId}"} {
+		if _, ok := doc.Paths[want]; !ok {
+			t.Errorf("the document does not carry %q; it carries %v", want, slices.Sorted(maps.Keys(doc.Paths)))
 		}
 	}
 }
