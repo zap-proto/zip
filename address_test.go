@@ -175,12 +175,18 @@ func TestTheSpecSpellsAWildcardTheDocumentsWay(t *testing.T) {
 // So this asks for the declaration, and asks that the router's own capture key
 // does NOT appear as a query parameter. Both halves matter: the first was
 // missing, and the second is how its absence showed up.
+// wildcardIn is at package scope deliberately: zipdoc indexes declared types, so
+// a type local to a test function carries no prose and the description half below
+// could never pass — which would read as a defect in the lookup rather than in the
+// fixture.
+type wildcardIn struct {
+	// Ref is the whole remaining path, so a slashed reference addresses intact.
+	Ref string `json:"ref" url:"*1"`
+}
+
 func TestAWildcardIsDECLAREDAndNotJustSpelled(t *testing.T) {
 	app := New(Config{AppName: "declared", DisableStartupMessage: true})
-	type in struct {
-		Ref string `json:"-" url:"*1"`
-	}
-	Get(app.Group("/v1/probe"), "/*", func(context.Context, *in) (*struct{}, error) { return nil, nil })
+	Get(app.Group("/v1/probe"), "/*", func(context.Context, *wildcardIn) (*struct{}, error) { return nil, nil })
 
 	raw, err := json.Marshal(app.OpenAPISpec())
 	if err != nil {
@@ -192,6 +198,7 @@ func TestAWildcardIsDECLAREDAndNotJustSpelled(t *testing.T) {
 				Name string `json:"name"`
 				In   string `json:"in"`
 				Req  bool   `json:"required"`
+				Desc string `json:"description"`
 			} `json:"parameters"`
 		} `json:"paths"`
 	}
@@ -218,4 +225,10 @@ func TestAWildcardIsDECLAREDAndNotJustSpelled(t *testing.T) {
 		t.Errorf("the path carries {wildcard1} and declares no path parameter for it; it declares %v",
 			op.Parameters)
 	}
+	// The DESCRIPTION half is not asserted here and cannot be: prose reaches a
+	// parameter from zipdoc, which indexes declared source and not _test.go, so a
+	// fixture in this file carries none whatever the lookup does. It is joined by
+	// urlFieldList.docKey — prose is filed under a field's WIRE name and a
+	// parameter is looked up by the ROUTER's key, which differ for exactly this
+	// segment — and the place that can measure it is a package with real ops.
 }
