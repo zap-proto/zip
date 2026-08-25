@@ -1,10 +1,12 @@
 package zip
 
 import (
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,8 +56,12 @@ func WithStripPrefix(prefix string) StaticOption {
 //   - A missing file yields c.Next(), so a later more-specific route or a SPA
 //     catch-all still wins — never a 500.
 //   - Sets Content-Type (by extension), Content-Length and Last-Modified;
-//     honours HEAD and If-Modified-Since (304). Nothing else — no compression,
-//     no byte ranges, no directory listing.
+//     honours HEAD and If-Modified-Since (304).
+//   - Advertises Accept-Ranges and serves one byte range per request: 206 with
+//     Content-Range, 416 for a span the file does not have, and the whole file
+//     for a Range it declines to honour. If-Range is respected. A file whose
+//     fs.File cannot seek is always served whole.
+//   - Nothing else — no compression, no directory listing.
 //
 // fsys is any fs.FS: an embed.FS for baked-in assets or os.DirFS(dir) for a
 // directory on disk. Both are traversal-safe by construction; the fs.ValidPath
@@ -142,29 +148,169 @@ func (cfg staticConfig) open(fsys fs.FS, name string) (fs.File, fs.FileInfo, boo
 	return f, info, true
 }
 
-// serveFile writes info's bytes to the response: Last-Modified + conditional
-// 304, Content-Type by extension, then the body streamed with a known size so
-// Content-Length is set. It takes ownership of f — fasthttp closes the stream
-// after writing the body (or after skipping it for HEAD, which it detects via
-// Response.SkipBody and still emits Content-Length for), so the one SendStream
-// call serves GET and HEAD alike. The only path that does not stream — a 304 —
-// closes f itself.
+// serveFile names the content type Static is willing to guess — the stored
+// file's own extension — and hands the rest to [Content], which owns the
+// conditional answer, the range and the ownership of f.
 func serveFile(c *Ctx, f fs.File, info fs.FileInfo) error {
-	if mod := info.ModTime(); !mod.IsZero() {
-		c.fc.Set(fiber.HeaderLastModified, mod.UTC().Format(http.TimeFormat))
-		if ims := c.fc.Get(fiber.HeaderIfModifiedSince); ims != "" {
-			if t, err := http.ParseTime(ims); err == nil && !mod.Truncate(time.Second).After(t) {
-				_ = f.Close() // not streaming — release it ourselves
-				c.fc.Status(fiber.StatusNotModified)
-				return nil
-			}
-		}
-	}
 	ctype := mime.TypeByExtension(path.Ext(info.Name()))
 	if ctype == "" {
 		ctype = fiber.MIMEOctetStream
 	}
 	c.fc.Set(fiber.HeaderContentType, ctype)
+	return Content(c, info.ModTime(), info.Size(), f)
+}
+
+// Content writes an already-open representation to the response: Last-Modified
+// with a conditional 304, Accept-Ranges, and either one byte range (206 with
+// Content-Range, or 416 for a span the representation does not have) or the
+// whole thing. It is what [Static] serves files with, exported for a handler
+// that needs the rest of the answer to be its own.
+//
+// The CALLER owns Content-Type and any Content-Encoding. Only the caller knows
+// whether these bytes are the file it named or a precompressed sibling of it —
+// a .br beside main.css is still text/css on the wire, and guessing from the
+// stored name would label it as brotli.
+//
+// Ranges need seeking, so a src that is not an [io.Seeker] is served whole,
+// which RFC 9110 §14.2 permits for any Range. Content takes ownership: src is
+// closed if it is an [io.Closer], on every path including 304 and 416.
+func Content(c *Ctx, mod time.Time, size int64, src io.Reader) error {
+	closeSrc := func() {
+		if rc, ok := src.(io.Closer); ok {
+			_ = rc.Close()
+		}
+	}
+	if !mod.IsZero() {
+		c.fc.Set(fiber.HeaderLastModified, mod.UTC().Format(http.TimeFormat))
+		if ims := c.fc.Get(fiber.HeaderIfModifiedSince); ims != "" {
+			if t, err := http.ParseTime(ims); err == nil && !mod.Truncate(time.Second).After(t) {
+				closeSrc() // not streaming — release it ourselves
+				c.fc.Status(fiber.StatusNotModified)
+				return nil
+			}
+		}
+	}
+	c.fc.Set(fiber.HeaderAcceptRanges, "bytes")
+
+	start, length, status := int64(0), size, fiber.StatusOK
+	// Seeking is what makes a range cheap; a source that cannot seek is served
+	// whole, which RFC 9110 §14.2 allows for any Range at all.
+	seeker, seekable := src.(io.Seeker)
+	if seekable && rangeApplies(c, mod) {
+		start, length, status = parseRange(c.fc.Get(fiber.HeaderRange), size)
+	}
+
+	switch status {
+	case fiber.StatusRequestedRangeNotSatisfiable:
+		closeSrc()
+		c.fc.Set(fiber.HeaderContentRange, "bytes */"+strconv.FormatInt(size, 10))
+		c.fc.Status(status)
+		return nil
+	case fiber.StatusPartialContent:
+		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+			closeSrc()
+			return err
+		}
+		c.fc.Set(fiber.HeaderContentRange,
+			"bytes "+strconv.FormatInt(start, 10)+"-"+
+				strconv.FormatInt(start+length-1, 10)+"/"+
+				strconv.FormatInt(size, 10))
+		c.fc.Status(status)
+		return c.fc.SendStream(extent{Reader: io.LimitReader(src, length), src: src}, int(length))
+	}
 	c.fc.Status(fiber.StatusOK)
-	return c.fc.SendStream(f, int(info.Size())) // fasthttp closes f after writing
+	return c.fc.SendStream(src, int(size)) // fasthttp closes src after writing
+}
+
+// extent is the contiguous byte range of an open file that a 206 writes.
+// io.LimitReader alone is not an io.Closer, so fasthttp would write the body
+// and leave the file open; carrying the file lets the one SendStream call own
+// it exactly as it owns the whole-file case.
+type extent struct {
+	io.Reader
+	src io.Reader
+}
+
+func (e extent) Close() error {
+	if rc, ok := e.src.(io.Closer); ok {
+		return rc.Close()
+	}
+	return nil
+}
+
+// rangeApplies reports whether an If-Range precondition still holds. Absent, it
+// holds trivially. Static publishes no entity tag, so only the date form can
+// match, and RFC 9110 §13.1.5 wants that match exact: a representation that has
+// changed at all is served whole rather than spliced from two versions.
+func rangeApplies(c *Ctx, mod time.Time) bool {
+	v := strings.TrimSpace(c.fc.Get(fiber.HeaderIfRange))
+	if v == "" {
+		return true
+	}
+	if mod.IsZero() {
+		return false
+	}
+	t, err := http.ParseTime(v)
+	return err == nil && mod.Truncate(time.Second).Equal(t.Truncate(time.Second))
+}
+
+// parseRange resolves an RFC 9110 §14.1 Range value against size, answering
+// with the status the request has earned:
+//
+//	StatusOK           nothing to honour — no header, a unit we do not speak,
+//	                   more than one range, or a span we decline. A server may
+//	                   always answer in full (§14.2), so this is never an error.
+//	StatusPartialContent  one satisfiable span, returned as start and length.
+//	StatusRequestedRangeNotSatisfiable  a span wholly outside the file.
+//
+// The distinction that matters is the last one: declining a range and refusing
+// it are different answers, and a client that asked for byte 5,000 of a
+// 100-byte file needs to be told, not handed the file.
+func parseRange(v string, size int64) (start, length int64, status int) {
+	const unit = "bytes="
+	v = strings.TrimSpace(v)
+	if v == "" || !strings.HasPrefix(v, unit) {
+		return 0, size, fiber.StatusOK
+	}
+	spec := strings.TrimSpace(strings.TrimPrefix(v, unit))
+	// A multi-range request is answered whole rather than as multipart/byteranges.
+	if spec == "" || strings.Contains(spec, ",") {
+		return 0, size, fiber.StatusOK
+	}
+	dash := strings.IndexByte(spec, '-')
+	if dash < 0 {
+		return 0, size, fiber.StatusOK
+	}
+	// An empty file has no byte to name, so every span over it is unsatisfiable.
+	if size == 0 {
+		return 0, 0, fiber.StatusRequestedRangeNotSatisfiable
+	}
+	first, last := strings.TrimSpace(spec[:dash]), strings.TrimSpace(spec[dash+1:])
+	if first == "" { // suffix form: the final n bytes
+		n, err := strconv.ParseInt(last, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, size, fiber.StatusRequestedRangeNotSatisfiable
+		}
+		if n > size {
+			n = size
+		}
+		return size - n, n, fiber.StatusPartialContent
+	}
+	s, err := strconv.ParseInt(first, 10, 64)
+	if err != nil || s < 0 {
+		return 0, size, fiber.StatusOK
+	}
+	if s >= size {
+		return 0, size, fiber.StatusRequestedRangeNotSatisfiable
+	}
+	e := size - 1
+	if last != "" {
+		if e, err = strconv.ParseInt(last, 10, 64); err != nil || e < s {
+			return 0, size, fiber.StatusOK
+		}
+		if e >= size {
+			e = size - 1
+		}
+	}
+	return s, e - s + 1, fiber.StatusPartialContent
 }
