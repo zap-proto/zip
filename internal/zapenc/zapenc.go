@@ -51,6 +51,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"sync"
 
 	zap "github.com/zap-proto/go"
@@ -144,16 +145,40 @@ const (
 	kBytes
 	kStruct
 	kSlice
+	// kFixed is bytes_fixed[N] — N bytes written INLINE, aligned to 1. It has a
+	// layout and no reflective codec: see [Layout] and writeStruct's refusal.
+	kFixed
 )
 
 type field struct {
 	index  int
 	offset int
 	kind   kind
+	n      int          // kFixed: the array length
 	ptr    bool         // the Go field is a pointer to the encoded type
 	elem   *layout      // kStruct: the nested layout
 	slice  *sliceElem   // kSlice: how one element is encoded
 	typ    reflect.Type // the Go type at this field, minus any pointer
+}
+
+// width is the field's slot in the fixed area. Everything variable — text,
+// bytes, a list, a nested value — carries an offset and a length in 8 bytes;
+// bytes_fixed[N] is its N bytes, inline.
+func (f field) width() int {
+	if f.kind == kFixed {
+		return f.n
+	}
+	return width(f.kind)
+}
+
+// align is where the slot may begin. It is the slot's own width, except for
+// bytes_fixed: those bytes are inline and align to 1, so a 32-byte id follows a
+// u32 at offset 4 rather than at 32 — which is what a .zap schema writes.
+func (f field) align() int {
+	if f.kind == kFixed {
+		return 1
+	}
+	return width(f.kind)
 }
 
 type sliceElem struct {
@@ -198,10 +223,9 @@ func buildLayout(t reflect.Type) (*layout, error) {
 			return nil, fmt.Errorf("%s.%s: %w", t.Name(), sf.Name, err)
 		}
 		f.index = i
-		w := width(f.kind)
-		off = align(off, w)
+		off = align(off, f.align())
 		f.offset = off
-		off += w
+		off += f.width()
 		lay.fields = append(lay.fields, f)
 	}
 	lay.size = align(off, 8)
@@ -247,6 +271,13 @@ func fieldOf(t reflect.Type) (field, error) {
 			return f, err
 		}
 		f.elem = lay
+	case reflect.Array:
+		// bytes_fixed[N]. Only a byte array: an array of anything else has no
+		// inline wire form, and a list is how a sequence crosses.
+		if t.Elem().Kind() != reflect.Uint8 {
+			return f, fmt.Errorf("zapenc: an array of %s has no wire form; use a slice", t.Elem())
+		}
+		f.kind, f.n = kFixed, t.Len()
 	case reflect.Slice:
 		if t.Elem().Kind() == reflect.Uint8 {
 			f.kind = kBytes
@@ -381,6 +412,8 @@ func writeStruct(b *zap.Builder, lay *layout, rv reflect.Value, asRoot bool) err
 				return err
 			}
 			ob.SetBytes(f.offset, inner)
+		case kFixed:
+			return fixedRefusal(fv.Type())
 		}
 	}
 	for _, p := range pends {
@@ -530,8 +563,23 @@ func readField(o zap.Object, f field, target reflect.Value) error {
 		return readStruct(msg.Root(), f.elem, target)
 	case kSlice:
 		return readList(o, f, target)
+	case kFixed:
+		return fixedRefusal(f.typ)
 	}
 	return nil
+}
+
+// fixedRefusal is what the reflective path answers for bytes_fixed[N].
+//
+// The LAYOUT knows the shape — [Layout] gives it an offset and a width, which is
+// what a schema and a code generator need — and the reflective codec deliberately
+// does not carry it. Reflection is what this whole seam exists to leave, so making
+// it more capable is the wrong direction: an id is exactly the case that should
+// force a type to declare its own wire, and a type that has done so never reaches
+// this line.
+func fixedRefusal(t reflect.Type) error {
+	return fmt.Errorf("zapenc: %s is bytes_fixed[%d], which the reflective codec does not carry; "+
+		"declare the type's wire (MarshalZAP/UnmarshalZAP) and it crosses inline", t, t.Len())
 }
 
 func readList(o zap.Object, f field, target reflect.Value) error {
@@ -599,3 +647,106 @@ func f32bits(f float32) uint32 { return math.Float32bits(f) }
 func f64bits(f float64) uint64 { return math.Float64bits(f) }
 func f32from(u uint32) float32 { return math.Float32frombits(u) }
 func f64from(u uint64) float64 { return math.Float64frombits(u) }
+
+// ---- the layout, for whoever needs to write it down -------------------------
+
+// Slot is where one field of a message sits on the wire, and what it is.
+//
+// It is what a .zap schema states as `Name type @Offset` and what a generated
+// codec states as a Go constant. Both are projections of the SAME derivation the
+// reflective codec encodes against, which is the point: the schema, the generated
+// code and the running encoder cannot describe three wires.
+type Slot struct {
+	Name   string // the Go field name
+	Offset int
+	Width  int
+	Type   string // the .zap type: u64, text, bytes, bytes_fixed[32], list<…>, struct
+	N      int    // bytes_fixed[N]: the length. Otherwise 0.
+	Ptr    bool   // the Go field is a pointer to the encoded type
+	Elem   string // list<…>: the element's .zap type
+}
+
+// Shape is a whole message: its slots in declaration order, and its size.
+type Shape struct {
+	Slots []Slot
+	Size  int
+}
+
+// LayoutOf derives the wire layout of a struct type.
+//
+// A field is aligned to its own width and takes that many bytes; the size is
+// rounded up to 8. bytes_fixed[N] is the exception and the reason alignment is
+// stated apart from width: it is N bytes INLINE, aligned to 1, so an id sits
+// immediately after the u32 before it.
+//
+// This is the derivation Marshal encodes against, so a schema or a generator
+// reading it describes the wire that is actually spoken. Deriving it a second
+// time — packing the offsets, or giving a nested value four bytes instead of the
+// eight it takes as bytes — produces a document about a wire nobody speaks.
+func LayoutOf(t reflect.Type) (Shape, error) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return Shape{}, fmt.Errorf("zapenc: %s is not a struct", t)
+	}
+	lay, err := layoutOf(t)
+	if err != nil {
+		return Shape{}, err
+	}
+	sh := Shape{Size: lay.size}
+	for _, f := range lay.fields {
+		s := Slot{
+			Name:   t.Field(f.index).Name,
+			Offset: f.offset,
+			Width:  f.width(),
+			Type:   spell(f.kind, f.n),
+			N:      f.n,
+			Ptr:    f.ptr,
+		}
+		if f.kind == kSlice && f.slice != nil {
+			s.Elem = spell(f.slice.kind, 0)
+			s.Type = "list<" + s.Elem + ">"
+		}
+		sh.Slots = append(sh.Slots, s)
+	}
+	return sh, nil
+}
+
+// spell is the .zap name of a kind. A nested value is "bytes" and not "struct",
+// because that is what it IS on this wire: writeStruct carries it through
+// SetBytes as a complete ZAP message in an 8-byte {offset,length} slot, never
+// through SetObject's 4-byte relative offset.
+func spell(k kind, n int) string {
+	switch k {
+	case kBool:
+		return "bool"
+	case kInt8:
+		return "i8"
+	case kInt16:
+		return "i16"
+	case kInt32:
+		return "i32"
+	case kInt64:
+		return "i64"
+	case kUint8:
+		return "u8"
+	case kUint16:
+		return "u16"
+	case kUint32:
+		return "u32"
+	case kUint64:
+		return "u64"
+	case kFloat32:
+		return "f32"
+	case kFloat64:
+		return "f64"
+	case kText:
+		return "text"
+	case kBytes, kStruct:
+		return "bytes"
+	case kFixed:
+		return "bytes_fixed[" + strconv.Itoa(n) + "]"
+	}
+	return "bytes"
+}
