@@ -24,9 +24,26 @@
 // and ObjectAt already read; a slice of structs therefore carries one complete
 // ZAP message per element.
 //
-// Anything else — a map, an interface, a channel — is refused at encode rather
-// than dropped. A field that silently does not cross is the failure this
-// package exists to make impossible.
+// Anything else — a map, an interface, a channel, a FIXED-SIZE ARRAY — is
+// refused at encode rather than dropped. A field that silently does not cross is
+// the failure this package exists to make impossible.
+//
+// # A type that owns its wire is not reflected over
+//
+// Deriving the layout is cached; COPYING THE FIELDS IS NOT. Every call runs
+// reflect.ValueOf, sizes a builder by guess (lay.size+256) and walks the fields
+// again, so the cost is paid per call for a fact that is fixed at compile time.
+//
+// So a type may state its own wire form — [zip.Wire], MarshalZAP/UnmarshalZAP —
+// and both entry points below take that answer BEFORE they reach for reflect.
+// Generated code emits those two methods with the offsets as constants, which is
+// what a hand-written ZAP codec is, so the derivation moves to build time and the
+// call path holds none of it.
+//
+// It is also the only way to carry what the derivation cannot express. A
+// bytes_fixed[N] field — an ids.ID is [32]byte — is refused here and written
+// inline by generated code through zap.Object.BytesFixed, so a round trip that
+// SUCCEEDS for such a type is proof the reflective path was not taken.
 package zapenc
 
 import (
@@ -39,10 +56,24 @@ import (
 	zap "github.com/zap-proto/go"
 )
 
+// wire is [zip.Wire] restated where it is consumed, so this package depends on
+// nothing to recognise it. Both methods are required together: a type that
+// carried only one would encode from generated offsets and decode by reflection,
+// which is two answers to where its layout lives.
+type wire interface {
+	MarshalZAP() ([]byte, error)
+	UnmarshalZAP([]byte) error
+}
+
 // Marshal encodes v as a ZAP message. v must be a struct or a pointer to one:
 // the message's root is an object, and there is nothing for a bare scalar to be
 // the root of.
+//
+// A v that states its own wire form answers for itself and nothing here reflects.
 func Marshal(v any) ([]byte, error) {
+	if w, ok := v.(wire); ok {
+		return w.MarshalZAP()
+	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
@@ -70,6 +101,9 @@ func Marshal(v any) ([]byte, error) {
 func Unmarshal(data []byte, v any) error {
 	if len(data) == 0 {
 		return nil
+	}
+	if w, ok := v.(wire); ok {
+		return w.UnmarshalZAP(data)
 	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
