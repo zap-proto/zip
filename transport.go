@@ -69,9 +69,9 @@ var (
 	transports   = map[string]Transport{
 		"zap": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
-				return &http.Server{Network: networkOf(addr), Addr: addr, Handler: h}
+				return &http.Server{Network: NetworkOf(addr), Addr: addr, Handler: h}
 			},
-			Dial: func(addr string) Client { return http.Dial(networkOf(addr), addr) },
+			Dial: func(addr string) Client { return http.Dial(NetworkOf(addr), addr) },
 		},
 		"http": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
@@ -105,7 +105,7 @@ var (
 // withPort defaults the port of a tcp address, because a URL usually omits it
 // and a dialer never can. A unix path is returned untouched.
 func withPort(addr, port string) string {
-	if networkOf(addr) == "unix" || strings.LastIndex(addr, ":") > strings.LastIndex(addr, "]") {
+	if NetworkOf(addr) == "unix" || strings.LastIndex(addr, ":") > strings.LastIndex(addr, "]") {
 		return addr
 	}
 	return addr + ":" + port
@@ -127,7 +127,7 @@ func RegisterTransport(scheme string, t Transport) {
 	transports[scheme] = t
 }
 
-// networkOf reads the plumbing off the address shape, the way the address
+// NetworkOf reads the plumbing off the address shape, the way the address
 // already tells you: a filesystem path is a unix socket, anything else is
 // host:port. The scheme names the PROTOCOL (zap) and the address names where
 // it is spoken, so there is no second scheme for the same wire.
@@ -137,7 +137,13 @@ func RegisterTransport(scheme string, t Transport) {
 //	zap:///run/hanzo/billing.sock    -> unix
 //	/run/hanzo/billing.sock          -> unix (bare address, DefaultScheme)
 //	@hanzo-billing                   -> unix (Linux abstract socket)
-func networkOf(addr string) string {
+//
+// It is exported because it is a RULE and not an implementation detail: anything
+// that dials one of these addresses has to make the same reading, and a second
+// copy of it is a place where a socket path becomes a hostname. [zapmcp.Dial]
+// wants the network as a value, so a client reaching an app's MCP door asks
+// here rather than re-deriving it.
+func NetworkOf(addr string) string {
 	if strings.HasPrefix(addr, "/") || strings.HasPrefix(addr, "./") || strings.HasPrefix(addr, "@") {
 		return "unix"
 	}
@@ -386,7 +392,7 @@ const upgradeWait = time.Second
 // Only over a unix socket, because that is the one place the sibling is known to
 // be the same process. A tcp mount would need a port nobody has agreed on.
 func plain(addr string) string {
-	if networkOf(addr) != "unix" {
+	if NetworkOf(addr) != "unix" {
 		return ""
 	}
 	return addr + ".http"
@@ -447,9 +453,9 @@ func upgrading(req *fasthttp.Request) bool {
 func relay(rc *fasthttp.RequestCtx, addr, what string) error {
 	to := plain(addr)
 	if to == "" {
-		return Errorf(502, "%s: no upgrade path over %s", what, networkOf(addr))
+		return Errorf(502, "%s: no upgrade path over %s", what, NetworkOf(addr))
 	}
-	up, err := net.DialTimeout(networkOf(to), to, upgradeWait)
+	up, err := net.DialTimeout(NetworkOf(to), to, upgradeWait)
 	if err != nil {
 		return Errorf(502, "%s: upgrade: %v", what, err)
 	}
@@ -523,7 +529,7 @@ func body(br *bufio.Reader, n int) ([]byte, error) {
 // and points ZIP_RUNTIME_DIR at it. An abstract socket (@name) has no
 // directory and a tcp address has no path.
 func makeSocketDir(addr string) error {
-	if networkOf(addr) != "unix" || strings.HasPrefix(addr, "@") {
+	if NetworkOf(addr) != "unix" || strings.HasPrefix(addr, "@") {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(addr), 0o700); err != nil {
@@ -577,7 +583,7 @@ type httpServer struct {
 // and the host relays to it — and a path there must not mean "a tcp host called
 // /var/lib/…", which is what binding it as tcp amounts to.
 func (h *httpServer) ListenAndServe() error {
-	if networkOf(h.addr) == "unix" {
+	if NetworkOf(h.addr) == "unix" {
 		return h.srv.ListenAndServeUNIX(h.addr, 0o600)
 	}
 	return h.srv.ListenAndServe(h.addr)
