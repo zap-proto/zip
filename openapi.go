@@ -756,9 +756,9 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 		return map[string]any{"type": "boolean"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return map[string]any{"type": "integer"}
+		return map[string]any{"type": "integer", "format": numberFormat(t.Kind())}
 	case reflect.Float32, reflect.Float64:
-		return map[string]any{"type": "number"}
+		return map[string]any{"type": "number", "format": numberFormat(t.Kind())}
 	case reflect.Slice, reflect.Array:
 		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
 			// encoding/json writes a byte SLICE as a base64 string, not as an
@@ -790,6 +790,43 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 		return reg.ref(reg.define(t, fields))
 	}
 	return map[string]any{"type": "object"}
+}
+
+// numberFormat names a number's WIDTH and SIGN, which "integer" alone does not.
+//
+// It matters because the document is what a client is generated from, and one
+// of those clients speaks ZAP, where a field IS an offset and a width. A
+// generated type that reads uint32 as int64 does not merely mis-print a value:
+// it takes eight bytes where the service laid four, and every field after it is
+// read from the wrong place. JSON survives the ambiguity because a number is
+// self-delimiting; a fixed layout does not.
+//
+// The names are OpenAPI's own for the two it registers (int32, int64) and the
+// Go spelling for the rest, which is what every generator already reads. A
+// format is an annotation, so a consumer that ignores it sees exactly the
+// document it saw before.
+func numberFormat(k reflect.Kind) string {
+	switch k {
+	case reflect.Int, reflect.Int64:
+		return "int64"
+	case reflect.Int8:
+		return "int8"
+	case reflect.Int16:
+		return "int16"
+	case reflect.Int32:
+		return "int32"
+	case reflect.Uint, reflect.Uint64:
+		return "uint64"
+	case reflect.Uint8:
+		return "uint8"
+	case reflect.Uint16:
+		return "uint16"
+	case reflect.Uint32:
+		return "uint32"
+	case reflect.Float32:
+		return "float"
+	}
+	return "double"
 }
 
 // structSchema fills in one struct's object schema. It is separate from schemaOf
