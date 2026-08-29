@@ -2,6 +2,7 @@ package zapenc_test
 
 import (
 	"bytes"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -12,10 +13,11 @@ import (
 // A type that states its own wire form is never reflected over, and this file
 // proves it without instrumenting the encoder.
 //
-// The lever is a field the reflective derivation CANNOT express. A fixed-size
-// array is refused outright — `zapenc: array cannot cross the plane` — so a value
-// carrying one either encodes through its own MarshalZAP or it does not encode at
-// all. A successful round trip is therefore the proof, and [TestReflectionRefusesTheSameShape]
+// The lever is a field the reflective codec deliberately does not carry. A
+// fixed-size array HAS a layout — an offset and a width, which is what a schema
+// and a code generator need — and the reflective encode and decode both refuse
+// it, so a value carrying one either crosses through its own MarshalZAP or it
+// does not cross at all. A successful round trip is therefore the proof, and [TestReflectionRefusesTheSameShape]
 // is the control that keeps it honest: the identical field list with the methods
 // removed still fails, so the pass above is the methods and not the shape.
 //
@@ -110,7 +112,7 @@ func TestReflectionRefusesTheSameShape(t *testing.T) {
 	if err == nil {
 		t.Fatal("the reflective encoder accepted a fixed array; the proof above no longer holds")
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte("array cannot cross the plane")) {
+	if !bytes.Contains([]byte(err.Error()), []byte("the reflective codec does not carry")) {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
@@ -362,5 +364,102 @@ func BenchmarkReadPageByView(b *testing.B) {
 				_ = rowAmount(v.Rows(), n-1)
 			}
 		})
+	}
+}
+
+// ---- the layout is the wire ------------------------------------------------
+
+// TestTheLayoutIsWhatMarshalEncodes is the gate that makes [zapenc.LayoutOf] safe
+// to generate from. It does not compare the derivation to a table of expected
+// numbers — a table is a second derivation and would agree with a wrong one. It
+// ENCODES a value and reads every field back at the offset the layout states, so
+// the only thing that can pass is a layout that describes the bytes.
+//
+// It is also where the two mistakes a re-derivation makes go red. Packing the
+// offsets puts Text at 1 rather than 8; giving the nested value four bytes puts
+// Tail at 20 rather than 24.
+func TestTheLayoutIsWhatMarshalEncodes(t *testing.T) {
+	type nest struct {
+		Slug string
+	}
+	type shaped struct {
+		Flag   bool // 1 wide at 0 — the next field aligns past it
+		Text   string
+		Count  int64
+		Nested nest // carried as bytes: 8 wide, not 4
+		Tail   uint32
+	}
+	in := &shaped{Flag: true, Text: "commerce", Count: -7,
+		Nested: nest{Slug: "acme"}, Tail: 0xDEADBEEF}
+
+	sh, err := zapenc.LayoutOf(reflect.TypeOf(*in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := zapenc.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := zap.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := m.Root()
+
+	at := map[string]zapenc.Slot{}
+	for _, s := range sh.Slots {
+		at[s.Name] = s
+	}
+	if got := o.Bool(at["Flag"].Offset); got != in.Flag {
+		t.Errorf("Flag at %d: got %v", at["Flag"].Offset, got)
+	}
+	if got := o.Text(at["Text"].Offset); got != in.Text {
+		t.Errorf("Text at %d: got %q", at["Text"].Offset, got)
+	}
+	if got := o.Int64(at["Count"].Offset); got != in.Count {
+		t.Errorf("Count at %d: got %d", at["Count"].Offset, got)
+	}
+	if got := o.Uint32(at["Tail"].Offset); got != in.Tail {
+		t.Errorf("Tail at %d: got %#x", at["Tail"].Offset, got)
+	}
+	// The nested value is a complete ZAP message in a bytes slot. Reading it as
+	// one is what proves the 8-byte width and the "bytes" spelling.
+	if s := at["Nested"]; s.Type != "bytes" || s.Width != 8 {
+		t.Errorf("Nested: got %s width %d, want bytes width 8", s.Type, s.Width)
+	}
+	sub, err := zap.Parse(o.Bytes(at["Nested"].Offset))
+	if err != nil {
+		t.Fatalf("Nested at %d: %v", at["Nested"].Offset, err)
+	}
+	if got := sub.Root().Text(0); got != in.Nested.Slug {
+		t.Errorf("Nested.Slug: got %q", got)
+	}
+}
+
+// TestBytesFixedIsLaidOutAndNotEncoded is the split this seam turns on: the
+// layout knows an id's offset and width — which is what a schema and a code
+// generator need — and the reflective codec refuses to carry it, which is what
+// makes an id force a type to declare its own wire.
+func TestBytesFixedIsLaidOutAndNotEncoded(t *testing.T) {
+	sh, err := zapenc.LayoutOf(reflect.TypeOf(heightByFields{}))
+	if err != nil {
+		t.Fatalf("the layout must know bytes_fixed: %v", err)
+	}
+	want := []zapenc.Slot{
+		{Name: "Height", Offset: 0, Width: 8, Type: "u64"},
+		{Name: "Chain", Offset: 8, Width: 32, Type: "bytes_fixed[32]", N: 32},
+		{Name: "Node", Offset: 40, Width: 20, Type: "bytes_fixed[20]", N: 20},
+		{Name: "Name", Offset: 64, Width: 8, Type: "text"},
+	}
+	if !reflect.DeepEqual(sh.Slots, want) {
+		t.Errorf("slots:\n got %+v\nwant %+v", sh.Slots, want)
+	}
+	if sh.Size != heightSize {
+		t.Errorf("size: got %d want %d", sh.Size, heightSize)
+	}
+	// And those are the offsets the hand-written codec above states, so the two
+	// cannot drift.
+	if want[1].Offset != heightChainOff || want[2].Offset != heightNodeOff || want[3].Offset != heightNameOff {
+		t.Error("the codec's constants are not the layout's offsets")
 	}
 }
