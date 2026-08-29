@@ -731,6 +731,13 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 	// would still be. A relay whose answer is frequently an array or null was
 	// asserted to be an object in openapi.yaml and in every SDK built from it.
 	if isMarshaler(t) {
+		// A type that writes its own JSON may also STATE its own shape. That is
+		// the same fact twice — the bytes and the schema both belong to the
+		// type — so it is declared once, next to MarshalJSON, rather than
+		// guessed here or listed in a table this package would have to keep.
+		if s := declaredSchema(t); s != nil {
+			return s
+		}
 		if t == timeType {
 			// The one marshaler whose output shape is DOCUMENTED: RFC 3339,
 			// which OpenAPI spells `format: date-time`. Its fields are all
@@ -1040,6 +1047,55 @@ var (
 // it there for any addressable value.
 func isMarshaler(t reflect.Type) bool {
 	return t.Implements(jsonMarshaler) || reflect.PointerTo(t).Implements(jsonMarshaler)
+}
+
+// SchemaDescriber is implemented by a type that writes its own JSON and can say
+// what that JSON looks like. Without it a marshaler is published as `{}`: true,
+// because the fields are not the wire form, but useless to anything generating
+// a client — every such field arrives as an untyped value.
+//
+// The shape is a JSON Schema object, the same vocabulary the rest of the
+// document speaks. A numeric carried as a quoted decimal, which is the usual
+// reason a type marshals itself, says so directly:
+//
+//	func (Uint64) JSONSchema() map[string]any {
+//	    return map[string]any{"type": "string", "pattern": "^[0-9]+$"}
+//	}
+//
+// Implement it on the value, not the pointer, so a field of either form is
+// described. Returning nil means "no shape to state" and falls back to `{}`.
+type SchemaDescriber interface {
+	JSONSchema() map[string]any
+}
+
+var schemaDescriber = reflect.TypeOf((*SchemaDescriber)(nil)).Elem()
+
+// declaredSchema asks a type for its own wire shape, or nil if it does not
+// state one. A fresh copy is returned so a caller cannot edit the type's
+// answer for everybody else — the schemas are assembled into one document by
+// mutation, and a shared map would leak one field's constraints into another.
+func declaredSchema(t reflect.Type) map[string]any {
+	var d SchemaDescriber
+	switch {
+	case t.Implements(schemaDescriber):
+		d, _ = reflect.Zero(t).Interface().(SchemaDescriber)
+	case reflect.PointerTo(t).Implements(schemaDescriber):
+		d, _ = reflect.New(t).Interface().(SchemaDescriber)
+	default:
+		return nil
+	}
+	if d == nil {
+		return nil
+	}
+	got := d.JSONSchema()
+	if got == nil {
+		return nil
+	}
+	out := make(map[string]any, len(got))
+	for k, v := range got {
+		out[k] = v
+	}
+	return out
 }
 
 // swaggerHTML is the minimal Swagger UI shell. Loads the UI from a CDN
