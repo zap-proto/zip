@@ -186,6 +186,10 @@ type sliceElem struct {
 	elem *layout      // when the element is a struct
 	typ  reflect.Type // the element type, minus any pointer
 	ptr  bool
+	// n is kFixed's array length. A field carries it and an element has to
+	// carry it too: without it the schema states bytes_fixed[0], which is a
+	// width nothing writes and a generated codec would read zero bytes for.
+	n int
 }
 
 type layout struct {
@@ -348,6 +352,7 @@ func sliceElemOf(t reflect.Type) (*sliceElem, error) {
 	}
 	se.kind = f.kind
 	se.elem = f.elem
+	se.n = f.n
 	if se.kind == kSlice {
 		return nil, fmt.Errorf("zapenc: a slice of slices has no wire form; wrap the inner one in a struct")
 	}
@@ -517,6 +522,8 @@ func marshalElem(se *sliceElem, ev reflect.Value) ([]byte, error) {
 		return leInt(uint64(f32bits(float32(ev.Float()))), 4), nil
 	case kFloat64:
 		return leInt(f64bits(ev.Float()), 8), nil
+	case kFixed:
+		return nil, fixedRefusal(se.typ)
 	}
 	return nil, fmt.Errorf("zapenc: list element of kind %d has no wire form", se.kind)
 }
@@ -667,6 +674,8 @@ func readElem(l zap.List, i int, se *sliceElem, target reflect.Value) error {
 		target.SetFloat(float64(f32from(uint32(unsigned(raw)))))
 	case kFloat64:
 		target.SetFloat(f64from(unsigned(raw)))
+	case kFixed:
+		return fixedRefusal(se.typ)
 	}
 	return nil
 }
@@ -745,7 +754,7 @@ func LayoutOf(t reflect.Type) (Shape, error) {
 			Ptr:    f.ptr,
 		}
 		if f.kind == kSlice && f.slice != nil {
-			s.Elem = spell(f.slice.kind, 0)
+			s.Elem = spell(f.slice.kind, f.slice.n)
 			s.Type = "list<" + s.Elem + ">"
 		}
 		sh.Slots = append(sh.Slots, s)
