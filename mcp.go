@@ -224,7 +224,35 @@ func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 	own := a.Registry()
 	pluginTools := a.tools()
 	all := make([]mcpTool, 0, len(own)+len(pluginTools))
+	// The undeclared routes, read from the plan.
+	//
+	// NOT from Declaration(): that calls prepare(), and prepare is what installs
+	// this door — so asking it here is a cycle. The fact lives on the route
+	// entry either way, which is what makes it survive composition, so this
+	// reads the same entries Declaration reads and stops one step earlier.
+	hidden := map[string]bool{}
+	for _, o := range a.plan() {
+		if r, ok := o.route(); ok && r.undeclared && r.method != "" {
+			hidden[r.method+" "+o.abs(r.path)] = true
+		}
+	}
 	for _, op := range own {
+		// An op kept out of the contract is kept out of the tool list.
+		//
+		// [Undeclared] promises exactly this — "and so in none of the
+		// projections built from it: the OpenAPI document, the MCP tool list,
+		// the CLI commands, the by-name call plane" — and this projection was
+		// the one that did not hold it, because the registry is every op that
+		// registered while the undeclared fact rides the route entry.
+		//
+		// It is the projection where the miss costs most: a document nobody
+		// reads lists a dead address, but a tool list is what an agent CALLS.
+		//
+		// Asked of Declares rather than tracked here, so there is one answer to
+		// "is this in the contract?" and no second list to fall out of step.
+		if hidden[op.Method+" "+op.Path] {
+			continue
+		}
 		b, err := json.Marshal(mcpToolOf(op))
 		if err != nil {
 			a.logger.Warn("zip mcp: op has no renderable schema", "op", opName(op), "err", err)
