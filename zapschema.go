@@ -720,5 +720,69 @@ func (s *Schema) String() string {
 		}
 		b.WriteString("}\n\n")
 	}
+	s.writeLedger(&b)
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// writeLedger states what the schema above does NOT carry.
+//
+// It lives in the same file rather than beside it because a second artifact is
+// a second thing to keep in step, and the whole point of this projection is
+// that a reader learns the cost in the same breath as the contract. A schema
+// that listed only what crosses would be true and would still mislead: the ops
+// that are missing are missing for a reason, and the reason is the work list.
+//
+// Four registers, in descending order of how quietly they hurt:
+//
+//   - dropped — the field is in a type the layout accepts, and its VALUE does
+//     not cross. Nothing fails. This is the expensive one.
+//   - blocked — the op is not here at all, because a field of it has no wire
+//     form. Loud, and therefore cheap.
+//   - opaque — the value crosses and arrives without its name.
+//   - coded — the schema states the field correctly and the REFLECTIVE encoder
+//     will not carry it; a generated codec will.
+//   - renamed — the op is here under a name the IDL's lexer can spell, which
+//     differs from the one every other surface uses.
+func (s *Schema) writeLedger(b *strings.Builder) {
+	if len(s.Gaps) == 0 && len(s.Dropped) == 0 && len(s.Opaque) == 0 &&
+		len(s.Coded) == 0 && len(s.Renamed) == 0 {
+		return
+	}
+	b.WriteString("# ---------------------------------------------------------------------\n")
+	fmt.Fprintf(b, "# %d op(s) here. What follows is what this schema does not carry.\n", s.Ops())
+
+	if n := len(s.Dropped); n > 0 {
+		fmt.Fprintf(b, "#\n# dropped (%d) — the value does not cross, and nothing fails:\n", n)
+		for _, d := range s.Dropped {
+			fmt.Fprintf(b, "#   %s.%s  %s  (%s)\n", d.Struct, d.Field, d.Go, d.Cause)
+		}
+	}
+	if n := len(s.Gaps); n > 0 {
+		fmt.Fprintf(b, "#\n# blocked (%d) — the op is absent; the field has no wire form:\n", n)
+		for _, g := range s.Gaps {
+			fmt.Fprintf(b, "#   %s  %s  %s  (%s)\n", g.Op, g.Field, g.Go, g.Cause)
+		}
+	}
+	if n := len(s.Opaque); n > 0 {
+		fmt.Fprintf(b, "#\n# opaque (%d) — crosses, arrives without its name:\n", n)
+		for _, o := range s.Opaque {
+			el := ""
+			if o.List {
+				el = " (list element)"
+			}
+			fmt.Fprintf(b, "#   %s.%s  %s%s\n", o.Struct, o.Field, o.Go, el)
+		}
+	}
+	if n := len(s.Coded); n > 0 {
+		fmt.Fprintf(b, "#\n# coded (%d) — needs a generated codec; the reflective one refuses:\n", n)
+		for _, c := range s.Coded {
+			fmt.Fprintf(b, "#   %s.%s  %s\n", c.Struct, c.Field, c.Type)
+		}
+	}
+	if n := len(s.Renamed); n > 0 {
+		fmt.Fprintf(b, "#\n# renamed (%d) — spelled differently here than on every other surface:\n", n)
+		for _, r := range s.Renamed {
+			fmt.Fprintf(b, "#   %s  ->  %s\n", r.Op, r.Method)
+		}
+	}
 }
