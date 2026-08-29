@@ -61,6 +61,12 @@ type Status struct {
 	// Restarts is a plugin crashing, and a climbing one is a crash loop.
 	Restarts int `json:"restarts"`
 
+	// Error is why the last start attempt failed, empty when none has. It is the
+	// answer Running=false cannot give: a lazy plugin that has never been asked and
+	// one whose every start dies both report Running=false, and only this separates
+	// them. Cleared when an instance comes up.
+	Error string `json:"error,omitempty"`
+
 	// Usage is what this plugin costs right now, read from the kernel.
 	Usage Usage `json:"usage,omitzero"`
 }
@@ -110,6 +116,7 @@ func (a *App) Plugins() []Status {
 			Disabled: p.disabled.Load(),
 			Reloads:  int(p.reloads.Load()),
 			Restarts: int(p.restarts.Load()),
+			Error:    p.startError(),
 		}
 		if in := p.cur.Load(); in != nil {
 			s.Running = true
