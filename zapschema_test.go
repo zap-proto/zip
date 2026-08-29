@@ -108,6 +108,12 @@ interface probe {
     get_height() returns (rep: schHeight)
     get_validators() returns (rep: schValidators)
 }
+
+# ---------------------------------------------------------------------
+# 2 op(s) here. What follows is what this schema does not carry.
+#
+# opaque (1) — crosses, arrives without its name:
+#   schValidators.Validators  zip.schValidator (list element)
 `
 	if got := s.String(); got != want {
 		t.Fatalf("schema mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
