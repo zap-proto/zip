@@ -114,6 +114,10 @@ func (d specDoc) resolve(s specSchema) specSchema {
 }
 
 type specDoc struct {
+	Info struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	} `json:"info"`
 	Paths      map[string]map[string]specOp `json:"paths"`
 	Components struct {
 		Schemas map[string]specSchema `json:"schemas"`
@@ -131,6 +135,11 @@ type specOp struct {
 	RequestBody *struct {
 		Content map[string]specMedia `json:"content"`
 	} `json:"requestBody"`
+	// Responses is read by the SDK projection, which needs the ANSWER's type as
+	// well as the request's. A command does not: it prints whatever came back.
+	Responses map[string]struct {
+		Content map[string]specMedia `json:"content"`
+	} `json:"responses"`
 }
 
 type specMedia struct {
@@ -153,6 +162,14 @@ type specSchema struct {
 	Description string                `json:"description"`
 	Properties  map[string]specSchema `json:"properties"`
 	Required    []string              `json:"required"`
+
+	// The rest is read by the SDK projection alone. A flag takes its value as
+	// text and hands it to the service, so a command needs only the JSON type;
+	// a Go field needs the width, the element and the encoding as well.
+	Format               string      `json:"format"`
+	ContentEncoding      string      `json:"contentEncoding"`
+	Items                *specSchema `json:"items"`
+	AdditionalProperties *specSchema `json:"additionalProperties"`
 }
 
 // body returns the JSON request media, if the operation has one.
