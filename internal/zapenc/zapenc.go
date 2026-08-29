@@ -195,11 +195,51 @@ type layout struct {
 
 var layouts sync.Map // reflect.Type -> *layout
 
+// derive guards the COLD path: the set of types whose layout is being computed,
+// and the lock that lets several goroutines reach it.
+//
+// A type that contains itself — directly, or through a slice or a pointer —
+// asks for its own layout while computing it, and recurses until the stack
+// ends. Four fleet apps did exactly that, and a stack overflow is a poor way to
+// learn a type has no wire form.
+//
+// The answer is not a deeper stack. A ZAP field IS an offset and a width, so a
+// type containing itself has no bounded width and no layout exists to derive.
+// It is refused with the type named, which is what this package already does
+// with a map or an interface.
+//
+// The lock is only ever taken when the answer is not cached, so a served call
+// does not reach it: layouts.Load answers first, and every type is derived
+// once.
+var derive struct {
+	sync.Mutex
+	building map[reflect.Type]bool
+}
+
 func layoutOf(t reflect.Type) (*layout, error) {
 	if v, ok := layouts.Load(t); ok {
 		return v.(*layout), nil
 	}
+	derive.Lock()
+	defer derive.Unlock()
+	return layoutLocked(t)
+}
+
+// layoutLocked derives one layout with derive held. buildLayout re-enters
+// through fieldOf, which is where the cycle is caught.
+func layoutLocked(t reflect.Type) (*layout, error) {
+	if v, ok := layouts.Load(t); ok {
+		return v.(*layout), nil
+	}
+	if derive.building[t] {
+		return nil, fmt.Errorf("zapenc: %s contains itself; a field is an offset and a width, so a recursive type has no wire form", t)
+	}
+	if derive.building == nil {
+		derive.building = map[reflect.Type]bool{}
+	}
+	derive.building[t] = true
 	lay, err := buildLayout(t)
+	delete(derive.building, t)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +306,7 @@ func fieldOf(t reflect.Type) (field, error) {
 		f.kind = kText
 	case reflect.Struct:
 		f.kind = kStruct
-		lay, err := layoutOf(t)
+		lay, err := layoutLocked(t)
 		if err != nil {
 			return f, err
 		}
