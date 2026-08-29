@@ -219,6 +219,21 @@ type plugin struct {
 	reloads  atomic.Int64
 	restarts atomic.Int64
 
+	// lastErr is why this plugin is not running, when the reason was a START that
+	// failed rather than a stop that succeeded.
+	//
+	// A LAZY plugin's mount succeeds with no process behind it — that is what Lazy
+	// means — so a failure to start happens on the FIRST REQUEST, inside the child,
+	// long after boot. Until this field the host logged one line and kept nothing: a
+	// caller got 503 "no instance running", every probe read healthy, and the reason
+	// existed only in a log nobody was tailing. Nine api.hanzo.ai surfaces sat like
+	// that while /healthz answered {"status":"ok"}.
+	//
+	// Running=false already says "deployed but down" and Disabled already separates
+	// a maintenance stop from a crash. Neither can say WHY, and why is the whole
+	// content of the page an operator is on.
+	lastErr atomic.Pointer[string]
+
 	// lastUse is the unix-nano of the most recent target() resolve, and
 	// evictions counts idle stops. Together they are what Evict reads: a
 	// plugin nothing has asked for is one nothing needs running.
@@ -268,6 +283,23 @@ type instance struct {
 	// first starve the others.
 	done    chan struct{}
 	exitErr error
+}
+
+// startError reports why the last start attempt failed, or "" when none has. It is
+// what separates "lazy and never asked" from "asked, and it will not come up" —
+// two states that are otherwise the same Running=false.
+func (p *plugin) startError() string {
+	// A running plugin has no start error, whatever it failed at earlier. DERIVED
+	// rather than cleared at each publish: there are three places an instance
+	// becomes current, and a clear that has to be remembered at all three is a
+	// clear that will be forgotten at one.
+	if p.cur.Load() != nil {
+		return ""
+	}
+	if e := p.lastErr.Load(); e != nil {
+		return *e
+	}
+	return ""
 }
 
 // target is the hot path: what the mounted route should talk to right now.
@@ -340,6 +372,10 @@ func (p *plugin) startOnDemand() (Client, string) {
 	in, err := start(p.spec)
 	if err != nil {
 		p.app.logger.Error("zip lazy plugin failed to start", "name", p.name, "err", err)
+		// Recorded, not only logged: the 503 this produces is answered for every
+		// later request too, so the reason has to outlive the log line.
+		msg := err.Error()
+		p.lastErr.Store(&msg)
 		return nil, ""
 	}
 	// PUBLISHED BY COMPARE-AND-SWAP, because p.mu does not exclude the supervisor.
