@@ -501,7 +501,6 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 	if s.Ptr {
 		ft = under(ft)
 	}
-	spell := p.spell(ft)
 	switch kindOf(s, f.Type) {
 	case aFixed:
 		fmt.Fprintf(w, "\tcopy(x.%s[:], o.BytesFixed(%s, %d))\n", s.Name, at, s.N)
@@ -512,7 +511,7 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 		}
 		fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n", at)
 		if s.Ptr {
-			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", spell, s.Name)
+			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", p.spell(ft), s.Name)
 		} else {
 			fmt.Fprintf(w, "\t\tif err := x.%s.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n", s.Name)
 		}
@@ -525,6 +524,7 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 	if !ok {
 		return fmt.Errorf("zip: field %s: no wire form for %s", s.Name, s.Type)
 	}
+	spell := p.spell(ft)
 	read := fmt.Sprintf("%s(o.%s(%s))", spell, c[1], at)
 	switch s.Type {
 	case "bytes":
@@ -567,6 +567,10 @@ func present(s Slot, spell string) string {
 
 func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p *pkg) error {
 	v := lower(s.Name)
+	ref := "x." + s.Name
+	if s.Ptr {
+		ref = "(*x." + s.Name + ")"
+	}
 	et := under(f.Type).Elem()
 	ptr := et.Kind() == reflect.Pointer
 	el := under(et)
@@ -581,17 +585,17 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 		// A nil element encodes as the zero value, which is what the reflective
 		// encoder writes for one: a list has no hole to leave.
 		if ptr {
-			fmt.Fprintf(w, "\t\t\telem := x.%s[i]\n\t\t\tif elem == nil {\n\t\t\t\telem = new(%s)\n\t\t\t}\n", s.Name, p.spell(el))
+			fmt.Fprintf(w, "\t\t\telem := %s[i]\n\t\t\tif elem == nil {\n\t\t\t\telem = new(%s)\n\t\t\t}\n", ref, p.spell(el))
 			fmt.Fprint(w, "\t\t\tenc, err := elem.MarshalZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n")
 		} else {
-			fmt.Fprintf(w, "\t\t\tenc, err := x.%s[i].MarshalZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n", s.Name)
+			fmt.Fprintf(w, "\t\t\tenc, err := %s[i].MarshalZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n", ref)
 		}
 	case el.Kind() == reflect.Array:
-		fmt.Fprintf(w, "\t\t\tenc := x.%s[i][:]\n", s.Name)
+		fmt.Fprintf(w, "\t\t\tenc := %s[i][:]\n", ref)
 	case s.Elem == "text" || s.Elem == "bytes":
-		fmt.Fprintf(w, "\t\t\tenc := []byte(x.%s[i])\n", s.Name)
+		fmt.Fprintf(w, "\t\t\tenc := []byte(%s[i])\n", ref)
 	case s.Elem == "bool":
-		fmt.Fprintf(w, "\t\t\tenc := []byte{0}\n\t\t\tif x.%s[i] {\n\t\t\t\tenc[0] = 1\n\t\t\t}\n", s.Name)
+		fmt.Fprintf(w, "\t\t\tenc := []byte{0}\n\t\t\tif %s[i] {\n\t\t\t\tenc[0] = 1\n\t\t\t}\n", ref)
 	default:
 		c, ok := setter[s.Elem]
 		if !ok {
@@ -599,7 +603,7 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 		}
 		_ = c
 		fmt.Fprint(w, "\t\t\tvar full [8]byte\n")
-		fmt.Fprintf(w, "\t\t\tbinary.LittleEndian.PutUint64(full[:], %s)\n", element(s))
+		fmt.Fprintf(w, "\t\t\tbinary.LittleEndian.PutUint64(full[:], %s)\n", element(s, ref))
 		fmt.Fprintf(w, "\t\t\tenc := full[:%d]\n", widthOf(s.Elem))
 		if s.Elem == "f32" || s.Elem == "f64" {
 			p.std("math")
@@ -609,8 +613,13 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 	fmt.Fprint(w, "\t\t\tblob = append(blob, n[:]...)\n\t\t\tblob = append(blob, enc...)\n\t\t}\n")
 
 	w = outer
-	fmt.Fprintf(w, "\t%sAt, %sN := 0, len(x.%s)\n", v, v, s.Name)
-	fmt.Fprintf(w, "\tif %sN > 0 {\n\t\tvar blob []byte\n\t\tfor %s range x.%s {\n", v, index(&elem), s.Name)
+	if s.Ptr {
+		// An absent pointer writes nothing, and its length cannot be asked for.
+		fmt.Fprintf(w, "\t%sAt, %sN := 0, 0\n\tif x.%s != nil {\n\t\t%sN = len(%s)\n\t}\n", v, v, s.Name, v, ref)
+	} else {
+		fmt.Fprintf(w, "\t%sAt, %sN := 0, len(%s)\n", v, v, ref)
+	}
+	fmt.Fprintf(w, "\tif %sN > 0 {\n\t\tvar blob []byte\n\t\tfor %s range %s {\n", v, index(&elem), ref)
 	w.Write(elem.Bytes())
 	fmt.Fprintf(w, "\t\t%sAt = b.WriteBytes(blob)\n\t}\n", v)
 	p.std("encoding/binary")
@@ -628,14 +637,14 @@ func index(body *bytes.Buffer) string {
 
 // element spells one list element for the little-endian write. A float crosses
 // as its bits, which is what the reflective encoder writes, so the two agree.
-func element(s Slot) string {
+func element(s Slot, ref string) string {
 	switch s.Elem {
 	case "f32":
-		return fmt.Sprintf("uint64(math.Float32bits(float32(x.%s[i])))", s.Name)
+		return fmt.Sprintf("uint64(math.Float32bits(float32(%s[i])))", ref)
 	case "f64":
-		return fmt.Sprintf("math.Float64bits(float64(x.%s[i]))", s.Name)
+		return fmt.Sprintf("math.Float64bits(float64(%s[i]))", ref)
 	}
-	return fmt.Sprintf("uint64(x.%s[i])", s.Name)
+	return fmt.Sprintf("uint64(%s[i])", ref)
 }
 
 func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg) error {
@@ -676,7 +685,11 @@ func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg)
 	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n", at)
 	fmt.Fprintf(w, "\t\trows := make(%s, l.Len())\n\t\tfor %s range rows {\n", p.spell(ft), index(&elem))
 	w.Write(elem.Bytes())
-	fmt.Fprintf(w, "\t\t}\n\t\tx.%s = rows\n\t}\n", s.Name)
+	assign := "x." + s.Name + " = rows"
+	if s.Ptr {
+		assign = "x." + s.Name + " = &rows"
+	}
+	fmt.Fprintf(w, "\t\t}\n\t\t%s\n\t}\n", assign)
 	return nil
 }
 

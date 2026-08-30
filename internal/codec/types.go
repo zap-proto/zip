@@ -58,8 +58,10 @@ type Trunk struct {
 	Bits []bool
 	Kids []Leaf
 	Ptrs []*Leaf
-	Seal Sealed
+	Seal  Sealed
 	Seals []Sealed
+	PKids *[]Leaf
+	PNums *[]uint32
 }
 
 // Ided is what the reflective encoder refuses: an id is [32]byte, and a fixed
