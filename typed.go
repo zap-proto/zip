@@ -3,6 +3,7 @@ package zip
 import (
 	"cmp"
 	"context"
+	"encoding"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -388,8 +389,10 @@ func bindURL(in any, values map[string]string) {
 }
 
 // setScalar writes one wire string into one field, converting by the field's
-// kind. Anything it cannot represent (structs, slices, maps, pointers) is left
-// alone — a URL carries scalars.
+// kind, and asking a field whose kind cannot carry a string to read itself —
+// see [setText]. What is left after both is a record, not a value: a slice, a
+// map, a struct with no text form. Those stay untouched, because a URL carries
+// a value.
 func setScalar(fv reflect.Value, val string) {
 	switch fv.Kind() {
 	case reflect.String:
@@ -416,7 +419,45 @@ func setScalar(fv reflect.Value, val string) {
 		if f, err := strconv.ParseFloat(val, fv.Type().Bits()); err == nil {
 			fv.SetFloat(f)
 		}
+	default:
+		setText(fv, val)
 	}
+}
+
+// setText writes one wire string into a field that states how to read itself
+// from text.
+//
+// An id, a hash, a timestamp, a public key: each is one value with one written
+// form, and each is spelled in a URL every day. The kinds above cannot hold any
+// of them — a 32-byte id is an ARRAY — so a route addressing a resource by its
+// id published a query parameter that silently bound nothing, and the handler
+// ran on a zero id. The type already answered the question: it implements
+// [encoding.TextUnmarshaler], which is precisely "here is how to read me from
+// the characters a URL can carry".
+//
+// The basic kinds are decided ABOVE this, so a named string that also reads
+// text keeps the reading it has always had, and this only reaches what nothing
+// else could carry.
+//
+// Reading is all-or-nothing: the value is built beside the field and moves onto
+// it only on success, so an unparseable value leaves the zero — the same
+// contract the numeric cases keep, rather than a half-written field.
+func setText(fv reflect.Value, val string) {
+	t := fv.Type()
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	// TextUnmarshaler is declared on the pointer, so the fresh value is one.
+	held := reflect.New(t)
+	read, ok := held.Interface().(encoding.TextUnmarshaler)
+	if !ok || read.UnmarshalText([]byte(val)) != nil {
+		return
+	}
+	if fv.Kind() == reflect.Pointer {
+		fv.Set(held)
+		return
+	}
+	fv.Set(held.Elem())
 }
 
 func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
