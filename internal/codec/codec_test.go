@@ -101,6 +101,7 @@ func trunks() []Trunk {
 			Bits: []bool{true, false, true},
 			Kids: []Leaf{{N: 3, S: "x"}, {N: 4, S: "y"}},
 			Ptrs: []*Leaf{{N: 5, S: "p"}, {N: 6, S: "q"}},
+			Seals: []Sealed{{}, {}},
 		},
 		{Text: "only text"},
 		{Kids: []Leaf{{}}},

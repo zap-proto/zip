@@ -21,6 +21,14 @@ type Leaf struct {
 	S string
 }
 
+// Sealed is a value with no slots: every field is unexported, so there is
+// nothing to state and nothing crosses. time.Time and netip.AddrPort are this
+// from the wire's side.
+type Sealed struct {
+	when  int64
+	where string
+}
+
 // Trunk carries one field of every form the emitter writes.
 type Trunk struct {
 	B    bool
@@ -50,6 +58,8 @@ type Trunk struct {
 	Bits []bool
 	Kids []Leaf
 	Ptrs []*Leaf
+	Seal Sealed
+	Seals []Sealed
 }
 
 // Ided is what the reflective encoder refuses: an id is [32]byte, and a fixed

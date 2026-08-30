@@ -24,6 +24,13 @@ func wide(b []byte) uint64 {
 	return binary.LittleEndian.Uint64(buf[:])
 }
 
+// empty is the ZAP message a value with no slots crosses as.
+func empty() []byte {
+	b := zap.NewBuilder(zap.HeaderSize)
+	b.StartObject(0).FinishAsRoot()
+	return b.Finish()
+}
+
 // ---- Ided --------------------------------------------------------------
 
 const (
@@ -137,34 +144,36 @@ func (x *Leaf) UnmarshalZAP(data []byte) error {
 // ---- Trunk -------------------------------------------------------------
 
 const (
-	trunkBAt    = 0
-	trunkI8At   = 1
-	trunkI16At  = 2
-	trunkI32At  = 4
-	trunkI64At  = 8
-	trunkU8At   = 16
-	trunkU16At  = 18
-	trunkU32At  = 20
-	trunkU64At  = 24
-	trunkF32At  = 32
-	trunkF64At  = 40
-	trunkCAt    = 48
-	trunkTextAt = 56
-	trunkRawAt  = 64
-	trunkLeafAt = 72
-	trunkPtrUAt = 80
-	trunkPtrSAt = 88
-	trunkPtrBAt = 96
-	trunkPtrLAt = 104
-	trunkNumsAt = 112
-	trunkSigsAt = 120
-	trunkBigsAt = 128
-	trunkStrsAt = 136
-	trunkBufsAt = 144
-	trunkBitsAt = 152
-	trunkKidsAt = 160
-	trunkPtrsAt = 168
-	trunkSize   = 176
+	trunkBAt     = 0
+	trunkI8At    = 1
+	trunkI16At   = 2
+	trunkI32At   = 4
+	trunkI64At   = 8
+	trunkU8At    = 16
+	trunkU16At   = 18
+	trunkU32At   = 20
+	trunkU64At   = 24
+	trunkF32At   = 32
+	trunkF64At   = 40
+	trunkCAt     = 48
+	trunkTextAt  = 56
+	trunkRawAt   = 64
+	trunkLeafAt  = 72
+	trunkPtrUAt  = 80
+	trunkPtrSAt  = 88
+	trunkPtrBAt  = 96
+	trunkPtrLAt  = 104
+	trunkNumsAt  = 112
+	trunkSigsAt  = 120
+	trunkBigsAt  = 128
+	trunkStrsAt  = 136
+	trunkBufsAt  = 144
+	trunkBitsAt  = 152
+	trunkKidsAt  = 160
+	trunkPtrsAt  = 168
+	trunkSealAt  = 176
+	trunkSealsAt = 184
+	trunkSize    = 192
 )
 
 var _ wire = (*Trunk)(nil)
@@ -290,6 +299,18 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		}
 		ptrsAt = b.WriteBytes(blob)
 	}
+	sealsAt, sealsN := 0, len(x.Seals)
+	if sealsN > 0 {
+		var blob []byte
+		for range x.Seals {
+			enc := empty()
+			var n [4]byte
+			binary.LittleEndian.PutUint32(n[:], uint32(len(enc)))
+			blob = append(blob, n[:]...)
+			blob = append(blob, enc...)
+		}
+		sealsAt = b.WriteBytes(blob)
+	}
 	ob := b.StartObject(trunkSize)
 	ob.SetBool(trunkBAt, bool(x.B))
 	ob.SetInt8(trunkI8At, int8(x.I8))
@@ -326,6 +347,7 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		}
 		ob.SetBytes(trunkPtrLAt, innerPtrL)
 	}
+	ob.SetBytes(trunkSealAt, empty())
 	if numsN > 0 {
 		ob.SetList(trunkNumsAt, numsAt, numsN)
 	}
@@ -349,6 +371,9 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	}
 	if ptrsN > 0 {
 		ob.SetList(trunkPtrsAt, ptrsAt, ptrsN)
+	}
+	if sealsN > 0 {
+		ob.SetList(trunkSealsAt, sealsAt, sealsN)
 	}
 	ob.FinishAsRoot()
 	return b.Finish(), nil
@@ -460,6 +485,12 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 			}
 		}
 		x.Ptrs = rows
+	}
+	if l := o.List(trunkSealsAt); l.Len() > 0 {
+		rows := make([]Sealed, l.Len())
+		for range rows {
+		}
+		x.Seals = rows
 	}
 	return nil
 }
