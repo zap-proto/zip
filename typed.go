@@ -419,9 +419,36 @@ func setScalar(fv reflect.Value, val string) {
 		if f, err := strconv.ParseFloat(val, fv.Type().Bits()); err == nil {
 			fv.SetFloat(f)
 		}
+	case reflect.Slice:
+		setList(fv, val)
 	default:
 		setText(fv, val)
 	}
+}
+
+// setList writes one wire string into a repeated field, splitting it on commas.
+//
+// That is `style: form, explode: false`, the spelling OpenAPI already publishes
+// for a repeated query parameter and the one a URL can carry in a single value
+// — which is what the binder is given, one value per name. Each element is
+// written by [setScalar], so a list of ids says nothing about ids a second
+// time, and a list of lists is refused the same way a bare one would be.
+//
+// A []byte is not a list here. encoding/json spells it as one base64 string, so
+// splitting it on commas would invent a shape nothing sends; it goes to
+// [setText] instead, where a named byte slice with its own written form is read
+// by that form.
+func setList(fv reflect.Value, val string) {
+	if fv.Type().Elem().Kind() == reflect.Uint8 {
+		setText(fv, val)
+		return
+	}
+	parts := strings.Split(val, ",")
+	out := reflect.MakeSlice(fv.Type(), len(parts), len(parts))
+	for i, p := range parts {
+		setScalar(out.Index(i), strings.TrimSpace(p))
+	}
+	fv.Set(out)
 }
 
 // setText writes one wire string into a field that states how to read itself
@@ -459,6 +486,12 @@ func setText(fv reflect.Value, val string) {
 	}
 	fv.Set(held.Elem())
 }
+
+// readsText is [setText]'s question asked of the TYPE, which is what the
+// document has to ask: describing a parameter there is no value to address.
+func readsText(t reflect.Type) bool { return reflect.PointerTo(t).Implements(textReader) }
+
+var textReader = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
 func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
 	scope := on.OpScope()
