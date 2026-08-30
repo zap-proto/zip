@@ -21,29 +21,31 @@ func stringReader(s string) io.Reader { return strings.NewReader(s) }
 // searchIn exercises every kind the URL binder converts, plus a body-only
 // field, plus a path param that shares its name with a query key.
 type searchIn struct {
-	Owner   string   `json:"owner"` // path param on the member route
-	Q       string   `json:"q"`
-	Limit   int      `json:"limit"`
-	Offset  uint32   `json:"offset"`
-	Score   float64  `json:"score"`
-	Debug   bool     `json:"debug"`
-	Ignored []string `json:"ignored"` // not a scalar: never URL-bound
+	Owner  string            `json:"owner"` // path param on the member route
+	Q      string            `json:"q"`
+	Limit  int               `json:"limit"`
+	Offset uint32            `json:"offset"`
+	Score  float64           `json:"score"`
+	Debug  bool              `json:"debug"`
+	Tags   []string          `json:"tags"`  // a list: comma-separated in a URL
+	Shape  map[string]string `json:"shape"` // no names to write down: never URL-bound
 }
 
 type searchOut struct {
-	Owner   string   `json:"owner"`
-	Q       string   `json:"q"`
-	Limit   int      `json:"limit"`
-	Offset  uint32   `json:"offset"`
-	Score   float64  `json:"score"`
-	Debug   bool     `json:"debug"`
-	Ignored []string `json:"ignored"`
+	Owner  string            `json:"owner"`
+	Q      string            `json:"q"`
+	Limit  int               `json:"limit"`
+	Offset uint32            `json:"offset"`
+	Score  float64           `json:"score"`
+	Debug  bool              `json:"debug"`
+	Tags   []string          `json:"tags"`
+	Shape  map[string]string `json:"shape"`
 }
 
 func echoSearch(_ context.Context, in *searchIn) (*searchOut, error) {
 	return &searchOut{
 		Owner: in.Owner, Q: in.Q, Limit: in.Limit, Offset: in.Offset,
-		Score: in.Score, Debug: in.Debug, Ignored: in.Ignored,
+		Score: in.Score, Debug: in.Debug, Tags: in.Tags, Shape: in.Shape,
 	}, nil
 }
 
@@ -149,10 +151,14 @@ func TestTypedGetIgnoresUnknownQueryKeys(t *testing.T) {
 }
 
 // Non-scalar fields are not URL-bindable and are left alone.
-func TestTypedGetLeavesNonScalarsUnbound(t *testing.T) {
+func TestTypedGetCarriesAListAndLeavesWhatAURLCannotName(t *testing.T) {
 	a := searchApp(t)
-	if _, out := getSearch(t, a, "GET", "/v1/t/search?ignored=a,b", ""); out.Ignored != nil {
-		t.Errorf("ignored = %v, want nil (a slice is not URL-bindable)", out.Ignored)
+	_, out := getSearch(t, a, "GET", "/v1/t/search?tags=a,b&shape=x", "")
+	if len(out.Tags) != 2 || out.Tags[0] != "a" || out.Tags[1] != "b" {
+		t.Errorf("tags = %v, want [a b] — a URL writes a list comma-separated", out.Tags)
+	}
+	if out.Shape != nil {
+		t.Errorf("shape = %v, want nil — a map has no names for a URL to write", out.Shape)
 	}
 }
 
@@ -228,8 +234,14 @@ func TestOpenAPIDeclaresQueryParams(t *testing.T) {
 			t.Errorf("parameter %q type = %v, want %s", name, schema["type"], wantType)
 		}
 	}
-	// A non-scalar is not declared, because the binder cannot fill it.
-	if _, ok := got["ignored"]; ok {
+	// Declared exactly where the binder can fill it: a list is an array, and a
+	// map is neither declared nor bound.
+	if tags, ok := got["tags"]; !ok {
+		t.Errorf("the list the binder fills is missing from the document")
+	} else if schema, _ := tags["schema"].(map[string]any); schema["type"] != "array" {
+		t.Errorf("parameter tags type = %v, want array", schema["type"])
+	}
+	if _, ok := got["shape"]; ok {
 		t.Errorf("declared a query parameter the binder cannot bind")
 	}
 	// A POST declares a requestBody instead of query parameters — the two are

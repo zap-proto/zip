@@ -120,14 +120,17 @@ func TestBodyless_ExampleSurvivesAsParameterExamples(t *testing.T) {
 	}
 }
 
-// A bodyless op's flags are what the URL can actually carry. `--tags` on a
-// DELETE used to marshal fine, go out as a query value and be dropped by the
-// binder: a flag the CLI offered and the wire ignored.
+// A bodyless op's flags are what the URL can actually carry, and nothing else.
+// `--tags` used to be offered, marshal fine, go out as a query value and be
+// dropped: a flag the CLI offered and the wire ignored. It rides now, so it is
+// offered now — one predicate answers both, so neither can offer what the other
+// drops. `--shape` is the standing negative: a map has no names to write down.
 func TestBodyless_FlagsAreWhatTheURLCanCarry(t *testing.T) {
 	type wideIn struct {
-		ID   string   `json:"id"`
-		Note string   `json:"note"`
-		Tags []string `json:"tags"`
+		ID    string            `json:"id"`
+		Note  string            `json:"note"`
+		Tags  []string          `json:"tags"`
+		Shape map[string]string `json:"shape"`
 	}
 	a := zip.New(zip.Config{AppName: "wide", DisableStartupMessage: true})
 	zip.Delete(a, "/v1/wide/things/:id", func(_ context.Context, in *wideIn) (*wideIn, error) { return in, nil })
@@ -139,11 +142,11 @@ func TestBodyless_FlagsAreWhatTheURLCanCarry(t *testing.T) {
 			byName[c.Name] = append(byName[c.Name], f.Name)
 		}
 	}
-	if got := byName["things-delete"]; len(got) != 1 || got[0] != "note" {
-		t.Errorf("DELETE flags = %v, want just --note — a slice cannot ride a URL", got)
+	if got := byName["things-delete"]; len(got) != 2 || got[0] != "note" || got[1] != "tags" {
+		t.Errorf("DELETE flags = %v, want --note and --tags, and never --shape", got)
 	}
-	if got := byName["things-create"]; len(got) != 3 {
-		t.Errorf("POST flags = %v, want all three — a body carries anything", got)
+	if got := byName["things-create"]; len(got) != 4 {
+		t.Errorf("POST flags = %v, want all four — a body carries anything", got)
 	}
 }
 

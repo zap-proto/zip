@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"encoding"
 	"encoding/json"
 	"maps"
 	"net/http"
@@ -461,41 +462,58 @@ type urlField struct {
 	required bool
 }
 
-// urlFields lists the top-level scalar fields of an op's input — the exact set
+// urlFields lists the fields of an op's input a URL can carry — the exact set
 // bindURL can fill, whether the value arrives as a path segment or a query key.
 // ONE list serves both because it is ONE binder: a path param and a query param
 // are the same kind of value, so the document describes them from the same
-// place. Non-scalars are omitted because the binder cannot fill them either, so
-// naming them would promise a parameter that silently does nothing.
+// place. What a URL cannot carry is omitted, because naming it would promise a
+// parameter that silently does nothing.
+//
+// [urlKind] is the one predicate, so this list and the binder cannot come to
+// disagree about what a URL carries. A record's leaves are listed under their
+// dotted names, one entry each, because that is what a caller writes and what
+// the document must therefore publish.
 func urlFields(t reflect.Type) urlFieldList {
+	var out urlFieldList
+	collectURLFields(t, "", map[reflect.Type]bool{}, &out)
+	return out
+}
+
+// collectURLFields walks t's leaves. inside is the record it is already inside,
+// so a self-referential input names its leaves once instead of forever — the
+// binder is bounded by the caller's keys, but a document walk has none to stop
+// at.
+func collectURLFields(t reflect.Type, prefix string, inside map[reflect.Type]bool, out *urlFieldList) {
 	if t == nil {
-		return nil
+		return
 	}
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t.Kind() != reflect.Struct {
-		return nil
+	if t.Kind() != reflect.Struct || inside[t] {
+		return
 	}
-	var out urlFieldList
+	inside[t] = true
+	defer delete(inside, t)
 	for _, f := range wireFields(t) {
 		name := urlFieldName(f)
 		if name == "-" {
 			continue // on the wire, but not in the URL.
 		}
+		name = prefix + name
 		ft := f.Type
 		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
-		switch ft.Kind() {
-		case reflect.String, reflect.Bool,
-			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-			reflect.Float32, reflect.Float64:
-			out = append(out, urlField{
+		switch urlKind(ft) {
+		case urlRecord:
+			collectURLFields(ft, name+".", inside, out)
+		case urlNone:
+		default:
+			*out = append(*out, urlField{
 				name:   name,
 				field:  jsonFieldName(f),
-				schema: schemaOf(ft, nil, nil),
+				schema: urlSchema(ft),
 				// The same `validate:"required"` that makes a body field
 				// required in its schema makes a URL-borne one required in its
 				// parameter. The handler refuses the request either way; a
@@ -506,7 +524,78 @@ func urlFields(t reflect.Type) urlFieldList {
 			})
 		}
 	}
-	return out
+}
+
+// What a URL can carry, and how. A URL is text: a value written as characters,
+// a list of them, or a record whose leaves are either. Nothing else — a map has
+// no field names to write down, and neither does an arbitrary interface.
+type urlness int
+
+const (
+	urlNone   urlness = iota // not carried by a URL
+	urlValue                 // one value, written as characters
+	urlList                  // several of them, comma-separated
+	urlRecord                // a struct, whose leaves are named through it
+)
+
+// urlKind classifies t once, for the binder and for the document alike.
+//
+// A value is either a kind that converts from characters or a type that says
+// how to read itself from them (encoding.TextUnmarshaler) — an id, a hash, a
+// timestamp. Order matters: the KIND is asked first, so a named string that also
+// reads text keeps the plain reading it has always had.
+func urlKind(t reflect.Type) urlness {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil {
+		return urlNone
+	}
+	switch t.Kind() {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return urlValue
+	}
+	if reflect.PointerTo(t).Implements(textUnmarshaler) {
+		return urlValue
+	}
+	switch t.Kind() {
+	case reflect.Slice:
+		// Bytes are not a list of values. encoding/json writes them base64 and
+		// a comma-separated reading would be a new and wrong one.
+		if t.Elem().Kind() == reflect.Uint8 {
+			return urlNone
+		}
+		if urlKind(t.Elem()) == urlValue {
+			return urlList
+		}
+	case reflect.Struct:
+		// A struct that writes its own JSON is not described by its fields, so
+		// there are no leaves to name through it.
+		if isMarshaler(t) {
+			return urlNone
+		}
+		return urlRecord
+	}
+	return urlNone
+}
+
+var textUnmarshaler = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+
+// urlSchema is what a URL-borne value looks like in the document. A value that
+// reads itself from text is a string there whatever its Go shape: the wire it
+// arrives on is characters, so `type: string` is the true thing to say about the
+// parameter — even where the same field in a body is something else.
+func urlSchema(t reflect.Type) map[string]any {
+	if urlKind(t) == urlList {
+		return map[string]any{"type": "array", "items": urlSchema(t.Elem())}
+	}
+	if s := schemaOf(t, nil, nil); len(s) > 0 {
+		return s
+	}
+	return map[string]any{"type": "string"}
 }
 
 type urlFieldList []urlField

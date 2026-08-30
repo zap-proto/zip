@@ -368,24 +368,102 @@ func bindURL(in any, values map[string]string) {
 	if v.Kind() != reflect.Struct {
 		return
 	}
+	bindFields(v, "", values)
+}
+
+// bindFields writes the values a URL carried onto the fields of v, under prefix.
+// It reads [urlKind], the same predicate the document's parameter list reads, so
+// what a caller can write and what the document publishes are one answer.
+//
+// A record's leaves are named THROUGH it — `?startIndex.utxo=` — and only
+// through it. Nothing is guessed by matching a bare name inside a sub-struct,
+// which was the hazard: a plain `?address=` still reaches a top-level address
+// and never a nested one, so an input that nests a record still names its target
+// explicitly and an authorizer reading that target reads the one the caller
+// wrote.
+//
+// Recursion is bounded by the keys, not by the type: a record is descended into
+// only when some key is written under its prefix, so a self-referential input
+// costs one lookup per level a caller actually named.
+func bindFields(v reflect.Value, prefix string, values map[string]string) bool {
+	bound := false
 	for _, f := range wireFields(v.Type()) {
 		name := urlFieldName(f)
 		if name == "-" {
 			continue
 		}
+		name = prefix + name
 		// FieldByIndex, because wireFields reaches through embedding: the index is
 		// the path to the field, which is just [i] for the type's own fields.
 		fv := v.FieldByIndex(f.Index)
 		if !fv.CanSet() {
 			continue
 		}
+		if urlKind(fv.Type()) == urlRecord {
+			if bindRecord(fv, name+".", values) {
+				bound = true
+			}
+			continue
+		}
 		for k, val := range values {
 			if strings.EqualFold(k, name) {
-				setScalar(fv, val)
+				setValue(fv, val)
+				bound = true
 				break
 			}
 		}
 	}
+	return bound
+}
+
+// bindRecord binds the leaves of one nested record, allocating a pointer only if
+// the URL actually named something inside it — an absent record stays absent
+// rather than becoming an empty one.
+func bindRecord(fv reflect.Value, prefix string, values map[string]string) bool {
+	if !named(prefix, values) {
+		return false
+	}
+	if fv.Kind() != reflect.Pointer {
+		return bindFields(fv, prefix, values)
+	}
+	held := reflect.New(fv.Type().Elem())
+	if !bindFields(held.Elem(), prefix, values) {
+		return false
+	}
+	fv.Set(held)
+	return true
+}
+
+// named reports whether the URL wrote anything under prefix.
+func named(prefix string, values map[string]string) bool {
+	for k := range values {
+		if len(k) > len(prefix) && strings.EqualFold(k[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// setValue writes one URL-borne string onto one field: a list where the field
+// holds several values, one value otherwise.
+func setValue(fv reflect.Value, val string) {
+	if urlKind(fv.Type()) != urlList {
+		setScalar(fv, val)
+		return
+	}
+	// A list is written the way a URL has always written one: comma-separated.
+	// An empty value is an empty list and not a list of one empty string, which
+	// is what `?addresses=` means every time anyone writes it.
+	if val == "" {
+		fv.Set(reflect.MakeSlice(fv.Type(), 0, 0))
+		return
+	}
+	parts := strings.Split(val, ",")
+	held := reflect.MakeSlice(fv.Type(), len(parts), len(parts))
+	for i, part := range parts {
+		setScalar(held.Index(i), part)
+	}
+	fv.Set(held)
 }
 
 // setScalar writes one wire string into one field, converting by the field's
