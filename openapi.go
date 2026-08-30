@@ -461,12 +461,51 @@ type urlField struct {
 	required bool
 }
 
-// urlFields lists the top-level scalar fields of an op's input — the exact set
-// bindURL can fill, whether the value arrives as a path segment or a query key.
+// urlSchema is the schema of what a URL carries into a field of type t, and nil
+// when it carries nothing.
+//
+// It is [setScalar]'s rule stated for the document, and the ONE place the two
+// are held together: the binder fills exactly what this names, so a parameter
+// that does nothing is never published and one that works is never left out.
+// The same question was answered by a second kind switch here, and the second
+// one drifted — an id bound by [setText] was described by neither.
+//
+// A type that reads itself from text is a STRING here whatever it is made of.
+// An id is [32]byte and a time is a struct, and each is one word in the URL and
+// the same word in the JSON body beside it; schemaOf describes what a value is
+// MADE of, which for these is not what it looks like.
+func urlSchema(t reflect.Type) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if readsText(t) {
+		return map[string]any{"type": "string"}
+	}
+	switch t.Kind() {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return schemaOf(t, nil, nil)
+	case reflect.Slice:
+		// A []byte with no written form of its own is one base64 string, which
+		// the binder does not split and cannot read — so nothing is published.
+		if t.Elem().Kind() == reflect.Uint8 {
+			return nil
+		}
+		if item := urlSchema(t.Elem()); item != nil {
+			return map[string]any{"type": "array", "items": item}
+		}
+	}
+	return nil
+}
+
+// urlFields lists the fields of an op's input a URL fills — the exact set
+// bindURL fills, whether the value arrives as a path segment or a query key.
 // ONE list serves both because it is ONE binder: a path param and a query param
 // are the same kind of value, so the document describes them from the same
-// place. Non-scalars are omitted because the binder cannot fill them either, so
-// naming them would promise a parameter that silently does nothing.
+// place. What the binder cannot fill is omitted, because naming it would
+// promise a parameter that silently does nothing.
 func urlFields(t reflect.Type) urlFieldList {
 	if t == nil {
 		return nil
@@ -483,28 +522,21 @@ func urlFields(t reflect.Type) urlFieldList {
 		if name == "-" {
 			continue // on the wire, but not in the URL.
 		}
-		ft := f.Type
-		for ft.Kind() == reflect.Pointer {
-			ft = ft.Elem()
+		schema := urlSchema(f.Type)
+		if schema == nil {
+			continue // on the wire, but not something a URL carries.
 		}
-		switch ft.Kind() {
-		case reflect.String, reflect.Bool,
-			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-			reflect.Float32, reflect.Float64:
-			out = append(out, urlField{
-				name:   name,
-				field:  jsonFieldName(f),
-				schema: schemaOf(ft, nil, nil),
-				// The same `validate:"required"` that makes a body field
-				// required in its schema makes a URL-borne one required in its
-				// parameter. The handler refuses the request either way; a
-				// document that called it optional was describing a call that
-				// cannot succeed, and every generated client made the argument
-				// optional to match.
-				required: strings.Contains(f.Tag.Get("validate"), "required"),
-			})
-		}
+		out = append(out, urlField{
+			name:   name,
+			field:  jsonFieldName(f),
+			schema: schema,
+			// The same `validate:"required"` that makes a body field required in
+			// its schema makes a URL-borne one required in its parameter. The
+			// handler refuses the request either way; a document that called it
+			// optional was describing a call that cannot succeed, and every
+			// generated client made the argument optional to match.
+			required: strings.Contains(f.Tag.Get("validate"), "required"),
+		})
 	}
 	return out
 }
