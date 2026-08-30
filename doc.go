@@ -43,18 +43,43 @@ type Doc struct {
 	Response json.RawMessage
 }
 
-// docs is the process-wide extraction, keyed by "METHOD /path" — the same
-// identity the route registry uses, so a doc with no matching route is a
-// generator bug that shows up as an unused entry rather than a silent mismatch.
+// docs is the process-wide extraction, keyed by the DECLARING PACKAGE and the
+// operation's address.
+//
+// The package is part of the key because this map is one map for a whole
+// process, and an address is only unique within the app that serves it. Two
+// chains in one node both answer GET /height — the mount is what tells them
+// apart, and it is not in the key — so whichever init() ran last silently
+// published its prose for the other's route. Nothing failed: only the sentence
+// was wrong, in the document and in the MCP tool, which is why it survived
+// every test. Seven addresses collided that way between the P-Chain and the
+// X-Chain alone.
+//
+// It is the same namespacing the schema registry already does for named types
+// (see schemaRegistry.origin): who DECLARED a thing is a property of the code,
+// and it is what keeps two declarations of one name apart.
 var docs = map[string]Doc{}
 
-// Describe records documentation for one operation. Generated code calls it from
-// an init(); hand-written calls are possible but defeat the point, since the
-// comment is then no longer the single source.
-func Describe(methodPath string, d Doc) { docs[methodPath] = d }
+// DocKey is the key a package's operation is filed under. One function, so the
+// generator that writes a key and the registry that reads one cannot spell it
+// differently.
+func DocKey(pkg, method, path string) string { return pkg + " " + method + " " + path }
+
+// Describe records documentation for one operation, under the key cmd/zipdoc
+// built with [DocKey]. Generated code calls it from an init(); hand-written
+// calls are possible but defeat the point, since the comment is then no longer
+// the single source.
+func Describe(key string, d Doc) { docs[key] = d }
 
 // docFor returns the extraction for an operation, if cmd/zipdoc ran.
-func docFor(method, path string) (Doc, bool) {
+//
+// An unqualified key is still read, because a generated file written before the
+// key carried a package is still correct for a process serving one app — which
+// is most of them. A qualified key wins where both exist.
+func docFor(pkg, method, path string) (Doc, bool) {
+	if d, ok := docs[DocKey(pkg, method, path)]; ok {
+		return d, true
+	}
 	d, ok := docs[method+" "+path]
 	return d, ok
 }
@@ -74,7 +99,7 @@ func docFor(method, path string) (Doc, bool) {
 // The summary is derived here, not by the caller, so every projection of one
 // operation shortens it identically.
 func Prose(method, path string) (summary, description string, ok bool) {
-	d, ok := docFor(method, path)
+	d, ok := docFor("", method, path)
 	if !ok || d.Description == "" {
 		return "", "", false
 	}

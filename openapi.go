@@ -117,7 +117,7 @@ func (a *App) buildOpenAPI() map[string]any {
 		// when the generator has not run, which degrades to the schema-only
 		// spec rather than failing — a spec without descriptions is still a
 		// usable spec.
-		doc, hasDoc := docFor(op.Method, op.Path)
+		doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
 		if hasDoc {
 			if doc.Description != "" {
 				opObj["description"] = doc.Description

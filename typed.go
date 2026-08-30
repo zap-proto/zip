@@ -6,6 +6,7 @@ import (
 	"encoding"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,11 @@ type registeredOp struct {
 	Tags     []string
 	InType   reflect.Type
 	OutType  reflect.Type
+	// Pkg is the import path of the package the handler was declared in, read
+	// off the function itself at registration. It namespaces this op's entry in
+	// the process-wide documentation map, where an address alone is not unique:
+	// two chains in one node both answer GET /height. See [docs].
+	Pkg string
 	// Origin names the app this op was DECLARED in when it arrived here through
 	// composition — empty for an op this app registered itself. It qualifies the
 	// op's named types in the composed document (see schemaRegistry.origin), so
@@ -566,6 +572,24 @@ func readsText(t reflect.Type) bool {
 
 var textReader = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
+// pkgOf is the import path of the package fn was declared in. The runtime
+// names a function fully — "github.com/luxfi/node/vms/platformvm.(*Service).getHeight"
+// — and the package ends at the last '/' segment's first '.', which is the one
+// place a path cannot have one.
+func pkgOf(fn any) string {
+	at := runtime.FuncForPC(reflect.ValueOf(fn).Pointer())
+	if at == nil {
+		return ""
+	}
+	full := at.Name()
+	slash := strings.LastIndexByte(full, '/')
+	dot := strings.IndexByte(full[slash+1:], '.')
+	if dot < 0 {
+		return full
+	}
+	return full[:slash+1+dot]
+}
+
 func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
 	scope := on.OpScope()
 	app := scope.App
@@ -579,6 +603,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	op := &registeredOp{
 		Method:  method,
 		Path:    path,
+		Pkg:     pkgOf(fn),
 		InType:  reflect.TypeOf(inZero),
 		OutType: reflect.TypeOf(outZero),
 	}

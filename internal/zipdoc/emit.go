@@ -57,7 +57,7 @@ func (p Package) Render() ([]byte, error) {
 	}
 	b.WriteString("func init() {\n")
 	for _, o := range ops {
-		fmt.Fprintf(&b, "\t%sDescribe(%q, %sDoc{\n", q, o.Key(), q)
+		fmt.Fprintf(&b, "\t%sDescribe(%q, %sDoc{\n", q, p.Path+" "+o.Key(), q)
 		if o.Description != "" {
 			fmt.Fprintf(&b, "\t\tDescription: %s,\n", strconv.Quote(o.Description))
 		}

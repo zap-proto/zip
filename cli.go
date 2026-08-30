@@ -112,7 +112,7 @@ func (a *App) Commands() []Command {
 	ops := a.Registry()
 	cmds := make([]Command, 0, len(ops))
 	for _, op := range ops {
-		doc, has := docFor(op.Method, op.Path)
+		doc, has := docFor(op.Pkg, op.Method, op.Path)
 		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op
 		c.Args, c.Flags = bindIn(op.InType, pathParams(op.Path), docFields(has, doc), hasBody(op.Method))
