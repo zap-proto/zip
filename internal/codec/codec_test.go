@@ -102,6 +102,8 @@ func trunks() []Trunk {
 			Kids: []Leaf{{N: 3, S: "x"}, {N: 4, S: "y"}},
 			Ptrs: []*Leaf{{N: 5, S: "p"}, {N: 6, S: "q"}},
 			Seals: []Sealed{{}, {}},
+			PKids: &[]Leaf{{N: 7, S: "pk"}},
+			PNums: &[]uint32{11, 12},
 		},
 		{Text: "only text"},
 		{Kids: []Leaf{{}}},

@@ -173,7 +173,9 @@ const (
 	trunkPtrsAt  = 168
 	trunkSealAt  = 176
 	trunkSealsAt = 184
-	trunkSize    = 192
+	trunkPKidsAt = 192
+	trunkPNumsAt = 200
+	trunkSize    = 208
 )
 
 var _ wire = (*Trunk)(nil)
@@ -311,6 +313,41 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		}
 		sealsAt = b.WriteBytes(blob)
 	}
+	pKidsAt, pKidsN := 0, 0
+	if x.PKids != nil {
+		pKidsN = len((*x.PKids))
+	}
+	if pKidsN > 0 {
+		var blob []byte
+		for i := range *x.PKids {
+			enc, err := (*x.PKids)[i].MarshalZAP()
+			if err != nil {
+				return nil, err
+			}
+			var n [4]byte
+			binary.LittleEndian.PutUint32(n[:], uint32(len(enc)))
+			blob = append(blob, n[:]...)
+			blob = append(blob, enc...)
+		}
+		pKidsAt = b.WriteBytes(blob)
+	}
+	pNumsAt, pNumsN := 0, 0
+	if x.PNums != nil {
+		pNumsN = len((*x.PNums))
+	}
+	if pNumsN > 0 {
+		var blob []byte
+		for i := range *x.PNums {
+			var full [8]byte
+			binary.LittleEndian.PutUint64(full[:], uint64((*x.PNums)[i]))
+			enc := full[:4]
+			var n [4]byte
+			binary.LittleEndian.PutUint32(n[:], uint32(len(enc)))
+			blob = append(blob, n[:]...)
+			blob = append(blob, enc...)
+		}
+		pNumsAt = b.WriteBytes(blob)
+	}
 	ob := b.StartObject(trunkSize)
 	ob.SetBool(trunkBAt, bool(x.B))
 	ob.SetInt8(trunkI8At, int8(x.I8))
@@ -374,6 +411,12 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	}
 	if sealsN > 0 {
 		ob.SetList(trunkSealsAt, sealsAt, sealsN)
+	}
+	if pKidsN > 0 {
+		ob.SetList(trunkPKidsAt, pKidsAt, pKidsN)
+	}
+	if pNumsN > 0 {
+		ob.SetList(trunkPNumsAt, pNumsAt, pNumsN)
 	}
 	ob.FinishAsRoot()
 	return b.Finish(), nil
@@ -491,6 +534,22 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 		for range rows {
 		}
 		x.Seals = rows
+	}
+	if l := o.List(trunkPKidsAt); l.Len() > 0 {
+		rows := make([]Leaf, l.Len())
+		for i := range rows {
+			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
+				return err
+			}
+		}
+		x.PKids = &rows
+	}
+	if l := o.List(trunkPNumsAt); l.Len() > 0 {
+		rows := make([]uint32, l.Len())
+		for i := range rows {
+			rows[i] = uint32(wide(l.BytesAt(i)))
+		}
+		x.PNums = &rows
 	}
 	return nil
 }
