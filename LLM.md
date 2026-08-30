@@ -502,7 +502,12 @@ Two things it buys, and the second is the load-bearing one.
 
 `Wire` is checked at the ROOT of Marshal and Unmarshal only, so a nested value
 still goes through the reflective path: the set of emitted types is closed
-downward, and a parent's codec reaches each nested value BY ITS METHOD.
+downward, and a parent's codec reaches each nested value BY ITS METHOD. The
+exception is a value with NO SLOTS — a `time.Time`, a `netip.AddrPort`, anything
+whose fields are all unexported. It crosses as a complete and empty object and
+carries nothing, so the parent writes those bytes inline and there is no method
+to reach for. The value is lost either way; that is the reflective encoder's
+answer too, and answering differently would be a different wire.
 
 **The emitted file depends on the ZAP builder and nothing else.** `Wire` is
 restated in it, the way `internal/zapenc` restates it, so a leaf module can state

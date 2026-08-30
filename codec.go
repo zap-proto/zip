@@ -67,9 +67,14 @@ type Codec struct {
 //
 // A nested value is reached BY ITS METHOD, so the set is closed downward: a
 // parent that states its wire needs every struct it holds to state one too, id
-// or no id. A root the derivation refuses — a map, an interface, a fixed array
-// of anything but bytes — is skipped and named in the error, because there is no
-// layout to state and a codec that guessed one would speak a wire nobody reads.
+// or no id. The exception is a value with no slots — see [empty] — which crosses
+// as bytes the parent writes inline.
+//
+// A type the derivation refuses — one holding a map, an interface, or a fixed
+// array of anything but bytes — comes back as an error naming it, because there
+// is no layout to state and a codec that guessed one would speak a wire nobody
+// reads. Answering that is a change to the TYPE, which is not a generator's to
+// make.
 func Codecs(roots ...reflect.Type) ([]Codec, error) {
 	want := map[reflect.Type]bool{}
 	var refused []string
@@ -116,13 +121,24 @@ func reach(t reflect.Type, want map[reflect.Type]bool) error {
 		if !ok {
 			continue
 		}
-		if n := nests(f.Type); n != nil {
+		if n := nests(f.Type); n != nil && !empty(n) {
 			if err := reach(n, want); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// empty reports a value with no slots — every field unexported, which is what a
+// time.Time or a netip.AddrPort is from here. It crosses as a complete and EMPTY
+// ZAP object and carries nothing, so a parent writes those bytes inline rather
+// than reaching for a method, and there is nothing to declare a wire for. The
+// value is lost either way; that is the reflective encoder's answer too, and
+// changing it would be a different wire.
+func empty(t reflect.Type) bool {
+	sh, err := LayoutOf(t)
+	return err == nil && len(sh.Slots) == 0
 }
 
 // nests is the struct a field reaches through a pointer or a list, or nil. A
@@ -189,6 +205,7 @@ type pkg struct {
 	taken map[string]bool
 	plain map[string]bool // imports whose alias is their own name
 	wide  bool
+	blank bool
 }
 
 func (p *pkg) of(path, name string) string {
@@ -275,6 +292,9 @@ func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Codec, err
 	if p.wide {
 		fmt.Fprint(&out, widening)
 	}
+	if p.blank {
+		fmt.Fprint(&out, emptying)
+	}
 	out.Write(body.Bytes())
 
 	src, err := format.Source(out.Bytes())
@@ -304,6 +324,19 @@ func wide(b []byte) uint64 {
 	var buf [8]byte
 	copy(buf[:], b)
 	return binary.LittleEndian.Uint64(buf[:])
+}
+
+`
+
+// emptying is the ZAP message a value with no slots crosses as. A type whose
+// fields are all unexported — a time.Time, a netip.AddrPort — states nothing, so
+// what crosses is a complete and empty object. It is what the reflective encoder
+// writes for one, byte for byte.
+const emptying = `// empty is the ZAP message a value with no slots crosses as.
+func empty() []byte {
+	b := zap.NewBuilder(zap.HeaderSize)
+	b.StartObject(0).FinishAsRoot()
+	return b.Finish()
 }
 
 `
@@ -351,7 +384,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		if kindOf(s, f.Type) == aList {
 			continue
 		}
-		if err := writeField(w, lo, s, f); err != nil {
+		if err := writeField(w, lo, s, f, p); err != nil {
 			return err
 		}
 	}
@@ -428,7 +461,7 @@ var setter = map[string][3]string{
 	"bytes": {"SetBytes", "Bytes", "[]byte"},
 }
 
-func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField) error {
+func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg) error {
 	at := lo + s.Name + "At"
 	ref, tab, end := "x."+s.Name, "\t", ""
 	if s.Ptr {
@@ -441,6 +474,11 @@ func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField) error
 	case aFixed:
 		fmt.Fprintf(w, "%sob.SetBytesFixed(%s, %s[:])\n", tab, at, ref)
 	case aNest:
+		if empty(under(f.Type)) {
+			fmt.Fprintf(w, "%sob.SetBytes(%s, empty())\n", tab, at)
+			p.blank = true
+			break
+		}
 		// x.F reaches the pointer method on its own: a field of a pointer
 		// receiver is addressable, and a pointer field already is one.
 		fmt.Fprintf(w, "%sinner%s, err := x.%s.MarshalZAP()\n%sif err != nil {\n%s\treturn nil, err\n%s}\n",
@@ -469,6 +507,9 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 		fmt.Fprintf(w, "\tcopy(x.%s[:], o.BytesFixed(%s, %d))\n", s.Name, at, s.N)
 		return nil
 	case aNest:
+		if empty(under(f.Type)) {
+			return nil // nothing crossed, so there is nothing to read back
+		}
 		fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n", at)
 		if s.Ptr {
 			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", spell, s.Name)
@@ -530,9 +571,12 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 	ptr := et.Kind() == reflect.Pointer
 	el := under(et)
 
-	fmt.Fprintf(w, "\t%sAt, %sN := 0, len(x.%s)\n", v, v, s.Name)
-	fmt.Fprintf(w, "\tif %sN > 0 {\n\t\tvar blob []byte\n\t\tfor i := range x.%s {\n", v, s.Name)
+	var elem bytes.Buffer
+	w, outer := &elem, w
 	switch {
+	case el.Kind() == reflect.Struct && empty(el):
+		fmt.Fprint(w, "\t\t\tenc := empty()\n")
+		p.blank = true
 	case el.Kind() == reflect.Struct:
 		// A nil element encodes as the zero value, which is what the reflective
 		// encoder writes for one: a list has no hole to leave.
@@ -563,9 +607,23 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 	}
 	fmt.Fprint(w, "\t\t\tvar n [4]byte\n\t\t\tbinary.LittleEndian.PutUint32(n[:], uint32(len(enc)))\n")
 	fmt.Fprint(w, "\t\t\tblob = append(blob, n[:]...)\n\t\t\tblob = append(blob, enc...)\n\t\t}\n")
+
+	w = outer
+	fmt.Fprintf(w, "\t%sAt, %sN := 0, len(x.%s)\n", v, v, s.Name)
+	fmt.Fprintf(w, "\tif %sN > 0 {\n\t\tvar blob []byte\n\t\tfor %s range x.%s {\n", v, index(&elem), s.Name)
+	w.Write(elem.Bytes())
 	fmt.Fprintf(w, "\t\t%sAt = b.WriteBytes(blob)\n\t}\n", v)
 	p.std("encoding/binary")
 	return nil
+}
+
+// index is the loop variable a list body needs, and nothing when it needs none:
+// an element with no slots reads no index, and Go refuses a variable nobody uses.
+func index(body *bytes.Buffer) string {
+	if bytes.Contains(body.Bytes(), []byte("[i]")) || bytes.Contains(body.Bytes(), []byte("(i)")) {
+		return "i :="
+	}
+	return ""
 }
 
 // element spells one list element for the little-endian write. A float crosses
@@ -586,9 +644,13 @@ func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg)
 	ptr := et.Kind() == reflect.Pointer
 	el := under(et)
 
-	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n", at)
-	fmt.Fprintf(w, "\t\trows := make(%s, l.Len())\n\t\tfor i := range rows {\n", p.spell(ft))
+	var elem bytes.Buffer
+	w, outer := &elem, w
 	switch {
+	case el.Kind() == reflect.Struct && empty(el):
+		if ptr {
+			fmt.Fprintf(w, "\t\t\trows[i] = new(%s)\n", p.spell(el))
+		}
 	case el.Kind() == reflect.Struct:
 		if ptr {
 			fmt.Fprintf(w, "\t\t\trows[i] = new(%s)\n", p.spell(el))
@@ -610,6 +672,10 @@ func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg)
 			p.std("math")
 		}
 	}
+	w = outer
+	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n", at)
+	fmt.Fprintf(w, "\t\trows := make(%s, l.Len())\n\t\tfor %s range rows {\n", p.spell(ft), index(&elem))
+	w.Write(elem.Bytes())
 	fmt.Fprintf(w, "\t\t}\n\t\tx.%s = rows\n\t}\n", s.Name)
 	return nil
 }
