@@ -507,26 +507,53 @@ func urlSchema(t reflect.Type) map[string]any {
 // place. What the binder cannot fill is omitted, because naming it would
 // promise a parameter that silently does nothing.
 func urlFields(t reflect.Type) urlFieldList {
+	var out urlFieldList
+	collectURLFields(t, "", map[reflect.Type]bool{}, &out)
+	return out
+}
+
+// urlRecord reports whether a URL names t's LEAVES through it rather than carrying
+// t itself. A struct is that, unless it has a written form of its own — a time
+// and an id are one word in a URL, not a pair of braces — in which case
+// [urlSchema] already describes it and there is nothing to reach inside.
+func urlRecord(t reflect.Type) bool {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t != nil && t.Kind() == reflect.Struct && !readsText(t) && !isMarshaler(t)
+}
+
+// collectURLFields appends t's URL-borne leaves, naming a record's own leaves
+// through it. inside is the record already being walked, so a self-referential
+// input names its leaves once rather than forever: the binder stops at the keys
+// a caller actually wrote, and a document walk has no keys to stop at.
+func collectURLFields(t reflect.Type, prefix string, inside map[reflect.Type]bool, out *urlFieldList) {
 	if t == nil {
-		return nil
+		return
 	}
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t.Kind() != reflect.Struct {
-		return nil
+	if t.Kind() != reflect.Struct || inside[t] {
+		return
 	}
-	var out urlFieldList
+	inside[t] = true
+	defer delete(inside, t)
 	for _, f := range wireFields(t) {
 		name := urlFieldName(f)
 		if name == "-" {
 			continue // on the wire, but not in the URL.
 		}
+		name = prefix + name
+		if urlRecord(f.Type) {
+			collectURLFields(f.Type, name+".", inside, out)
+			continue
+		}
 		schema := urlSchema(f.Type)
 		if schema == nil {
 			continue // on the wire, but not something a URL carries.
 		}
-		out = append(out, urlField{
+		*out = append(*out, urlField{
 			name:   name,
 			field:  jsonFieldName(f),
 			schema: schema,
@@ -538,7 +565,6 @@ func urlFields(t reflect.Type) urlFieldList {
 			required: strings.Contains(f.Tag.Get("validate"), "required"),
 		})
 	}
-	return out
 }
 
 type urlFieldList []urlField

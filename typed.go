@@ -368,24 +368,79 @@ func bindURL(in any, values map[string]string) {
 	if v.Kind() != reflect.Struct {
 		return
 	}
+	bindFields(v, "", values)
+}
+
+// bindFields writes what the URL carried onto v's fields, under prefix. It
+// reads [nests], the same predicate [urlFields] reads, so what a caller may
+// write and what the document publishes are one answer.
+//
+// A record's leaves are named THROUGH it — `?startIndex.utxo=` — and only
+// through it. A bare `?utxo=` still reaches a top-level utxo and never a nested
+// one, so an input that nests a record names its target explicitly and an
+// authorizer reads the target the caller wrote.
+//
+// Reports whether anything bound, which is how a pointer record tells "the
+// caller named nothing in here" from "the caller named it empty".
+func bindFields(v reflect.Value, prefix string, values map[string]string) bool {
+	bound := false
 	for _, f := range wireFields(v.Type()) {
 		name := urlFieldName(f)
 		if name == "-" {
 			continue
 		}
+		name = prefix + name
 		// FieldByIndex, because wireFields reaches through embedding: the index is
 		// the path to the field, which is just [i] for the type's own fields.
 		fv := v.FieldByIndex(f.Index)
 		if !fv.CanSet() {
 			continue
 		}
+		if urlRecord(fv.Type()) {
+			bound = bindRecord(fv, name+".", values) || bound
+			continue
+		}
 		for k, val := range values {
 			if strings.EqualFold(k, name) {
 				setScalar(fv, val)
+				bound = true
 				break
 			}
 		}
 	}
+	return bound
+}
+
+// bindRecord binds one nested record's leaves, allocating a pointer only where
+// the URL named something inside it — a record nobody wrote stays absent rather
+// than becoming an empty one.
+//
+// The descent is bounded by the KEYS, not by the type: a record is entered only
+// where a key is written under its prefix, so a self-referential input costs one
+// pass per level a caller actually named.
+func bindRecord(fv reflect.Value, prefix string, values map[string]string) bool {
+	if !namedUnder(prefix, values) {
+		return false
+	}
+	if fv.Kind() != reflect.Pointer {
+		return bindFields(fv, prefix, values)
+	}
+	held := reflect.New(fv.Type().Elem())
+	if !bindFields(held.Elem(), prefix, values) {
+		return false
+	}
+	fv.Set(held)
+	return true
+}
+
+// namedUnder reports whether the URL wrote anything under prefix.
+func namedUnder(prefix string, values map[string]string) bool {
+	for k := range values {
+		if len(k) > len(prefix) && strings.EqualFold(k[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // setScalar writes one wire string into one field, converting by the field's
