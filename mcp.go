@@ -814,7 +814,7 @@ func (a *App) serveMCP() {
 	if addr == "" {
 		return
 	}
-	srv := &zapmcp.Server{Network: networkOf(addr), Addr: addr, Handler: a.MCP}
+	srv := &zapmcp.Server{Network: NetworkOf(addr), Addr: addr, Handler: a.MCP}
 	a.mcpMu.Lock()
 	if a.mcpSrv != nil {
 		a.mcpMu.Unlock()
