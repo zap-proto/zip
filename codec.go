@@ -455,17 +455,17 @@ func kindOf(s Slot, ft reflect.Type) form {
 // what the reader hands back, for the conversion a defined type needs. They are
 // one table so the two directions cannot name different widths.
 var setter = map[string][3]string{
-	"bool": {"SetBool", "Bool", "bool"},
-	"i8":   {"SetInt8", "Int8", "int8"},
-	"i16":  {"SetInt16", "Int16", "int16"},
-	"i32":  {"SetInt32", "Int32", "int32"},
-	"i64":  {"SetInt64", "Int64", "int64"},
-	"u8":   {"SetUint8", "Uint8", "uint8"},
-	"u16":  {"SetUint16", "Uint16", "uint16"},
-	"u32":  {"SetUint32", "Uint32", "uint32"},
-	"u64":  {"SetUint64", "Uint64", "uint64"},
-	"f32":  {"SetFloat32", "Float32", "float32"},
-	"f64":  {"SetFloat64", "Float64", "float64"},
+	"bool":  {"SetBool", "Bool", "bool"},
+	"i8":    {"SetInt8", "Int8", "int8"},
+	"i16":   {"SetInt16", "Int16", "int16"},
+	"i32":   {"SetInt32", "Int32", "int32"},
+	"i64":   {"SetInt64", "Int64", "int64"},
+	"u8":    {"SetUint8", "Uint8", "uint8"},
+	"u16":   {"SetUint16", "Uint16", "uint16"},
+	"u32":   {"SetUint32", "Uint32", "uint32"},
+	"u64":   {"SetUint64", "Uint64", "uint64"},
+	"f32":   {"SetFloat32", "Float32", "float32"},
+	"f64":   {"SetFloat64", "Float64", "float64"},
 	"text":  {"SetText", "Text", "string"},
 	"bytes": {"SetBytes", "Bytes", "[]byte"},
 }
@@ -512,7 +512,22 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 	}
 	switch kindOf(s, f.Type) {
 	case aFixed:
-		fmt.Fprintf(w, "\tcopy(x.%s[:], o.BytesFixed(%s, %d))\n", s.Name, at, s.N)
+		if !s.Ptr {
+			fmt.Fprintf(w, "\tcopy(x.%s[:], o.BytesFixed(%s, %d))\n", s.Name, at, s.N)
+			return nil
+		}
+		// A POINTER to a fixed array. Reading straight into x.F[:] dereferences
+		// a nil, and the value arriving is always a fresh one — so every read of
+		// a type with an optional id PANICKED, on the plane, at the far end.
+		//
+		// An inline slot has no null: the writer leaves an absent pointer's
+		// bytes zeroed (see [writeField]), so all-zero is what absence looks
+		// like coming back. That is the rule the pointer SCALARS already read
+		// by, and reading it here is what keeps the two directions symmetric.
+		name := p.spell(ft)
+		fmt.Fprintf(w, "\tif raw := o.BytesFixed(%s, %d); len(raw) > 0 {\n", at, s.N)
+		fmt.Fprintf(w, "\t\tvar v %s\n\t\tcopy(v[:], raw)\n", name)
+		fmt.Fprintf(w, "\t\tif v != (%s{}) {\n\t\t\tx.%s = &v\n\t\t}\n\t}\n", name, s.Name)
 		return nil
 	case aNest:
 		if empty(under(f.Type)) {
