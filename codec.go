@@ -204,8 +204,6 @@ type pkg struct {
 	alias map[string]string
 	taken map[string]bool
 	plain map[string]bool // imports whose alias is their own name
-	wide  bool
-	blank bool
 }
 
 func (p *pkg) of(path, name string) string {
@@ -288,13 +286,7 @@ func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Codec, err
 			fmt.Fprintf(&out, "\t%s %q\n", p.alias[q], q)
 		}
 	}
-	fmt.Fprint(&out, ")\n\n", preamble)
-	if p.wide {
-		fmt.Fprint(&out, widening)
-	}
-	if p.blank {
-		fmt.Fprint(&out, emptying)
-	}
+	fmt.Fprint(&out, ")\n\n")
 	out.Write(body.Bytes())
 
 	src, err := format.Source(out.Bytes())
@@ -304,27 +296,19 @@ func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Codec, err
 	return Codec{Path: path, Package: clause, Types: names, Source: src}, nil
 }
 
-// preamble restates [Wire] where it is consumed, so an emitted package depends
-// on the ZAP builder and nothing else. Both halves are required together: a type
-// carrying one would encode from these constants and decode by reflection, which
-// is two answers to where its layout lives.
-const preamble = `// wire is what a type states when it answers for its own ZAP bytes.
-type wire interface {
+// stated is the compile-time assertion that a type answers for its own bytes.
+// It is [Wire] written out where it is consumed, so an emitted package depends
+// on the ZAP builder and nothing else — and written INLINE, because a named
+// interface would be a package-level identifier the emitter cannot know is free.
+// github.com/luxfi/utxo imports a package called wire.
+//
+// Both halves are required together: a type carrying one would encode from these
+// constants and decode by reflection, which is two answers to where its layout
+// lives.
+const stated = `var _ interface {
 	MarshalZAP() ([]byte, error)
 	UnmarshalZAP([]byte) error
-}
-
-`
-
-// widening reads a list element whatever its width. An element is written at its
-// own width, so a shorter one is zero-extended here and sign-extended by the
-// caller — the rule the reflective decoder already follows.
-const widening = `// wide reads a list element's little-endian bytes, whatever its width.
-func wide(b []byte) uint64 {
-	var buf [8]byte
-	copy(buf[:], b)
-	return binary.LittleEndian.Uint64(buf[:])
-}
+} = (*%s)(nil)
 
 `
 
@@ -355,7 +339,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		fmt.Fprintf(w, "\t%s%sAt = %d\n", lo, s.Name, s.Offset)
 	}
 	fmt.Fprintf(w, "\t%sSize = %d\n)\n\n", lo, shape.Size)
-	fmt.Fprintf(w, "var _ wire = (*%s)(nil)\n\n", name)
+	fmt.Fprintf(w, stated, name)
 
 	fmt.Fprintf(w, "// MarshalZAP writes %s from constant offsets.\n", name)
 	fmt.Fprintf(w, "func (x *%s) MarshalZAP() ([]byte, error) {\n", name)
@@ -484,8 +468,8 @@ func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pk
 		fmt.Fprintf(w, "%sob.SetBytesFixed(%s, %s[:])\n", tab, at, ref)
 	case aNest:
 		if empty(under(f.Type)) {
-			fmt.Fprintf(w, "%sob.SetBytes(%s, empty())\n", tab, at)
-			p.blank = true
+			fmt.Fprintf(w, "%s{\n%s\teb := zap.NewBuilder(zap.HeaderSize)\n%s\teb.StartObject(0).FinishAsRoot()\n%s\tob.SetBytes(%s, eb.Finish())\n%s}\n",
+				tab, tab, tab, tab, at, tab)
 			break
 		}
 		// x.F reaches the pointer method on its own: a field of a pointer
@@ -588,8 +572,7 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 	w, outer := &elem, w
 	switch {
 	case el.Kind() == reflect.Struct && empty(el):
-		fmt.Fprint(w, "\t\t\tenc := empty()\n")
-		p.blank = true
+		fmt.Fprint(w, "\t\t\teb := zap.NewBuilder(zap.HeaderSize)\n\t\t\teb.StartObject(0).FinishAsRoot()\n\t\t\tenc := eb.Finish()\n")
 	case el.Kind() == reflect.Struct:
 		// A nil element encodes as the zero value, which is what the reflective
 		// encoder writes for one: a list has no hole to leave.
@@ -683,9 +666,9 @@ func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg)
 	case s.Elem == "bool":
 		fmt.Fprintf(w, "\t\t\traw := l.BytesAt(i)\n\t\t\trows[i] = %s(len(raw) > 0 && raw[0] != 0)\n", p.spell(et))
 	default:
+		fmt.Fprint(w, "\t\t\tvar full [8]byte\n\t\t\tcopy(full[:], l.BytesAt(i))\n")
 		fmt.Fprintf(w, "\t\t\trows[i] = %s(%s)\n", p.spell(et), elementRead(s))
 		p.std("encoding/binary")
-		p.wide = true
 		if s.Elem == "f32" || s.Elem == "f64" {
 			p.std("math")
 		}
@@ -702,19 +685,21 @@ func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg)
 	return nil
 }
 
+// elementRead widens one list element that arrived at its own width. Anything
+// narrower than eight bytes was zero-extended into full by the caller; a signed
+// element is then sign-extended from its own width, which is what the reflective
+// decoder does — a negative int32 read as a uint64 is a very large number.
 func elementRead(s Slot) string {
 	n := widthOf(s.Elem)
 	switch s.Elem {
 	case "i8", "i16", "i32", "i64":
-		// Sign-extend from the element's own width, which is what the reflective
-		// decoder does: a negative int32 read as a uint64 is a very large number.
-		return fmt.Sprintf("int64(wide(l.BytesAt(i))<<%d) >> %d", 64-8*n, 64-8*n)
+		return fmt.Sprintf("int64(binary.LittleEndian.Uint64(full[:])<<%d) >> %d", 64-8*n, 64-8*n)
 	case "f32":
-		return "math.Float32frombits(uint32(wide(l.BytesAt(i))))"
+		return "math.Float32frombits(uint32(binary.LittleEndian.Uint64(full[:])))"
 	case "f64":
-		return "math.Float64frombits(wide(l.BytesAt(i)))"
+		return "math.Float64frombits(binary.LittleEndian.Uint64(full[:]))"
 	}
-	return "wide(l.BytesAt(i))"
+	return "binary.LittleEndian.Uint64(full[:])"
 }
 
 func widthOf(zaptype string) int {

@@ -11,26 +11,6 @@ import (
 	zap "github.com/zap-proto/go"
 )
 
-// wire is what a type states when it answers for its own ZAP bytes.
-type wire interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
-}
-
-// wide reads a list element's little-endian bytes, whatever its width.
-func wide(b []byte) uint64 {
-	var buf [8]byte
-	copy(buf[:], b)
-	return binary.LittleEndian.Uint64(buf[:])
-}
-
-// empty is the ZAP message a value with no slots crosses as.
-func empty() []byte {
-	b := zap.NewBuilder(zap.HeaderSize)
-	b.StartObject(0).FinishAsRoot()
-	return b.Finish()
-}
-
 // ---- Ided --------------------------------------------------------------
 
 const (
@@ -41,7 +21,10 @@ const (
 	idedSize   = 56
 )
 
-var _ wire = (*Ided)(nil)
+var _ interface {
+	MarshalZAP() ([]byte, error)
+	UnmarshalZAP([]byte) error
+} = (*Ided)(nil)
 
 // MarshalZAP writes Ided from constant offsets.
 func (x *Ided) MarshalZAP() ([]byte, error) {
@@ -111,7 +94,10 @@ const (
 	leafSize = 16
 )
 
-var _ wire = (*Leaf)(nil)
+var _ interface {
+	MarshalZAP() ([]byte, error)
+	UnmarshalZAP([]byte) error
+} = (*Leaf)(nil)
 
 // MarshalZAP writes Leaf from constant offsets.
 func (x *Leaf) MarshalZAP() ([]byte, error) {
@@ -178,7 +164,10 @@ const (
 	trunkSize    = 208
 )
 
-var _ wire = (*Trunk)(nil)
+var _ interface {
+	MarshalZAP() ([]byte, error)
+	UnmarshalZAP([]byte) error
+} = (*Trunk)(nil)
 
 // MarshalZAP writes Trunk from constant offsets.
 func (x *Trunk) MarshalZAP() ([]byte, error) {
@@ -305,7 +294,9 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	if sealsN > 0 {
 		var blob []byte
 		for range x.Seals {
-			enc := empty()
+			eb := zap.NewBuilder(zap.HeaderSize)
+			eb.StartObject(0).FinishAsRoot()
+			enc := eb.Finish()
 			var n [4]byte
 			binary.LittleEndian.PutUint32(n[:], uint32(len(enc)))
 			blob = append(blob, n[:]...)
@@ -384,7 +375,11 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		}
 		ob.SetBytes(trunkPtrLAt, innerPtrL)
 	}
-	ob.SetBytes(trunkSealAt, empty())
+	{
+		eb := zap.NewBuilder(zap.HeaderSize)
+		eb.StartObject(0).FinishAsRoot()
+		ob.SetBytes(trunkSealAt, eb.Finish())
+	}
 	if numsN > 0 {
 		ob.SetList(trunkNumsAt, numsAt, numsN)
 	}
@@ -470,21 +465,27 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	if l := o.List(trunkNumsAt); l.Len() > 0 {
 		rows := make([]uint32, l.Len())
 		for i := range rows {
-			rows[i] = uint32(wide(l.BytesAt(i)))
+			var full [8]byte
+			copy(full[:], l.BytesAt(i))
+			rows[i] = uint32(binary.LittleEndian.Uint64(full[:]))
 		}
 		x.Nums = rows
 	}
 	if l := o.List(trunkSigsAt); l.Len() > 0 {
 		rows := make([]int32, l.Len())
 		for i := range rows {
-			rows[i] = int32(int64(wide(l.BytesAt(i))<<32) >> 32)
+			var full [8]byte
+			copy(full[:], l.BytesAt(i))
+			rows[i] = int32(int64(binary.LittleEndian.Uint64(full[:])<<32) >> 32)
 		}
 		x.Sigs = rows
 	}
 	if l := o.List(trunkBigsAt); l.Len() > 0 {
 		rows := make([]float64, l.Len())
 		for i := range rows {
-			rows[i] = float64(math.Float64frombits(wide(l.BytesAt(i))))
+			var full [8]byte
+			copy(full[:], l.BytesAt(i))
+			rows[i] = float64(math.Float64frombits(binary.LittleEndian.Uint64(full[:])))
 		}
 		x.Bigs = rows
 	}
@@ -547,7 +548,9 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	if l := o.List(trunkPNumsAt); l.Len() > 0 {
 		rows := make([]uint32, l.Len())
 		for i := range rows {
-			rows[i] = uint32(wide(l.BytesAt(i)))
+			var full [8]byte
+			copy(full[:], l.BytesAt(i))
+			rows[i] = uint32(binary.LittleEndian.Uint64(full[:]))
 		}
 		x.PNums = &rows
 	}
