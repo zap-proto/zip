@@ -544,32 +544,95 @@ func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byt
 	return out, nil
 }
 
-// queryOf renders a flat JSON object as a query string, sorted so a command
-// line always produces the same URL.
+// Query is the query string that carries in to a bodyless op.
+//
+// It is the client half of the URL binder and its exact inverse: what this
+// writes, [bindURL] reads. That matters because they are two halves of one
+// rule and they had drifted — a list went out as `?ids=["a","b"]` and a record
+// as `?startIndex={"utxo":...}`, neither of which the binder reads, so the
+// argument arrived empty and the op answered 200 about nothing.
+//
+// The value is taken from the op's own In, so the spelling is derived rather
+// than agreed: a caller does not have to know that a list is comma-joined or
+// that a record's leaves are named through it.
+func Query(in any) (string, error) {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return "", err
+	}
+	return queryOf(body)
+}
+
+// queryOf renders a JSON object as a query string, sorted so a command line
+// always produces the same URL.
 func queryOf(body []byte) (string, error) {
+	var b strings.Builder
+	if err := writeQuery(&b, "", body); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// writeQuery writes one JSON object's keys under prefix, descending into a
+// nested object the way [bindRecord] descends into a nested record.
+func writeQuery(b *strings.Builder, prefix string, body []byte) error {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(body, &m); err != nil {
-		return "", err
+		return err
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	var b strings.Builder
 	for _, k := range keys {
+		raw := m[k]
+		if len(raw) == 0 || string(raw) == "null" {
+			continue // an absent value is written by leaving the key out
+		}
+		name := prefix + k
+		if raw[0] == '{' {
+			if err := writeQuery(b, name+".", raw); err != nil {
+				return err
+			}
+			continue
+		}
+		val, err := queryValue(raw)
+		if err != nil {
+			return err
+		}
 		if b.Len() > 0 {
 			b.WriteByte('&')
 		}
-		v := string(m[k])
-		if s, err := strconv.Unquote(v); err == nil {
-			v = s
-		}
-		b.WriteString(urlEscape(k))
+		b.WriteString(urlEscape(name))
 		b.WriteByte('=')
-		b.WriteString(urlEscape(v))
+		b.WriteString(urlEscape(val))
 	}
-	return b.String(), nil
+	return nil
+}
+
+// queryValue is one JSON value as the characters a URL carries: a string
+// unquoted, a list comma-joined, anything else as it was written.
+func queryValue(raw json.RawMessage) (string, error) {
+	if raw[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return "", err
+		}
+		parts := make([]string, len(items))
+		for i, item := range items {
+			part, err := queryValue(item)
+			if err != nil {
+				return "", err
+			}
+			parts[i] = part
+		}
+		return strings.Join(parts, ","), nil
+	}
+	if s, err := strconv.Unquote(string(raw)); err == nil {
+		return s, nil
+	}
+	return string(raw), nil
 }
 
 // urlEscape percent-encodes everything outside the unreserved set. Small enough
