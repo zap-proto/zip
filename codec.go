@@ -60,6 +60,13 @@ type Codec struct {
 	Package string   // its package clause
 	Types   []string // the types declared, alphabetically
 	Source  []byte
+
+	// Stated is true when every type here ALREADY answers for its own bytes.
+	// A generator writing into one module reads types from several, and the
+	// ones it cannot write to are only a problem while they are still silent —
+	// so this is what tells "another module has to release" from "another
+	// module already did".
+	Stated bool
 }
 
 // Codecs renders a [Wire] implementation for each of roots and for every struct
@@ -99,11 +106,20 @@ func Codecs(roots ...reflect.Type) ([]Codec, error) {
 		if err != nil {
 			return nil, err
 		}
+		c.Stated = true
+		for _, t := range ts {
+			if !reflect.PointerTo(t).Implements(wired) {
+				c.Stated = false
+				break
+			}
+		}
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
+
+var wired = reflect.TypeOf((*Wire)(nil)).Elem()
 
 // reach adds t and everything below it to want.
 func reach(t reflect.Type, want map[reflect.Type]bool) error {
