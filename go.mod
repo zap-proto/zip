@@ -2,6 +2,18 @@ module github.com/zap-proto/zip
 
 go 1.26.5
 
+// v1.36.21 does not compile: mcp.go calls networkOf, which was staged in a
+// file the commit left behind. It built locally because the working tree held
+// both halves, which is the whole lesson — verify the commit, not the
+// directory it came from.
+//
+// The tag is not moved. A version is a permanent address, and a consumer that
+// already resolved to it must keep getting the same bytes. Retract is how Go
+// says "published in error" without rewriting history: the resolver stops
+// choosing it, `go list -m -versions` stops offering it, and anyone pinned to
+// it is told rather than silently moved. v1.36.22 is the re-cut.
+retract v1.36.21
+
 require (
 	github.com/dop251/goja v0.0.0-20260607120635-348e6bea910d
 	github.com/evanw/esbuild v0.28.1
