@@ -627,7 +627,7 @@ func (a *App) mcpTools() []map[string]any {
 // (MCPTools) and the composed list read it, so a host's catalogue and a plugin's
 // own /mcp can never describe one op two ways.
 func mcpToolOf(op *registeredOp) map[string]any {
-	doc, hasDoc := docFor(op.Method, op.Path)
+	doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
 	desc := op.Summary
 	if hasDoc && doc.Description != "" {
 		desc = doc.Description

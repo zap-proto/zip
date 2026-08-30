@@ -61,6 +61,9 @@ type Op struct {
 }
 
 // Key is the operation's identity, the same one zip's registry uses.
+// Key is the address half of the documentation key. The whole key also carries
+// the declaring package, which Render adds — see [zip.DocKey] — because this map
+// is one map for a process and an address is unique only within one app.
 func (o Op) Key() string { return o.Method + " " + o.Path }
 
 // Package is one loaded package and the operations registered in it.

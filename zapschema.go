@@ -337,7 +337,7 @@ func (e *emitter) method(op *registeredOp) {
 	// carry. A method's summary and its schema are then one sentence written
 	// once, and cannot drift apart into two.
 	var doc string
-	if d, ok := docFor(op.Method, op.Path); ok {
+	if d, ok := docFor(op.Pkg, op.Method, op.Path); ok {
 		doc = d.Description
 	}
 	e.iface.Methods = append(e.iface.Methods, &Method{

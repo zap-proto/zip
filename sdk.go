@@ -126,7 +126,7 @@ type render struct {
 // worse than one that says the operation is not reachable.
 func (g *render) method(op *registeredOp) {
 	id := opName(op)
-	doc, hasDoc := docFor(op.Method, op.Path)
+	doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
 	c := call{id: id, method: exportIdent(id), doc: doc, hasDoc: hasDoc}
 	if c.method == "" {
 		g.gap(id, "", "", causeUnnamed)
