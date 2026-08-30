@@ -63,7 +63,9 @@ type SDK struct {
 }
 
 // Ops is how many operations the package can call.
-func (s *SDK) Ops() int { return strings.Count(string(s.Source), "\nfunc (c *Client) ") - clientMethods }
+func (s *SDK) Ops() int {
+	return strings.Count(string(s.Source), "\nfunc (c *Client) ") - clientMethods
+}
 
 // clientMethods is how many methods [clientPreamble] declares on Client, which
 // are not operations.
@@ -155,10 +157,30 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 	if name, seen := g.named[t]; seen {
 		return name, name != ""
 	}
-	if _, err := zapenc.LayoutOf(t); err != nil {
+	shape, err := zapenc.LayoutOf(t)
+	if err != nil {
 		g.named[t] = ""
 		g.gap(op, goName(t), t.String(), causeOf(err))
 		return "", false
+	}
+	// A layout that is right is not the same as a value that crosses. A fixed
+	// array — every id in the fleet — has an offset and a width, so the schema
+	// states it correctly, and the REFLECTIVE encoder still refuses it: the type
+	// is expected to declare its own wire instead (see [Wire]). That refusal
+	// arrives at run time, on a call the client was happy to make, which is the
+	// shape of failure this whole projection exists to remove.
+	//
+	// It is also not something a generated struct can fix by trying harder: the
+	// declared type's MarshalZAP belongs to the service's package, and restating
+	// the field as [32]uint8 here restates the bytes and not the codec. So the
+	// op is out of reach until the type declares its wire, and saying so is the
+	// whole answer. It is the same fact [Schema.Coded] reports.
+	for _, s := range shape.Slots {
+		if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
+			g.named[t] = ""
+			g.gap(op, goName(t)+"."+s.Name, s.Type, causeCodec)
+			return "", false
+		}
 	}
 
 	// The name is claimed BEFORE the fields are walked. That claim is the cycle
@@ -434,9 +456,12 @@ func validIdent(s string) bool {
 	return true
 }
 
-// causeUnnamed joins the [Gap] vocabulary: an op whose id spells no Go
-// identifier cannot have a method at all.
-const causeUnnamed = "no name"
+// causeUnnamed and causeCodec join the [Gap] vocabulary. One string per reason,
+// so counting them ranks what to fix.
+const (
+	causeUnnamed = "no name"  // an op whose id spells no Go identifier
+	causeCodec   = "no codec" // a fixed array: the layout is right, reflection refuses it
+)
 
 var goReserved = map[string]bool{
 	"break": true, "case": true, "chan": true, "const": true, "continue": true,
