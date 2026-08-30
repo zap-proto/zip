@@ -68,6 +68,33 @@ type MCPConfig struct {
 	// is asking, which no build-time projection can hold. Nil — the default —
 	// leaves the door exactly the typed-op projection, answered as bytes.
 	Source Source
+	// Identify says WHO is on a ZAP-native connection, and is the other half of
+	// [Source] on that wire.
+	//
+	// Over HTTP the gateway's assertion arrives in headers and the route reads it.
+	// On [Addr] a frame is a frame: there is nothing to read, so nothing states
+	// the caller unless a deployment does — and [App.list] answers the build-time
+	// bytes to a caller it cannot name. A door declaring both and no Identify is
+	// therefore refused at [App.Listen] rather than served half: the tools that
+	// exist because of who is asking are exactly the ones such a door drops, and
+	// it drops them while answering, logging and probing healthy.
+	//
+	// The context carries the connection the frame arrived on ([zapmcp.Conn]),
+	// which is what a deployment reads to decide: the kernel's peer credential
+	// over a unix socket — the one thing about a caller the caller does not get
+	// to state — the socket it came in on, its key material. zip does not choose
+	// among those, for the same reason zapmcp hands over the connection rather
+	// than a digest of it.
+	//
+	//	MCP: zip.MCPConfig{Addr: sock, Source: rows, Identify: func(ctx context.Context) zip.Caller {
+	//	    return zip.Caller{Org: orgOfUID(zapmcp.Conn(ctx))}
+	//	}}
+	//
+	// The zero [Caller] means anonymous, which leaves the door exactly the
+	// build-time projection — the honest answer for a peer this deployment
+	// cannot attest. It is not consulted on the HTTP route, where the assertion
+	// is already on the request and a second authority is one too many.
+	Identify func(ctx context.Context) Caller
 }
 
 // Source is the half of an MCP door that depends on the CALLER.
@@ -814,7 +841,7 @@ func (a *App) serveMCP() {
 	if addr == "" {
 		return
 	}
-	srv := &zapmcp.Server{Network: NetworkOf(addr), Addr: addr, Handler: a.MCP}
+	srv := &zapmcp.Server{Network: NetworkOf(addr), Addr: addr, Handler: a.zapDoor()}
 	a.mcpMu.Lock()
 	if a.mcpSrv != nil {
 		a.mcpMu.Unlock()
@@ -828,6 +855,47 @@ func (a *App) serveMCP() {
 			a.logger.Error("zip mcp listener stopped", "addr", addr, "err", err)
 		}
 	}()
+}
+
+// zapDoor is [App.MCP] with this deployment's answer to "who is on this
+// connection" bound in front of it, and it is the whole of what [MCPConfig.Identify]
+// does. Without one the door is App.MCP itself, unchanged.
+//
+// It composes rather than configures: the door stays a value that takes a frame
+// and answers one, and stating the caller is a wrapper around it — the same shape
+// a deployment writes by hand when it serves App.MCP with a zapmcp.Server of its
+// own. There is one door and one way to say who is at it.
+func (a *App) zapDoor() zapmcp.Handler {
+	id := a.cfg.MCP.Identify
+	if id == nil {
+		return a.MCP
+	}
+	return func(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
+		return a.MCP(WithCaller(ctx, id(ctx)), f)
+	}
+}
+
+// checkMCP refuses a door this process cannot honour: a ZAP address over a
+// surface with a per-caller half, and nothing to say who is calling.
+//
+// Such a door comes up, binds, logs `per-caller: true`, answers every frame and
+// probes healthy — while silently serving only the build-time bytes, because
+// [App.list] returns early on a caller it cannot name. The tools it drops are
+// exactly the ones a Source exists to supply, which makes it the failure that
+// looks most like success. A refusal at Listen costs one boot and names both
+// fixes; the alternative is discovering it from an agent that cannot see a
+// tenant's own tools and no line anywhere saying why.
+func (a *App) checkMCP() error {
+	if a.sibling || a.cfg.MCP.Disabled || a.cfg.MCP.Identify != nil {
+		return nil
+	}
+	if strings.TrimSpace(a.cfg.MCP.Addr) == "" || !a.hasCaller() {
+		return nil
+	}
+	return fmt.Errorf("zip: MCP.Addr %q serves a door with a per-caller half and no MCP.Identify: "+
+		"a frame carries no gateway assertion, so every caller on that socket is anonymous and Source answers nothing. "+
+		"Set MCP.Identify to read the caller off the connection, or drop MCP.Addr and serve the door over HTTP",
+		a.cfg.MCP.Addr)
 }
 
 // closeMCP stops the ZAP MCP listener. Called from Shutdown alongside

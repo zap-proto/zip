@@ -207,6 +207,13 @@ func (a *App) listenOn(addrs []string) error {
 	// already arrived finishes on the generation it arrived under.
 	h := a.pinned()
 
+	// Asked BEFORE anything binds, so a door that cannot be honoured costs a
+	// boot and not a deployment: nothing is listening to take traffic that would
+	// silently miss half its tools.
+	if err := a.checkMCP(); err != nil {
+		return err
+	}
+
 	servers := make([]Server, 0, len(addrs))
 	unbind := make([]func(), 0, len(addrs))
 	for _, raw := range addrs {
