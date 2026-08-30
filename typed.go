@@ -443,12 +443,27 @@ func namedUnder(prefix string, values map[string]string) bool {
 	return false
 }
 
-// setScalar writes one wire string into one field, converting by the field's
-// kind, and asking a field whose kind cannot carry a string to read itself —
-// see [setText]. What is left after both is a record, not a value: a slice, a
-// map, a struct with no text form. Those stay untouched, because a URL carries
-// a value.
+// setScalar writes one wire string into one field.
+//
+// A type that states HOW TO READ ITSELF FROM TEXT has said the last word, and
+// is asked first — see [setText]. That is the precedence encoding/json already
+// keeps: a named string with an UnmarshalText is decoded through it and not by
+// assignment, so a URL and a JSON body on the same struct read the same word
+// the same way. It also has to be first to be reached at all, because a written
+// form is very often carried by a NUMERIC kind: a P-Chain height is a u64 whose
+// reserved value is spelled "proposed", and an encoding is a u8 spelled "json".
+// Deciding those by kind ran ParseUint on a word, failed, and left the field at
+// zero — a request for the proposed height served as height 0, and a request
+// for JSON served as hex, both with a 200 on the answer.
+//
+// After that it is the field's kind, and what is left is a record rather than a
+// value: a map, or a struct with no written form. Those stay untouched here —
+// [bindRecord] names their leaves through them.
 func setScalar(fv reflect.Value, val string) {
+	if readsText(fv.Type()) {
+		setText(fv, val)
+		return
+	}
 	switch fv.Kind() {
 	case reflect.String:
 		fv.SetString(val)
@@ -476,8 +491,6 @@ func setScalar(fv reflect.Value, val string) {
 		}
 	case reflect.Slice:
 		setList(fv, val)
-	default:
-		setText(fv, val)
 	}
 }
 
@@ -544,7 +557,12 @@ func setText(fv reflect.Value, val string) {
 
 // readsText is [setText]'s question asked of the TYPE, which is what the
 // document has to ask: describing a parameter there is no value to address.
-func readsText(t reflect.Type) bool { return reflect.PointerTo(t).Implements(textReader) }
+func readsText(t reflect.Type) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return reflect.PointerTo(t).Implements(textReader)
+}
 
 var textReader = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
