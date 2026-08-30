@@ -404,15 +404,24 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 	// not a zero somebody might mistake for an answer.
 	fmt.Fprint(w, "\tif x == nil || len(data) == 0 {\n\t\treturn nil\n\t}\n")
 	fmt.Fprintf(w, "\tm, err := zap.Parse(data)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"%s: %%w\", err)\n\t}\n", name)
-	fmt.Fprint(w, "\to := m.Root()\n")
+	// The root is taken only if a field reads it. A message with no slot to
+	// read still PARSES — an unreadable one is an error, not an empty value —
+	// but Go refuses a variable nobody uses.
+	var reads bytes.Buffer
 	for _, s := range shape.Slots {
 		f, ok := held(t, s.Name)
 		if !ok {
 			continue
 		}
-		if err := readField(w, lo, s, f, p); err != nil {
+		if err := readField(&reads, lo, s, f, p); err != nil {
 			return err
 		}
+	}
+	if reads.Len() > 0 {
+		fmt.Fprint(w, "\to := m.Root()\n")
+		w.Write(reads.Bytes())
+	} else {
+		fmt.Fprint(w, "\t_ = m\n")
 	}
 	fmt.Fprint(w, "\treturn nil\n}\n\n")
 	return nil
