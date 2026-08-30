@@ -52,11 +52,16 @@ func (a *App) mcpName() string {
 // installMCP mounts the JSON-RPC 2.0 MCP endpoint when there are typed ops to
 // expose. Called from prepare() alongside installOpenAPIRoutes.
 func (a *App) installMCP() {
-	if a.cfg.MCP.Disabled || len(a.ops) == 0 {
+	// The ops a TOOL CALL can carry, not every op: an app of nothing but webhooks
+	// has ops whose bodies are opaque bytes and therefore no tools at all (see
+	// [registeredOp.callableByName]), so there is no surface to mount and nothing
+	// to count.
+	tools := a.byNameCount()
+	if a.cfg.MCP.Disabled || tools == 0 {
 		return
 	}
 	a.fiber.Post(a.mcpPath(), a.handleMCP)
-	a.logger.Info("zip mcp", "path", a.mcpPath(), "tools", len(a.ops))
+	a.logger.Info("zip mcp", "path", a.mcpPath(), "tools", tools)
 }
 
 type mcpRequest struct {
@@ -117,6 +122,13 @@ func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
 func (a *App) mcpTools() []map[string]any {
 	tools := make([]map[string]any, 0, len(a.ops))
 	for _, op := range a.ops {
+		// An op whose body is OPAQUE bytes is not a tool: an arguments object
+		// cannot carry them, so there is no inputSchema that would be true. Left
+		// out of the list and out of opByName together, so the surface a model
+		// reads and the surface it can call are the same one.
+		if !op.callableByName() {
+			continue
+		}
 		doc, hasDoc := docFor(op.Method, op.Path)
 		desc := op.Summary
 		if hasDoc && doc.Description != "" {
@@ -149,8 +161,23 @@ func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
 
 	// No URL over MCP: a tools/call carries every argument in its JSON arguments
 	// object, so the body IS the whole input — neither query nor path binds.
-	out, err := op.invoke(fc.Context(), jsonenc.Unmarshal, params.Arguments, nil, nil)
+	//
+	// callerContext, like every other caller of invoke: the identity a gateway
+	// asserted is the request's, not one projection's. Handing the bare
+	// fc.Context() here left [CallerOf] empty for every tools/call, so the same
+	// op read an org over REST and nothing at all over MCP — and an [Authorizer]
+	// keying on it decided two different ways about one caller.
+	out, err := op.invoke(callerContext(fc), jsonenc.Unmarshal, params.Arguments, nil, nil)
 	if err != nil {
+		// A REDIRECT is not a failure, and reporting one as isError would tell a
+		// model its call went wrong when the answer simply is a LOCATION. There
+		// is no status and no header here to carry it, so the location arrives as
+		// the result's own data (see response.go).
+		if r, ok := redirectOf(err); ok && r.followable() {
+			return fc.JSON(mcpResult(req.ID, map[string]any{
+				"content": []map[string]any{{"type": "text", "text": r.text()}},
+			}))
+		}
 		return fc.JSON(mcpResult(req.ID, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},
 			"isError": true,
@@ -167,9 +194,14 @@ func (a *App) mcpCall(fc fiber.Ctx, req mcpRequest) error {
 	}))
 }
 
+// opByName is the ONE by-name lookup, shared by MCP tools/call and the op-call
+// plane. It answers only for an op those planes can actually carry: a raw-body
+// op is addressed by its URL and nothing else (see [registeredOp.callableByName]),
+// so here it is simply not found — a plain "unknown op" rather than a handler
+// handed an encoding its signature check is guaranteed to reject.
 func (a *App) opByName(name string) *registeredOp {
 	for _, op := range a.ops {
-		if opName(op) == name {
+		if opName(op) == name && op.callableByName() {
 			return op
 		}
 	}

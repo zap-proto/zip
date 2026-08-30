@@ -112,9 +112,19 @@ func (a *App) buildOpenAPI() map[string]any {
 			opObj["tags"] = op.Tags
 		}
 
-		// Request body.
-		if hasBody(op.Method) {
-			if op.InType != nil && typeName(op.InType) != "" {
+		// Request body. A named struct is published as its schema; an OPEN object
+		// is published as an open one (additionalProperties), because it HAS a body
+		// and the document that omitted it described an op that takes nothing while
+		// the route read a whole document. What has no schema at all — an anonymous
+		// struct — still publishes none.
+		//
+		// An OPAQUE body publishes the media it accepts and no schema at all: the
+		// bytes are not the In, so $ref'ing that type here would tell every
+		// generated client to send a JSON object this route never decodes.
+		if op.raw() {
+			opObj["requestBody"] = rawBodyDecl(op)
+		} else if op.hasBody() {
+			if op.InType != nil && (typeName(op.InType) != "" || openObject(op.InType)) {
 				media := map[string]any{"schema": schemaOf(op.InType, reg, docFields(hasDoc, doc))}
 				// An example is what makes a spec explorable — it is the
 				// difference between a reference someone reads and one they can
@@ -162,7 +172,15 @@ func (a *App) buildOpenAPI() map[string]any {
 		// the document reads that one set too — declaring every path param a
 		// string while consulting the input for query params described the same
 		// value two different ways depending on which half of the URL it rode in.
+		// An OPEN input has no fields, so a parameter's type comes from its value
+		// type instead (openParamSchema) — the same conversion bindOpen performs.
+		// Falling back to "string" there described an int-valued open input as text
+		// in the very place the binder writes a number.
 		url := urlFields(op.InType)
+		paramType := url.paramSchema
+		if openObject(op.InType) {
+			paramType = openParamType(op.InType)
+		}
 		params := colonParams(op.Path)
 		decls := make([]any, 0, len(params))
 		named := make(map[string]bool, len(params))
@@ -170,16 +188,26 @@ func (a *App) buildOpenAPI() map[string]any {
 			named[strings.ToLower(p)] = true
 			decls = append(decls, describe(map[string]any{
 				"name": p, "in": "path", "required": true,
-				"schema": url.paramSchema(p),
+				"schema": paramType(p),
 			}, p))
 		}
-		// Query parameters. A bodyless method binds its input from the URL
-		// (typed.go bindURL), so every In field that is NOT already a path
-		// segment is reachable as `?field=` — and the document has to say so, or
-		// it describes a route nobody can call correctly. Declared only where
-		// there is no requestBody, because that is exactly where the binder
-		// treats the URL as the whole input.
-		if !hasBody(op.Method) {
+		// Query parameters. A bodyless op binds its input from the URL (typed.go
+		// bindURL), so every In field that is NOT already a path segment is
+		// reachable as `?field=` — and the document has to say so, or it describes
+		// a route nobody can call correctly. Declared only where there is no
+		// requestBody, because that is exactly where the binder treats the URL as
+		// the whole input — and where the requestBody is OPAQUE, which comes to the
+		// same thing: a raw body is never decoded into In, so the URL is the whole
+		// of that op's structured input too.
+		if !op.hasBody() || op.raw() {
+			// An OPEN input declares no fields for urlFields to list, and its keys
+			// are the caller's, so the document says exactly that: one free-form
+			// form-style parameter, which is how OpenAPI spells a query whose names
+			// are not known in advance. Without it the document described an op that
+			// reads the whole URL as taking nothing from it.
+			if openObject(op.InType) {
+				decls = append(decls, openQueryParam(op.InType))
+			}
 			for _, f := range url {
 				if named[strings.ToLower(f.name)] {
 					continue
@@ -198,7 +226,12 @@ func (a *App) buildOpenAPI() map[string]any {
 		// reason WithStatus is on the op rather than set per request: a 201 that
 		// only reached the wire would leave every generated client expecting a
 		// 200 the service never sends.
-		if op.OutType != nil && typeName(op.OutType) != "" {
+		//
+		// A response exists when the op RETURNS a body, which is not the same
+		// question as whether its type has a Go name: an OPEN object has none and
+		// is sent all the same, so an op answering `{"a":1}` published "204 no
+		// content" and every client generated from it expected an empty response.
+		if op.OutType != nil && (typeName(op.OutType) != "" || openObject(op.OutType)) {
 			respMedia := map[string]any{"schema": schemaOf(op.OutType, reg, docFields(hasDoc, doc))}
 			if hasDoc && len(doc.Response) > 0 {
 				respMedia["example"] = json.RawMessage(doc.Response)
@@ -216,6 +249,18 @@ func (a *App) buildOpenAPI() map[string]any {
 				strconv.Itoa(code): map[string]any{"description": statusText(code)},
 			}
 		}
+
+		// …and the REFUSALS the op declared, each with the shape it carries
+		// (WithFault). Before the bare-status pass below, so a status declared
+		// both ways is published with its shape rather than with the envelope
+		// that stands in for one. See fault.go.
+		declareFaults(opObj, op, reg, docFields(hasDoc, doc))
+
+		// …and the answers that are NOT the success one: the 3xx it redirects
+		// with, the 4xx/5xx it refuses with. Declared on the op (WithResponse),
+		// added here, so a document describes every status the route can send
+		// rather than only the happy one. See response.go.
+		declareResponses(opObj, op, reg)
 
 		paths[path][strings.ToLower(op.Method)] = opObj
 	}
@@ -259,6 +304,10 @@ func defaultOpID(method, path string) string {
 // invoker, while the document said it did not — so a typed Delete read an input
 // no generated client would ever send. Three spellings, one of them the
 // document's; they are now one predicate.
+//
+// A METHOD is only the DEFAULT, though: read it through the op (below), never
+// straight, or an op that declared [WithoutBody] is honoured by some projections
+// and not others — which is the same drift in a new place.
 func hasBody(method string) bool {
 	switch method {
 	case "GET", "HEAD", "DELETE":
@@ -266,6 +315,19 @@ func hasBody(method string) bool {
 	}
 	return true
 }
+
+// hasBody is the OP's answer: its method's rule unless it declared that it
+// carries nothing ([WithoutBody]). Every projection reads THIS — the route, the
+// document, the tool list's siblings and both CLI derivations — so body-ness is
+// one fact with one override rather than a method rule five readers each decide
+// how much to believe.
+func (op *registeredOp) hasBody() bool { return hasBody(op.Method) && !op.NoBody }
+
+// hasBody on a Command is the same expression over the same two facts, kept here
+// beside the op's so the two cannot drift: a command derived from the registry
+// and one derived from the document it generates must send a request the same
+// way, and [Command.NoBody] is how the document's answer reaches the second one.
+func (c Command) hasBody() bool { return hasBody(c.Method) && !c.NoBody }
 
 // urlField is one URL-bindable input field: the name a caller writes in the URL,
 // the schema of the value, and whether the handler refuses to run without it.
@@ -376,6 +438,56 @@ func typeName(t reflect.Type) string {
 	return t.Name()
 }
 
+// openObject reports whether t is an OPEN object: a map keyed by string, whose
+// keys belong to the CALLER rather than to the type. It is the ONE question the
+// projections ask about such a value, because the answer changes what each of
+// them can say — the document declares additionalProperties where it would list
+// properties, the CLI offers one flag where it would offer one per field, and the
+// binder writes keys where it would write fields.
+//
+// It asks the KIND, not the name: a struct is closed however few fields it has,
+// and a map is open whether or not someone named the type. `map[int]Thing` is not
+// one — a URL carries names and a JSON object's keys are strings.
+func openObject(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Map && t.Key().Kind() == reflect.String
+}
+
+// openParamType is the schema of ONE key of an open input, whichever half of the
+// URL carried it: the map's declared value type, or a string where that type is
+// itself open — [bindOpen] leaves the URL's text as text when there is no kind to
+// convert it to, so text is what a caller sends. Same signature as
+// urlFieldList.paramSchema, because it answers the same question about the other
+// shape of input.
+func openParamType(t reflect.Type) func(string) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	schema := map[string]any{"type": "string"}
+	if t.Elem().Kind() != reflect.Interface {
+		schema = schemaOf(t.Elem(), nil, nil)
+	}
+	return func(string) map[string]any { return schema }
+}
+
+// openQueryParam declares an open input's URL half: form style, exploded, so each
+// key of the object is its own `?key=value` — the serialization [bindOpen] reads
+// back. Its name is the flag the CLI spells the same value with, so a command
+// derived from this document and one derived from the registry offer the caller
+// the same one thing rather than two spellings of it.
+func openQueryParam(t reflect.Type) map[string]any {
+	return map[string]any{
+		"name": inputFlag, "in": "query", "required": false,
+		"style": "form", "explode": true,
+		"schema": schemaOf(t, nil, nil),
+	}
+}
+
 // Where a projection keeps the definitions its schemas refer to. An OpenAPI
 // document has one place for them; a schema sent on its own carries its own.
 const (
@@ -484,6 +596,13 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 			"items": schemaOf(t.Elem(), reg, fields),
 		}
 	case reflect.Map:
+		// A value type of `any` is any JSON value, which JSON Schema spells `true`.
+		// {"type":"object"} promised every value was an object, so a generator — or
+		// an MCP client validating a tool call — refused the numbers, strings and
+		// arrays the map actually carries.
+		if t.Elem().Kind() == reflect.Interface {
+			return map[string]any{"type": "object", "additionalProperties": true}
+		}
 		return map[string]any{
 			"type":                 "object",
 			"additionalProperties": schemaOf(t.Elem(), reg, fields),

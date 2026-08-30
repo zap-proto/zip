@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/zap-proto/zip/internal/jsonenc"
 	"io"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -80,6 +81,22 @@ type Command struct {
 	// Flags are the remaining In fields.
 	Flags []Flag
 
+	// NoBody says the operation carries no request body even though its method
+	// normally would ([WithoutBody]), so its flags ride the URL as a query string
+	// — which is where the route itself reads them from.
+	//
+	// It is an OVERRIDE, not the answer: the zero value means "whatever the
+	// method carries", so a command built before this field existed, or by hand,
+	// sends exactly what it always did. Read it through [Command.hasBody].
+	NoBody bool
+
+	// BodyMedia is the media type an OPAQUE body goes out under ([WithRawBody]),
+	// and empty for every other command. It says the body is not assembled from
+	// the flags at all: it IS the bytes of the file `--body` names, sent verbatim,
+	// so a command can reach a webhook or an upload route that the flat flag
+	// encoding has no way to spell.
+	BodyMedia string
+
 	// Example is the op's example input from the doc comment, rendered by the
 	// help as a runnable command line. It reaches a spec-derived command either
 	// from the request body or, for a bodyless method, rebuilt from the
@@ -99,11 +116,32 @@ type Arg struct {
 
 // Flag is one In field as a flag.
 type Flag struct {
-	Name     string // the flag, kebab-cased and without the dashes: "organization-id"
-	Field    string // the JSON field it sets: "organizationId"
-	Type     string // string | integer | number | boolean | json
+	Name string // the flag, kebab-cased and without the dashes: "organization-id"
+	// Field is the JSON field it sets ("organizationId"), or EMPTY when the flag
+	// carries the whole input: an OPEN object declares no fields to name one flag
+	// each after, so the one flag IS the value (see [wholeInputFlag]).
+	Field string
+	// Type is the value kind: string | integer | number | boolean | json, or
+	// `file` for a flag that names a file whose BYTES are the request body — the
+	// only spelling a command line has for one (see [bodyFlag]).
+	Type     string
 	Help     string
 	Required bool
+}
+
+// inputFlag names the flag an OPEN input is spelled with. It is ONE name in ONE
+// place because both derivations reach for it — App.Commands knows the Go type is
+// open, CommandsFromSpec reads the same fact out of the document's
+// additionalProperties, and the command line offers `--input` either way.
+const inputFlag = "input"
+
+// wholeInputFlag is the flag that carries an open input entire. A closed struct
+// is spelled field by field, `--limit 25`, because it declares which fields
+// exist; an open object's keys are the caller's, so the only honest flag is the
+// value itself — and offering none at all, which is what a non-struct input used
+// to get, left the command unable to say anything the handler would read.
+func wholeInputFlag() Flag {
+	return Flag{Name: inputFlag, Type: "json", Help: "the input object, as JSON"}
 }
 
 // Commands projects every registered typed op into a command. This is the whole
@@ -114,7 +152,22 @@ func (a *App) Commands() []Command {
 		doc, has := docFor(op.Method, op.Path)
 		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
 		c.op = op
-		c.Args, c.Flags = bindIn(op.InType, colonParams(op.Path), docFields(has, doc), hasBody(op.Method))
+		// The OVERRIDE, not the raw declaration: a method that never carried a
+		// body has nothing to override, so WithoutBody on a DELETE projects the
+		// same command as leaving it off. Spelling it through the predicate is what
+		// makes this value EQUAL to the one CommandsFromSpec reads back out of the
+		// document, which can only ever see "the method carries one, this op
+		// publishes none".
+		c.NoBody = hasBody(op.Method) && !op.hasBody()
+		// An OPAQUE body is not a set of flags: the op's own fields still ride the
+		// URL (bindURL is all that binds them), and the body itself arrives as a
+		// file. So the flags are the URL-bindable ones — the bodyless split — plus
+		// the one flag that names the file.
+		c.BodyMedia = op.bodyMedia()
+		c.Args, c.Flags = bindIn(op.InType, colonParams(op.Path), docFields(has, doc), op.hasBody() && !op.raw())
+		if op.raw() {
+			c.Flags = append(c.Flags, bodyFlag())
+		}
 		cmds = append(cmds, c)
 	}
 	sortCommands(cmds)
@@ -141,7 +194,7 @@ func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
 // addresses the resource, so offering a second way to set the same value would
 // be two ways to say one thing (and bindPath would overrule one of them).
 //
-// body says the method carries one (hasBody). A bodyless op's input rides the
+// body says the op carries one (hasBody). A bodyless op's input rides the
 // URL, so its flags are exactly the URL-bindable fields — the SAME urlFields
 // list the document reads. Offering the rest would offer flags the wire cannot
 // carry: a `--tags '["a"]'` on a DELETE marshalled fine, went out as a query
@@ -157,6 +210,13 @@ func bindIn(in reflect.Type, params []string, fieldDocs map[string]string, body 
 	t := in
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
+	}
+	// An OPEN input has no declared keys, so there is nothing to spell one flag
+	// per: the object IS the input and one flag carries it. The path parameters
+	// stay positional either way — the URL addresses the resource, and bindOpen
+	// still overrules whatever the object said about it.
+	if openObject(t) {
+		return args, []Flag{wholeInputFlag()}
 	}
 	if t.Kind() != reflect.Struct {
 		return args, nil
@@ -441,30 +501,46 @@ type Remote struct {
 // CommandsFromSpec to build a command tree for a service this binary does not
 // link.
 func (r Remote) Spec(ctx context.Context) ([]byte, error) {
-	return r.do(ctx, "GET", "/.well-known/openapi.json", nil)
+	return r.do(ctx, "GET", "/.well-known/openapi.json", nil, "")
 }
 
 // Invoke sends one command to the service. Its signature is Invoker's, so it
 // drops into a CLI wherever LocalInvoke would.
 func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, body []byte) (any, error) {
+	params := colonParams(c.Path)
 	url := c.Path
+	var query []string
 	for name, val := range path {
-		url = strings.ReplaceAll(url, ":"+name, urlEscape(val))
+		// The names the route TEMPLATES are substituted into it; a URL-borne value
+		// it does not name rides the query string, the other half of the same URL.
+		// That is how a raw-body command's flags reach a route whose body is
+		// already taken by its file — they used to be dropped here in silence.
+		if isParam(params, name) {
+			url = strings.ReplaceAll(url, ":"+name, urlEscape(val))
+			continue
+		}
+		query = append(query, urlEscape(name)+"="+urlEscape(val))
 	}
-	// A bodyless method's non-path inputs belong in the query string, which is
-	// where the route's own decoder looks for them. hasBody is THE rule, read
-	// here as well as by the document and by the route itself.
-	if !hasBody(c.Method) && len(body) > 0 {
+	// A bodyless op's non-path inputs belong in the query string, which is where
+	// the route's own decoder looks for them. hasBody is THE rule, read here as
+	// well as by the document and by the route itself — through the Command,
+	// because an op that declared it carries nothing says so in the document this
+	// command may well have been derived from.
+	if !c.hasBody() && len(body) > 0 {
 		q, err := queryOf(body)
 		if err != nil {
 			return nil, err
 		}
 		if q != "" {
-			url += "?" + q
+			query = append(query, q)
 		}
 		body = nil
 	}
-	out, err := r.do(ctx, c.Method, url, body)
+	if len(query) > 0 {
+		sort.Strings(query) // a map has no order; a URL must
+		url += "?" + strings.Join(query, "&")
+	}
+	out, err := r.do(ctx, c.Method, url, body, c.BodyMedia)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +553,13 @@ func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, b
 // do performs one request over the transport Base names. ctx is honoured up to
 // the point the request is handed to the transport, which owns its own
 // deadlines from there.
-func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+//
+// media is what the body carries; empty means JSON, which is what a command's
+// flags marshal to. An OPAQUE body says its own media ([WithRawBody]), because a
+// PDF announced as JSON is a request an edge is entitled to refuse — and the
+// route it reaches reads the bytes either way, so the header is the only place
+// the truth could go.
+func (r Remote) do(ctx context.Context, method, path string, body []byte, media string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -500,7 +582,10 @@ func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byt
 	}
 	if len(body) > 0 {
 		req.SetBody(body)
-		req.Header.SetContentType("application/json")
+		if media == "" {
+			media = "application/json"
+		}
+		req.Header.SetContentType(media)
 	}
 	for k, v := range r.Header {
 		req.Header.Set(k, v)
@@ -509,6 +594,14 @@ func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byt
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	out := append([]byte(nil), resp.Body()...)
+	// A 3xx is the op's ANSWER, not the transport being unhelpful: the Location
+	// is what the handler returned, and it comes back as the very [Redirect]
+	// value the in-process invoker hands over — one value, both executions. A
+	// redirect has no body, so without this a redirecting op printed nothing and
+	// exited zero.
+	if code := resp.StatusCode(); code >= 300 && code < 400 {
+		return nil, &Redirect{Status: code, Location: string(resp.Header.Peek(locationHeader))}
+	}
 	if code := resp.StatusCode(); code >= 400 {
 		return nil, fmt.Errorf("%s %s: %d %s", method, path, code, strings.TrimSpace(string(out)))
 	}
@@ -658,6 +751,12 @@ func (c Command) parse(args []string) (map[string]string, []byte, error) {
 		byName[f.Name] = f
 	}
 	fields := map[string]json.RawMessage{}
+	// The two things a RAW-body command carries instead: the bytes of the file
+	// --body named, and its other flags as URL-borne text. They cannot ride in the
+	// body, because for that op the body IS the file.
+	url := map[string]string{}
+	var file []byte
+	var gotFile bool
 	var positional []string
 
 	for i := 0; i < len(args); i++ {
@@ -683,9 +782,29 @@ func (c Command) parse(args []string) (map[string]string, []byte, error) {
 				val = args[i]
 			}
 		}
+		if f.Type == flagFile {
+			// A FILE flag names a path; the bytes go on the wire as they sit on
+			// disk. Encoding them as a JSON field would send base64 of a body to a
+			// route whose whole contract is that it reads the body (see
+			// [WithRawBody]).
+			b, rerr := os.ReadFile(val)
+			if rerr != nil {
+				return nil, nil, fmt.Errorf("--%s: %w", name, rerr)
+			}
+			file, gotFile = b, true
+			continue
+		}
 		raw, err := encodeFlag(f, val)
 		if err != nil {
 			return nil, nil, err
+		}
+		if c.BodyMedia != "" {
+			// The body of a raw command is taken, so its other flags are URL-borne
+			// exactly as a bodyless op's are — and what a URL carries is the text
+			// the caller typed. encodeFlag above still refuses a value the field
+			// cannot hold, so the check is not lost by not sending its JSON.
+			url[f.Field] = val
+			continue
 		}
 		fields[f.Field] = raw
 	}
@@ -694,16 +813,44 @@ func (c Command) parse(args []string) (map[string]string, []byte, error) {
 		return nil, nil, fmt.Errorf("%s %s takes %d argument(s): %s",
 			c.Service, c.Name, len(c.Args), argNames(c.Args))
 	}
-	path := make(map[string]string, len(c.Args))
+	path := make(map[string]string, len(c.Args)+len(url))
 	for i, a := range c.Args {
 		path[a.Name] = positional[i]
 	}
+	// One map for every URL-borne value, the routed segments and the rest alike:
+	// the invoker substitutes the names the route templates and sends the others
+	// as query values, which is where the binder reads them from either way.
+	for name, val := range url {
+		path[name] = val
+	}
 	for _, f := range c.Flags {
-		if f.Required {
-			if _, ok := fields[f.Field]; !ok {
+		if !f.Required {
+			continue
+		}
+		if f.Type == flagFile {
+			if !gotFile {
 				return nil, nil, fmt.Errorf("--%s is required", f.Name)
 			}
+			continue
 		}
+		_, inBody := fields[f.Field]
+		_, inURL := url[f.Field]
+		if !inBody && !inURL {
+			return nil, nil, fmt.Errorf("--%s is required", f.Name)
+		}
+	}
+	// A raw-body command's body is the file, whole. There is nothing for its flags
+	// to be assembled into: the op does not decode the body, and the flags went
+	// where the op actually reads them from.
+	if c.BodyMedia != "" {
+		return path, file, nil
+	}
+	// An OPEN input is not assembled from fields: the whole-input flag's value IS
+	// the input, so it goes out exactly as it came in. Wrapping it in an object
+	// keyed by the flag's name would send the caller's document nested inside a
+	// field no schema declares.
+	if raw, whole := fields[""]; whole {
+		return path, raw, nil
 	}
 	if len(fields) == 0 {
 		return path, nil, nil
@@ -930,6 +1077,16 @@ func (c Command) exampleLine(bin string) string {
 			}
 		}
 		fmt.Fprintf(&b, " %s", val)
+	}
+	// An OPEN input has no per-key flags, so the example is not split across
+	// them: the one value the whole-input flag carries IS the example.
+	if f, whole := flag[""]; whole {
+		val := string(c.Example)
+		if strings.ContainsAny(val, " \t\"'") {
+			val = strconv.Quote(val)
+		}
+		fmt.Fprintf(&b, " --%s %s", f.Name, val)
+		return b.String()
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {

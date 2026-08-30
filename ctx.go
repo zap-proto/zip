@@ -197,14 +197,31 @@ func (c *Ctx) Continue() error { return c.fc.Next() }
 // =============================================================================
 
 // HTTPError is the canonical error type zip understands. Returning one
-// causes the error handler to send a JSON {error, code, status} body.
+// causes the error handler to send a JSON {error, code, status} body — unless
+// the refusal carries a body of its own, which an op declares with [WithFault]
+// and a handler attaches with [HTTPError.WithBody].
 type HTTPError struct {
 	Status int    `json:"status"`
 	Code   string `json:"code,omitempty"`
 	Msg    string `json:"error"`
+
+	// body is the declared refusal body, already encoded. Unexported because it
+	// REPLACES the envelope rather than joining it: a field here would publish
+	// itself as one more key of the shape it stands in for. Read it with
+	// [HTTPError.Body]; it is what [HTTPError.MarshalJSON] sends.
+	body []byte
 }
 
-func (e *HTTPError) Error() string { return e.Msg }
+// Error is the refusal as one line. A declared body is part of it: the CLI, the
+// logs and an agent's tool result all read this, and a refusal whose substance
+// IS its body would otherwise print as though it had none. Without a body the
+// text is the message, exactly as it has always been.
+func (e *HTTPError) Error() string {
+	if len(e.body) == 0 {
+		return e.Msg
+	}
+	return e.Msg + ": " + string(e.body)
+}
 
 // Errorf builds an HTTPError with the given status and message.
 func Errorf(status int, format string, args ...any) *HTTPError {
@@ -222,12 +239,23 @@ func ErrInternal(msg string) *HTTPError     { return &HTTPError{Status: 500, Msg
 // errorHandler is the default fiber.ErrorHandler — converts HTTPError
 // into a JSON response and falls back to 500 for anything else.
 func errorHandler(c fiber.Ctx, err error) error {
+	// A REDIRECT is an ANSWER, not a fault: its whole body is the Location
+	// header. It is recognized before every envelope branch, because a status
+	// alone is what an unrecognized one would send — a 3xx no client can follow
+	// (see response.go). This is the ONE place a typed handler can set a header,
+	// which is why a redirect could not be typed at all before it.
+	if r, ok := redirectOf(err); ok {
+		return r.send(c)
+	}
 	var he *HTTPError
 	if errors.As(err, &he) {
 		if he.Status == 0 {
 			he.Status = 500
 		}
 		c.Status(he.Status)
+		// One writer, and the refusal decides what it writes: a declared body
+		// REPLACES the envelope here because [HTTPError.MarshalJSON] says so, not
+		// because this branch knows about it.
 		return c.JSON(he)
 	}
 	var fe *fiber.Error
@@ -239,7 +267,9 @@ func errorHandler(c fiber.Ctx, err error) error {
 	return c.JSON(&HTTPError{Status: 500, Msg: err.Error()})
 }
 
-// Redirect sends an HTTP redirect to location with the given status code.
+// Redirect sends an HTTP redirect to location with the given status code. This is
+// the UNTYPED surface's spelling; a typed op returns a [Redirect] instead, and
+// both write the same header through the same fiber writer.
 func (c *Ctx) Redirect(code int, location string) error {
 	return c.fc.Redirect().Status(code).To(location)
 }

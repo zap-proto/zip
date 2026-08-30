@@ -78,6 +78,12 @@ type callFault struct {
 	Status int32
 	Code   string
 	Msg    string
+
+	// Body is the DECLARED refusal body (see WithFault) as the bytes the REST
+	// boundary would have written, so a sibling service reads the shape a browser
+	// reads instead of a message it has to parse. APPENDED, which is the only
+	// place a ZAP field can be added — the layout IS the type (see zapenc).
+	Body []byte
 }
 
 // sendCallError writes a refusal in the plane's own encoding, preserving the
@@ -87,6 +93,7 @@ func sendCallError(fc fiber.Ctx, err error) error {
 	f := callFault{Status: 500, Msg: err.Error()}
 	if he, ok := asHTTPError(err); ok {
 		f.Status, f.Code, f.Msg = int32(he.Status), he.Code, he.Msg
+		f.Body = he.Body()
 	}
 	body, merr := zapenc.Marshal(&f)
 	if merr != nil {
@@ -137,10 +144,13 @@ func SocketPath(name string) string { return socketIn(RuntimeDir(), name) }
 // service's socket is <dir>/<name>.sock" is stated once.
 func socketIn(dir, name string) string { return filepath.Join(dir, name+".sock") }
 
-// installCallPlane mounts the by-name op plane when there are ops to call.
+// installCallPlane mounts the by-name op plane when there are ops to call —
+// ops this plane can CARRY, which is not every op: one whose body is opaque
+// bytes is addressed by its URL and nothing else (see
+// [registeredOp.callableByName]).
 // Called from prepare() alongside installOpenAPIRoutes and installMCP.
 func (a *App) installCallPlane() {
-	if len(a.ops) == 0 {
+	if a.byNameCount() == 0 {
 		return
 	}
 	a.fiber.Post(CallPath+":op", func(fc fiber.Ctx) error {
@@ -172,7 +182,7 @@ func (a *App) installCallPlane() {
 		fc.Set(fiber.HeaderContentType, CallContentType)
 		return fc.Send(body)
 	})
-	a.logger.Info("zip call plane", "path", CallPath, "ops", len(a.ops))
+	a.logger.Info("zip call plane", "path", CallPath, "ops", a.byNameCount())
 }
 
 // Conn is a handle to another zip app, dialed once and used concurrently. It
@@ -323,7 +333,11 @@ func remoteError(code int, op string, body []byte) error {
 	if status == 0 {
 		status = code
 	}
-	return &HTTPError{Status: status, Code: f.Code, Msg: f.Msg}
+	// The declared body crosses whole: the caller's errors.As sees the same
+	// refusal the callee raised, shape included, rather than a status and a
+	// sentence about it. A callee that predates the field sends none, and an
+	// absent one reads back as none.
+	return (&HTTPError{Status: status, Code: f.Code, Msg: f.Msg}).withRawBody(f.Body)
 }
 
 // validOpName rejects a name that would address something other than an op.

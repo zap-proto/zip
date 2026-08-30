@@ -32,11 +32,20 @@ type registeredOp struct {
 	Path        string
 	OperationID string
 	Summary     string
-	Status      int // the success status; 0 means the default (200, or 204 for a nil Out)
-	Tags        []string
-	InType      reflect.Type
-	OutType     reflect.Type
-	invoke      func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error)
+	Status      int   // the success status; 0 means the default (200, or 204 for a nil Out)
+	NoBody      bool  // the op carries no request body, whatever its method usually would
+	Responses   []int // the NON-2xx statuses this op also answers — see WithResponse
+	// RawBody is the media an OPAQUE body carries, and its presence IS the
+	// declaration that the body is handed to the handler undecoded rather than
+	// unmarshalled into In — see WithRawBody.
+	RawBody []string
+	// Faults are the refusals this op DECLARES: a status and the shape of the
+	// body that carries it — see WithFault.
+	Faults  []fault
+	Tags    []string
+	InType  reflect.Type
+	OutType reflect.Type
+	invoke  func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error)
 }
 
 // decoder reads a request body into an op's In. It is a PARAMETER rather than a
@@ -107,12 +116,47 @@ func WithOperationID(id string) OpOption {
 // error status comes from the error a handler returns ([ErrNotFound] and
 // friends); letting a declaration state one too would be two places for one
 // fact, free to disagree.
+//
+// A non-2xx an op DOES answer is declared as what it is — one more response —
+// with [WithResponse], and sent by what the handler returns: an [HTTPError] for a
+// refusal, a [Redirect] for a location.
 func WithStatus(code int) OpOption {
 	if code < 200 || code > 299 {
-		panic("zip: WithStatus wants a 2xx success status — an error status is the error a handler returns")
+		panic("zip: WithStatus wants a 2xx success status — declare a non-2xx with zip.WithResponse and answer it with an error (a redirect: *zip.Redirect)")
 	}
 	return func(op *registeredOp) { op.Status = code }
 }
+
+// WithoutBody declares that the op carries NO request body: a POST that acts on
+// what its URL already names — `POST /v1/company/kyc`, `POST /v1/flows/:id/enable`
+// — rather than on a document the caller sends.
+//
+// Body-ness is a property of the METHOD by default ([hasBody]): a POST carries
+// one, a GET and a DELETE do not. Where that default is wrong it is the DOCUMENT
+// that lies, and every surface generated from it lies with it: an op whose handler
+// never reads a body still published `requestBody: {required: true}` over an empty
+// object, so a generated SDK made the argument mandatory, "try it" sent `{}` to
+// satisfy a schema nothing reads, and the CLI offered flags the wire drops. This
+// moves the answer from the method to the op, which is where it was always known.
+//
+// It reaches every projection, because they all read the ONE predicate: the route
+// stops reading the body, the document publishes no requestBody and declares the
+// URL-borne fields as query parameters instead, and the CLI offers exactly those
+// as flags and sends them in the query string a bodyless route reads them from.
+// A body sent anyway is ignored rather than refused — the same thing a DELETE has
+// always done with one, since the op simply has nowhere to put it.
+//
+// An MCP tools/call and a [Conn.Call] are untouched: addressing an op by NAME has
+// no URL to carry half the input in, so there the arguments object IS the whole
+// input whatever the method would have done over HTTP. This is a statement about
+// the HTTP wire, and only about it.
+//
+// There is no inverse. Taking a body away only ever withdraws a promise, so
+// WithoutBody composes with itself and with every other option; declaring one a
+// method does not carry would instead need the route, the document and both
+// invokers to agree about a shape no generated client sends. On a GET or a DELETE
+// it states what the method already is, and does nothing.
+func WithoutBody() OpOption { return func(op *registeredOp) { op.NoBody = true } }
 
 // bindURL copies URL-borne values onto the decoded input, matching a name to the
 // field whose json tag (else field name, case-insensitively) equals it. It is the
@@ -138,6 +182,11 @@ func WithStatus(code int) OpOption {
 // addresses one resource, and an input that nests its record declares its target
 // explicitly (see the authorizer's `owned` interface) rather than having it
 // guessed out of a sub-struct an attacker also controls.
+//
+// Two shapes of input are bound, because two shapes of input are DECLARABLE: a
+// closed struct, whose fields name what it accepts, and an OPEN object, whose
+// keys belong to the caller (see [bindOpen]). Anything else — a scalar, a slice —
+// has no room for a name and is left exactly as the decoder left it.
 func bindURL(in any, values map[string]string) {
 	if len(values) == 0 {
 		return
@@ -148,6 +197,14 @@ func bindURL(in any, values map[string]string) {
 			return
 		}
 		v = v.Elem()
+	}
+	// An OPEN input takes a URL name as a KEY, where a struct takes it as a
+	// field. Same names, same authority order, different place to put them. The
+	// question is [openObject], the SAME one the document and the CLI ask, so a
+	// shape the binder fills is a shape they describe.
+	if openObject(v.Type()) {
+		bindOpen(v, values)
+		return
 	}
 	if v.Kind() != reflect.Struct {
 		return
@@ -172,33 +229,119 @@ func bindURL(in any, values map[string]string) {
 // setScalar writes one wire string into one field, converting by the field's
 // kind. Anything it cannot represent (structs, slices, maps, pointers) is left
 // alone — a URL carries scalars.
-func setScalar(fv reflect.Value, val string) {
+//
+// It reports whether it wrote. A struct field ignores the answer, because the
+// field exists either way and its zero value IS "nothing arrived"; an OPEN input
+// needs it, because there the absence of a value is the absence of a KEY, and
+// writing one that says nothing would invent a key the caller never sent. One
+// list of kinds serves both, which is the point of returning it rather than
+// asking a second predicate the same question.
+func setScalar(fv reflect.Value, val string) bool {
 	switch fv.Kind() {
 	case reflect.String:
 		fv.SetString(val)
+		return true
 	case reflect.Bool:
 		// An empty value means "flag present" — `?debug` reads as true, the
 		// convention every HTML form and CLI already uses.
 		if val == "" {
 			fv.SetBool(true)
-			return
+			return true
 		}
 		if b, err := strconv.ParseBool(val); err == nil {
 			fv.SetBool(b)
+			return true
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if n, err := strconv.ParseInt(val, 10, fv.Type().Bits()); err == nil {
 			fv.SetInt(n)
+			return true
 		}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if n, err := strconv.ParseUint(val, 10, fv.Type().Bits()); err == nil {
 			fv.SetUint(n)
+			return true
 		}
 	case reflect.Float32, reflect.Float64:
 		if f, err := strconv.ParseFloat(val, fv.Type().Bits()); err == nil {
 			fv.SetFloat(f)
+			return true
 		}
 	}
+	return false
+}
+
+// bindOpen writes URL-borne values into an OPEN input — a map keyed by string,
+// whose keys belong to the CALLER rather than to the type. A struct declares the
+// names it accepts, so a URL name is matched to a field; an open object declares
+// none, so the name IS the key.
+//
+// It exists because the alternative was silence. bindURL walked a struct or
+// returned, so an op whose input is an open object — a document store's payload,
+// a settings patch, anything whose keys are data rather than schema — received
+// its body and NOTHING from the URL: the path segment the router matched on, the
+// same segment the [Authorizer] reads, simply vanished. Such an op could have an
+// open body or an addressable resource, never both, which sent every one of them
+// back to an untyped handler and out of the document, the tool list and the
+// command line along with it.
+//
+// Authority is unchanged, because it is the caller's URL either way: query then
+// path, so the routed segment wins over a query key of the same name and over
+// whatever the body carried under it. An open input cannot smuggle a different
+// target past the authorizer any more than a struct can.
+//
+// A value stays TEXT where the type says nothing about it: `?n=5` under
+// map[string]any is the string "5", because a value whose type is open has no
+// kind to convert to, and guessing one would make the same key arrive as a number
+// or a string depending on what a caller happened to type. Where the map DOES
+// declare its value type (map[string]int), that declaration is honoured through
+// the same [setScalar] every struct field runs through — and a value that type
+// cannot hold writes no key at all, which is what "nothing arrived" looks like in
+// a map.
+//
+// A nil map is allocated on the first write, so an op that reads no body still
+// receives its path parameters. With nothing to write it stays nil, and a nil map
+// reads like any other.
+//
+// An open input reaches the REST route, the document, the tool list and the
+// command line. It does NOT cross the by-name call plane: ZAP describes a message
+// by its layout, and an open object has none, so [Call] refuses one at encode
+// rather than sending a message with the caller's keys quietly missing. An op
+// whose input is open says what it is by being open — a document, not a record —
+// and a sibling service that wants to call it has a URL to do it with.
+func bindOpen(v reflect.Value, values map[string]string) {
+	t := v.Type() // an [openObject]: a map whose key is a string, checked by the caller
+	for name, val := range values {
+		ev, ok := openValue(t.Elem(), val)
+		if !ok {
+			continue
+		}
+		if v.IsNil() {
+			if !v.CanSet() {
+				return
+			}
+			v.Set(reflect.MakeMapWithSize(t, len(values)))
+		}
+		v.SetMapIndex(reflect.ValueOf(name).Convert(t.Key()), ev)
+	}
+}
+
+// openValue is one URL string as an open input's value type: the text itself
+// where the type is open, and otherwise the conversion [setScalar] performs for a
+// struct field of that kind. It reports false when the type cannot hold what the
+// URL carried, which leaves the key unwritten rather than present-and-empty.
+func openValue(t reflect.Type, val string) (reflect.Value, bool) {
+	ev := reflect.New(t).Elem()
+	if t.Kind() == reflect.Interface {
+		// `any` takes the text. A narrower interface takes nothing: a string does
+		// not implement it, and a URL has no way to spell something that does.
+		if t.NumMethod() > 0 {
+			return ev, false
+		}
+		ev.Set(reflect.ValueOf(val))
+		return ev, true
+	}
+	return ev, setScalar(ev, val)
 }
 
 func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
@@ -220,6 +363,14 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	for _, o := range opts {
 		o(op)
 	}
+	// A body to read is the one thing WithRawBody cannot supply for itself. On a
+	// method that carries none the handler would be handed nothing at all, and
+	// silently reading no bytes is the exact failure the option exists to remove
+	// — so it is refused here, where the method is known, rather than reaching a
+	// signature check that can only fail.
+	if op.raw() && !op.hasBody() {
+		panic("zip: WithRawBody on " + method + " " + path + " — that op carries no body to read")
+	}
 
 	// The op's stable identity, resolved once (after opts) and handed to the
 	// authorizer on every invoke — REST and MCP alike.
@@ -230,7 +381,14 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// call THIS — one handler, many projections. A nil *Out becomes a nil `any`.
 	op.invoke = func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string) (any, error) {
 		var in In
-		if len(rawIn) > 0 {
+		if op.raw() {
+			// An OPAQUE body is the op's own input, not a value to decode into
+			// one: it reaches the handler through [BodyOf], as the bytes this
+			// projection carried. Nothing here can fail, which is the point — a
+			// body that does not parse is the handler's to answer for, and 400 was
+			// the answer that turned one malformed webhook into a retry storm.
+			ctx = withBody(ctx, rawIn)
+		} else if len(rawIn) > 0 {
 			if err := dec(rawIn, &in); err != nil {
 				return nil, ErrBadRequest("invalid body: " + err.Error())
 			}
@@ -268,12 +426,13 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	app.ops = append(app.ops, op)
 
 	handler := func(c fiber.Ctx) error {
-		// hasBody is THE rule about what a method carries, read here as well as
-		// by the document and the CLI's remote invoker. Reading the body for a
-		// method the document says has none is how a DELETE came to accept an
-		// input no generated client would ever send.
+		// hasBody is THE rule about what this op carries — its method's default
+		// unless it declared otherwise ([WithoutBody]) — read here as well as by
+		// the document and the CLI's remote invoker. Reading the body for a route
+		// the document says has none is how a DELETE came to accept an input no
+		// generated client would ever send.
 		var body []byte
-		if hasBody(method) {
+		if op.hasBody() {
 			body = c.Body()
 		}
 		var path map[string]string

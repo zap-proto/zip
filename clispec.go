@@ -35,6 +35,22 @@ func CommandsFromSpec(spec []byte) ([]Command, error) {
 				OperationID: op.OperationID,
 				Summary:     op.Summary,
 				Description: op.Description,
+				// A method that carries a body, publishing none, is an op that
+				// declared it takes none (WithoutBody) — the document IS how that
+				// declaration reaches a client that links nothing of the service,
+				// and without reading it back the client would send a body to a
+				// route that stopped reading one. Left false where the method never
+				// carried one anyway, so this value equals the registry's for the
+				// same op rather than merely agreeing with it.
+				//
+				// A published OPAQUE body is not "no body": it is a body no schema
+				// describes, sent verbatim (WithRawBody). Reading it as absent would
+				// turn the bytes into a query string.
+				NoBody: hasBody(method) && op.body() == nil && op.rawMedia() == "",
+				// And this is how the media reaches a client that links nothing of
+				// the service: the document names it, so the command sends the file
+				// under the content type the route publishes.
+				BodyMedia: op.rawMedia(),
 			}
 			c.Service, c.Name = commandName(method, route, op.OperationID)
 			if c.Summary == "" {
@@ -72,28 +88,55 @@ func (d specDoc) bind(op specOp, params []string) ([]Arg, []Flag) {
 			Help: description, Required: required,
 		})
 	}
+	// An OPEN input — a body of additionalProperties, or the free-form query the
+	// bodyless half publishes instead — is the whole input, so it is carried by the
+	// one flag that says so rather than by a flag named after the schema or the
+	// parameter. Read here because the document is where openObject's answer
+	// SURVIVES: a client that links nothing of the service has only this to go on.
+	open := false
 	// Query parameters are inputs too — an operation that takes its filters in
 	// the URL must offer them as flags, or the CLI silently loses half the API.
 	for _, p := range op.Parameters {
-		if p.In == "query" {
-			add(p.Name, p.Schema.Type, p.Description, p.Required)
+		if p.In != "query" {
+			continue
+		}
+		if p.Schema.open() {
+			open = true
+			continue
+		}
+		add(p.Name, p.Schema.Type, p.Description, p.Required)
+	}
+	if op.rawMedia() != "" {
+		// An OPAQUE body has no fields to spell flags from — it is bytes — so the
+		// command carries it the one way a command line can: the file that holds
+		// them. Its query parameters above stay flags, because for a raw op the URL
+		// is the whole of its structured input.
+		flags = append(flags, bodyFlag())
+	} else if body := op.body(); body != nil {
+		s := d.resolve(body.Schema)
+		if s.open() {
+			open = true
+		} else {
+			req := map[string]bool{}
+			for _, r := range s.Required {
+				req[r] = true
+			}
+			names := make([]string, 0, len(s.Properties))
+			for name := range s.Properties {
+				names = append(names, name)
+			}
+			sort.Strings(names) // a map has no order; a CLI must
+			for _, name := range names {
+				p := s.Properties[name]
+				add(name, p.Type, p.Description, req[name])
+			}
 		}
 	}
-	if body := op.body(); body != nil {
-		s := d.resolve(body.Schema)
-		req := map[string]bool{}
-		for _, r := range s.Required {
-			req[r] = true
-		}
-		names := make([]string, 0, len(s.Properties))
-		for name := range s.Properties {
-			names = append(names, name)
-		}
-		sort.Strings(names) // a map has no order; a CLI must
-		for _, name := range names {
-			p := s.Properties[name]
-			add(name, p.Type, p.Description, req[name])
-		}
+	if open {
+		// First, and beside whatever else the op carries rather than instead of it:
+		// App.Commands spells the whole-input flag before the ones it appends, and
+		// two derivations of one command must offer the same flags in the same order.
+		flags = append([]Flag{wholeInputFlag()}, flags...)
 	}
 	return args, flags
 }
@@ -153,6 +196,59 @@ type specSchema struct {
 	Description string                `json:"description"`
 	Properties  map[string]specSchema `json:"properties"`
 	Required    []string              `json:"required"`
+	// Format is how the document says BYTES: a string of format binary, which is
+	// what an opaque body publishes instead of a schema (see rawBodyDecl) and the
+	// only thing telling it from a body whose fields are flags.
+	Format string `json:"format"`
+	// AdditionalProperties is what tells an OPEN object from a closed one on the
+	// wire: a schema with properties names the keys it accepts, and one with
+	// additionalProperties says the keys are the caller's. Read as raw JSON
+	// because it is a schema OR a boolean, and which of the two it is says
+	// nothing the CLI needs — only that it is there.
+	AdditionalProperties json.RawMessage `json:"additionalProperties"`
+}
+
+// open reports whether this schema is an OPEN object: keys the caller chooses
+// rather than keys the schema names. It is the document's spelling of the
+// question [openObject] asks of a Go type — one concept, read from whichever of
+// the two the derivation has in hand. An object with no properties and no
+// additionalProperties is not open, it is EMPTY, and an empty input takes no
+// flags at all.
+func (s specSchema) open() bool {
+	return s.Type == "object" && len(s.Properties) == 0 && len(s.AdditionalProperties) > 0
+}
+
+// binary reports whether this schema is OPAQUE BYTES rather than a value with
+// fields: {"type":"string","format":"binary"}, the spelling every generator reads
+// as bytes and the one rawBodyDecl publishes.
+func (s specSchema) binary() bool { return s.Type == "string" && s.Format == "binary" }
+
+// rawMedia is the media an operation's body carries as OPAQUE BYTES, or "".
+//
+// The document says which by the SCHEMA and not by the media type, because the
+// media type is not the question: a webhook that must hold its exact bytes
+// publishes application/json — the payload really is JSON — and reading the type
+// alone would call that an ordinary object body and build flags from a schema
+// that has no fields. What distinguishes it is that the schema is binary.
+//
+// Sorted, because a document's content is a JSON object and objects have no
+// order, and the registry sorts the same set at declaration ([WithRawBody]) — so
+// both derivations name the same one media out of however many an op accepts.
+func (o specOp) rawMedia() string {
+	if o.RequestBody == nil {
+		return ""
+	}
+	medias := make([]string, 0, len(o.RequestBody.Content))
+	for media, m := range o.RequestBody.Content {
+		if m.Schema.binary() {
+			medias = append(medias, media)
+		}
+	}
+	if len(medias) == 0 {
+		return ""
+	}
+	sort.Strings(medias)
+	return medias[0]
 }
 
 // body returns the JSON request media, if the operation has one.

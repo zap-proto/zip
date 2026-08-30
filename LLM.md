@@ -55,6 +55,9 @@ any of them.
 |---|---|
 | **`zip.Get/Post[In,Out](on, …)`** | **declare a typed op — THE way to declare a route.** The schema, and what every projection is derived from. `on` is the App or any Router of it |
 | `zip.WithStatus(201)` | declare the SUCCESS status; it keys the document's response, not just the wire |
+| `zip.WithResponse(302)` | declare a NON-2xx the op also answers — a 3xx it redirects with (`return nil, &zip.Redirect{Location: …}`), a 4xx/5xx it refuses with |
+| `zip.WithRawBody("application/pdf")` | declare the body OPAQUE: nothing decodes it and the handler reads the exact bytes with `zip.BodyOf(ctx)` |
+| `zip.WithFault[Body](409)` | declare a refusal WITH ITS SHAPE; the handler answers it with `zip.ErrConflict(…).WithBody(Body{…})` and that body is the whole response |
 | `app.Add(svcs...)` | compose units of functionality |
 | `app.Listen(addrs...)` | serve here; the address scheme picks the transport |
 | `app.Mount(prefix, addr)` | delegate there; same scheme registry, opposite direction |
@@ -353,6 +356,76 @@ MCP tool, the CLI command and the op-call plane are untouched, because each of
 those carries its own outcome. A non-2xx panics at declaration — an error status
 is the error a handler returns, and two places to say it is one too many.
 
+### The answers that are not the success answer
+
+`response.go`. WithStatus stays 2xx-only. A non-2xx is declared as what it is —
+one more RESPONSE on the op — and SENT by what the handler returns:
+
+| answer | declare | send |
+|---|---|---|
+| a location | `zip.WithResponse(302)` | `return nil, &zip.Redirect{Location: url}` |
+| a refusal the contract names | `zip.WithResponse(409)` | `return nil, zip.ErrConflict(…)` |
+
+`WithResponse(code)` adds the code to the document's `responses`: a 3xx with the
+`Location` HEADER it answers with and NO body — that header *is* its answer — and
+a 4xx/5xx with the envelope `errorHandler` writes, described from the `HTTPError`
+type that writes it so the document cannot drift from the wire. Declaring says
+what an op CAN answer; the wire still sends what the handler returned. A 2xx
+panics: `WithStatus` already says that, and two options free to disagree is the
+split this closes.
+
+`*zip.Redirect` is the ONE thing on the typed path that can set a header, which
+is why a redirect could not be typed at all before it — every OAuth leg that
+hands a browser to its provider had to stay an untyped route, invisible to all
+five projections. It rides the error channel because `(*Out, error)` is the whole
+of what a typed handler can say, and `errorHandler` recognizes it BEFORE every
+fault branch: status + `Location`, no body. Each projection then reads that one
+value in its own vocabulary — the op-call plane and `zip.Call` report the
+redirect's OWN status (302, not a collapsed 500, via `Unwrap`); an MCP
+`tools/call` has neither status nor header, so the location is the RESULT rather
+than `isError`, which would tell a model a working OAuth start had failed; the
+CLI reports the same `*zip.Redirect` whether it ran the op in-process or over the
+wire. A redirect with no location is refused as the bug it is (500) instead of
+sent as a 3xx nothing can follow.
+
+The nil-Out 204 is untouched.
+
+### A refusal with a SHAPE
+
+`fault.go`. A refusal is an answer, and an answer has a body. zip's is the
+envelope — `{status, code, error}` — and it stays exactly that for every op that
+declares nothing. `WithFault[Body](status)` declares the shape a refusal carries,
+and `HTTPError.WithBody(v)` answers with it:
+
+| answer | declare | send |
+|---|---|---|
+| a refusal with a shape | `zip.WithFault[Blocked](409)` | `return nil, zip.ErrConflict("step 2 is blocked").WithBody(Blocked{Step: 2, …})` |
+| a refusal with no shape | `zip.WithFault[any](409)` | `return nil, zip.ErrConflict(…)` |
+
+The declared body is the WHOLE body, not a field of the envelope — a service
+whose published error contract is `{"error":{"code","message"}}` says exactly
+that, at 402 and at 503, rather than having zip wrap it in a second error object.
+That is why the shape cannot live in the type: one shape serves several statuses.
+Before it, a route with a fixed error contract could not be typed at all: its
+structure had to be flattened into the envelope's one string, and the document
+said nothing about the status.
+
+It projects everywhere a refusal is read. The document publishes the shape under
+that status beside the success response (`$ref` into `components.schemas`), so a
+generated SDK builds a typed error instead of reading a deliberate 409 as an
+unexpected one. `HTTPError.MarshalJSON` is what writes it — on the VALUE, not at
+the boundary, because a service under an outer error filter writes its own status
+in band (`c.JSON(he.Status, he)`) and a body only zip's renderer honored would
+vanish on those routes. The op-call plane carries the bytes in an APPENDED
+`callFault` field, so a sibling service's `errors.As` sees the same shape a
+browser reads (an older callee sends none; bytes that are not JSON are not
+adopted). `Error()` carries it too, which is how it reaches a log, an MCP
+`tools/call` result and the CLI. A 2xx or 3xx panics at declaration, and so does
+one status declared twice — a response carries one schema.
+
+Declaring is the SET of refusals; the error a handler returns is the ONE this
+request met, which is why both name the status.
+
 ## The schema derivation — one type, one definition (v1.17.8)
 
 `openapi.go`. `schemaOf(t, reg, fields)` is the ONE derivation from a Go type to
@@ -509,6 +582,54 @@ Two things a bodyless op used to lose in the document are closed with it:
 `TestCLI_SpecAndRegistryAgree` is now plain equality across every field of every
 command for every method — no skip, no divergence helper. That test is the pin:
 the registry-derived command tree and the document-derived one are one tree.
+
+## A body that is bytes — `zip.WithRawBody` / `zip.BodyOf` (v1.18.7)
+
+`op.invoke` decodes the body before the handler runs, which is what lets one
+handler answer four codecs — and what made three kinds of route unwritable as
+ops at all, so each stayed an untyped handler and out of all five projections:
+
+| route | why a decoded In is not enough |
+|---|---|
+| Slack/GitHub HMAC, Discord Ed25519 webhooks | the signature is over THE BYTES; a struct decoded from the payload is not the payload, and re-encoding it signs to something else |
+| `POST /v1/company/fundraise/deck` | the body is a PDF; there is no In to decode into |
+| a hook that must ack an unreadable payload | decoding first makes it a 400, and a sender that retries every 4xx turns one malformed message into a storm |
+
+`zip.WithRawBody(media...)` declares the body OPAQUE, and `zip.BodyOf(ctx)`
+hands the handler the bytes this projection carried. Nothing else about the op
+changes: path and query still bind onto In, `validate:` still runs, the
+[Authorizer] still sees the value the handler will act on — for a raw op the URL
+is the WHOLE of its structured input, which is why the document declares those
+parameters even though the method has a body.
+
+One declaration, read by every projection:
+
+| projection | what it says |
+|---|---|
+| REST | `op.invoke` skips `dec`; the bytes reach the handler and an unparseable body is the handler's to answer for |
+| OpenAPI | `requestBody` is the declared media with `{"type":"string","format":"binary"}` — bytes to a generator, a file picker in `/docs` — and no In schema, because the In is not the body |
+| CLI | flags are the URL-bindable ones plus `--body <path>`, whose file goes out verbatim under the op's media; `CommandsFromSpec` reads the same fact back out of the document (a binary schema, not the media type — a webhook publishes `application/json` and still holds its bytes) |
+| MCP + op-call | **absent.** An MCP tool's arguments are a JSON object by spec and the call plane's body is a ZAP message; neither is "the bytes a client sent", so `opByName` does not answer for a raw op and `mcpTools` does not list it. One predicate — `callableByName` — so the surface a model reads and the surface it can call are the same one |
+
+Media types are sorted at declaration, so the registry and a document read back
+off it name the same one of however many an op accepts. `WithRawBody` on a
+method that carries no body panics at registration: there would be nothing to
+read, and silently reading nothing is the failure it exists to remove.
+
+The signature a webhook verifies rides a HEADER, and a typed handler declares
+its inputs rather than reading the request — so that one header reaches it the
+way anything else per-request does, from a middleware that puts it on the ctx
+(`c.SetContext(context.WithValue(c.Context(), key{}, c.Header(…)))`). The BYTES
+are the part only zip can supply, and that is what `BodyOf` is for. It is nil for
+an op that did not declare a raw body: that op has its In decoded already, and a
+second way to read one input is a second thing to keep true. The slice aliases
+the transport's read buffer — copy it to keep it.
+
+Fixed with it: `mcpCall` handed `op.invoke` the bare `fc.Context()`, so
+`CallerOf` read back EMPTY for every `tools/call` while REST saw the gateway's
+org — one op, two decisions about one caller, and an `Authorizer` keying on it
+diverged per projection. It now passes `callerContext(fc)` like every other
+caller of invoke.
 
 ## Known bug — zipdoc: module-load extraction diverges from package-load
 
