@@ -424,6 +424,45 @@ func TestSDK_AWholeAppStillGeneratesAroundAGap(t *testing.T) {
 	}
 }
 
+// TestSDK_AnIdNeedsItsCodecFirst is the gap that covers most of a chain node's
+// API, so it is worth naming: ids.ID is [32]byte and ids.NodeID is [20]byte, and
+// a fixed array is exactly the case where the LAYOUT is right and the reflective
+// encoder still refuses — the type is expected to declare its own wire.
+//
+// Without this the generated client offers the method and the call fails on the
+// wire, which is the failure this projection exists to remove. It is also not
+// fixable by generating harder: the declared type's MarshalZAP lives in the
+// service's package, and restating the field as [32]uint8 restates the bytes and
+// not the codec.
+func TestSDK_AnIdNeedsItsCodecFirst(t *testing.T) {
+	type ID [32]byte
+	type Tx struct {
+		TxID   ID     `json:"txID"`
+		Height uint64 `json:"height"`
+	}
+	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
+	zip.Get(app, "/v1/p/tx", func(context.Context, *struct{}) (*Tx, error) { return &Tx{}, nil })
+
+	sdk, err := app.SDK("p")
+	if err != nil {
+		t.Fatalf("SDK: %v", err)
+	}
+	if sdk.Ops() != 0 {
+		t.Errorf("an op carrying an id got a method that cannot succeed:\n%s", sdk.Source)
+	}
+	if len(sdk.Gaps) != 1 || sdk.Gaps[0].Cause != "no codec" {
+		t.Fatalf("gaps do not name the missing codec: %+v", sdk.Gaps)
+	}
+	if !strings.Contains(sdk.Gaps[0].Go, "bytes_fixed[32]") {
+		t.Errorf("the gap does not say what the field is: %+v", sdk.Gaps[0])
+	}
+	// The ZAP schema says the same thing about the same field, from the same
+	// layout — the two projections agree on what is out of reach.
+	if coded := zip.ZAPSchema("p", app).Coded; len(coded) != 1 || coded[0].Field != "TxID" {
+		t.Errorf("the schema and the SDK disagree about the field: %+v", coded)
+	}
+}
+
 // TestSDK_OneOperationOneMethodName pins the naming rule across the spellings an
 // operationId actually takes in the fleet, so a package regenerated after an id
 // is respelled the same way twice is not a rename.
