@@ -102,13 +102,13 @@ Mint that merely delegated would register a typed money-mint op with NO GATE —
 its entire purpose, silently skipped. The shape is: embed the wrapped Router,
 override `OpScope`, and fold your middleware into `s.Middleware`.
 
-## One registry, five projections
+## One registry, eight projections
 
 `typed.go`. Every `zip.Get/Post[In,Out]` appends one `*registeredOp` to
 `app.ops` — appended in exactly ONE place (`registerTyped`), and that slice is
 the app's schema. Nothing else is authored; every interface below is derived
 from it, and `op.invoke` (decode → validate → authorize → run) is the ONE
-handler core all five share, so they cannot diverge in behavior.
+handler core they all share, so they cannot diverge in behavior.
 
 | projection | file | consumer | addressed by |
 |---|---|---|---|
@@ -117,16 +117,26 @@ handler core all five share, so they cannot diverge in behavior.
 | MCP tools | `mcp.go` | agents | tool name = `operationId` |
 | CLI commands | `cli.go`, `clispec.go` | operators, scripts | `operationId` → `<service> <operation>` |
 | op-call plane | `call.go` | **other services** | `operationId` |
+| GraphQL schema | `graphql.go` | one query over several ops | `operationId` |
+| ZAP IDL | `zapschema.go` | peers with no Go types — **and it can REFUSE** | method name |
+| Go SDK source | `sdk.go` | published clients that do not link the service | `operationId` |
 
-`opName(op)` is the one place the id rule lives; all five agree on the token.
+`opName(op)` is the one place the id rule lives; they all agree on the token.
 Since v1.17.8 `Command.OperationID` carries it too, and `WithOperationID`
 renames the command as well as the document, the tool and the call target —
 before that the CLI spelled its own name from the route and one op had two
-names. `App.OpenAPISpec()`, `App.MCPTools()` and `App.Commands()` read their
-projection directly, with no transport in the way.
+names. `App.OpenAPISpec()`, `App.MCPTools()`, `App.Commands()` and `App.SDK()` read
+their projection directly, with no transport in the way.
+
+The ZAP IDL is the one that is allowed to say NO. Every other projection can
+describe anything — JSON Schema has `{}`, GraphQL has a JSON scalar, the CLI has
+a string flag — and each of those is a way of writing down "I do not know what
+this is" and carrying on. A ZAP field IS an offset and a width, so a value the
+IDL cannot name is a value that cannot cross. `Schema.Gaps` and `SDK.Gaps` are
+therefore half the answer, not a footnote.
 
 An **untyped** `app.Get(path, func(c *zip.Ctx) error)` registers no op, so it
-appears in none of the five. That is the single biggest source of surface that
+appears in none of them. That is the single biggest source of surface that
 "exists" but cannot be documented, called by an agent, driven from a script, or
 reached by another service. Fleet-wide it is also the majority of the surface,
 which is what the typing migration is for: converting a route to
@@ -422,14 +432,34 @@ Errors cross whole: status, code and message travel as ZAP like everything else
 on this plane, so `errors.As(err, &he)` on the caller's side sees the
 `*HTTPError` the callee returned, status intact. A void op yields `(nil, nil)`.
 
-**Generic, not generated — deliberately.** A generated per-op Go client would
-put a second copy of the schema in the caller's repo on its own regeneration
-schedule: the drift this plane exists to remove, one directory over, plus a
-fourth client generator racing openapi-generator (which already produces the
-published SDKs from the OpenAPI projection). `Call[In,Out]` is type-safe at the
-call site against the types the callee declared, with nothing to regenerate. A
-caller wanting them checked at compile time imports the op's In/Out — a
-types-only package, none of the handler's dependencies.
+**Generic, not generated — inside the fleet.** For a caller that can import the
+op's In and Out, a generated per-op client would put a second copy of the schema
+in its repo on its own regeneration schedule: the drift this plane exists to
+remove, one directory over. `Call[In,Out]` is type-safe at the call site against
+the types the callee declared, with nothing to regenerate. A caller wanting them
+checked at compile time imports the op's In/Out — a types-only package, none of
+the handler's dependencies.
+
+**Generated — for a published SDK.** `App.SDK(pkg)` (`sdk.go`) exists for the
+callers that CANNOT do that: an SDK's users do not link the service, and linking
+it to reach three types drags in its whole dependency graph. So the types are
+restated and the methods rendered — three lines around `Call`, so it is a face
+over this plane and not a second one.
+
+It reads the REGISTRY, not the document, and that is the whole design decision.
+A Go type has three shapes on the JSON edge it does not have on this wire, and
+each of them silently moves a field:
+
+| | JSON edge | ZAP wire |
+|---|---|---|
+| field order | `properties` is an object, and an object has none | `LayoutOf` is declaration order |
+| `json:"-"` | absent | still a slot |
+| embedded struct | flattened | one nested slot |
+
+So the generated struct is the declared struct, field for field, in order, with
+only the type names changed: the layout is identical by construction rather than
+by a rule someone has to keep. A document-derived client would lay its fields
+alphabetically and read every value after the first from the wrong offset.
 
 ### The ONE socket-path scheme
 
