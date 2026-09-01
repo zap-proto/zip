@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"net/url"
+	"strings"
 
 	luxlog "github.com/luxfi/log"
 	"github.com/zap-proto/fiber/v3"
@@ -79,8 +81,32 @@ func (c *Ctx) Method() string { return c.fc.Method() }
 // Path returns the request path.
 func (c *Ctx) Path() string { return c.fc.Path() }
 
-// Param returns a URL path parameter.
-func (c *Ctx) Param(name string) string { return c.fc.Params(name) }
+// Param returns a URL path parameter, as the caller wrote it.
+func (c *Ctx) Param(name string) string { return segment(c.fc.Params(name)) }
+
+// segment decodes one path parameter.
+//
+// A URL carries a segment percent-encoded — it has to: a space, a slash, a
+// percent or anything outside the unreserved set has no other spelling between
+// two slashes. The router matches on the raw text and hands that same text on,
+// so without this a handler addressed at /v1/secrets/café is given "caf%C3%A9"
+// and looks up a name nobody has. Measured before this existed: every path
+// parameter carrying such a character arrived encoded, and no client could make
+// one round-trip.
+//
+// Text that is not valid encoding is passed through rather than refused. A lone
+// percent is a malformed URI, but the address it names is still the address the
+// router matched, and failing here would turn a lookup that finds nothing into
+// a 500.
+func segment(s string) string {
+	if !strings.Contains(s, "%") {
+		return s // the ordinary case: nothing encoded, nothing to do
+	}
+	if out, err := url.PathUnescape(s); err == nil {
+		return out
+	}
+	return s
+}
 
 // Query returns a URL query parameter.
 func (c *Ctx) Query(name string) string { return c.fc.Query(name) }

@@ -693,7 +693,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		if names := c.Route().Params; len(names) > 0 {
 			path = make(map[string]string, len(names))
 			for _, n := range names {
-				path[n] = c.Params(n)
+				path[n] = segment(c.Params(n))
 			}
 		}
 		// The query string is the OTHER half of the URL. Without it a typed GET
