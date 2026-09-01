@@ -485,3 +485,108 @@ func TestSDK_OneOperationOneMethodName(t *testing.T) {
 		}
 	}
 }
+
+// An id is a fixed array, which the layout states and reflection refuses. When
+// one sits on an EMBEDDED field the substitute this used to write —
+// "struct{} `json:\"...\"`" — is not Go: an embedded field must be a name. The
+// package did not parse, App.SDK returned an error, and the app got no client
+// at all. Found generating node's xvm service, where one op of ten has it.
+func TestSDK_AnEmbeddedUnnameableTypeIsAGapAndNotASyntaxError(t *testing.T) {
+	// Exported, because an embedded unexported type is on no wire at all: the
+	// renderer and the layout both walk exported fields only, and skip it
+	// together. node's is FormattedAssetID.
+	type AssetID struct {
+		ID [32]byte `json:"id"`
+	}
+	type asset struct {
+		AssetID `json:"assetID"`
+		Name    string `json:"name"`
+	}
+	app := zip.New(zip.Config{AppName: "x", DisableStartupMessage: true})
+	zip.Get(app, "/v1/asset", func(_ context.Context, in *asset) (*asset, error) { return in, nil },
+		zip.WithOperationID("x_asset"))
+	zip.Get(app, "/v1/height", func(_ context.Context, in *Height) (*Height, error) { return in, nil },
+		zip.WithOperationID("x_height"))
+
+	sdk, err := app.SDK("x")
+	if err != nil {
+		t.Fatalf("SDK: %v", err)
+	}
+	if strings.Contains(string(sdk.Source), "struct{} `json") {
+		t.Errorf("an embedded field was written as a type with no name:\n%s", sdk.Source)
+	}
+	if !strings.Contains(string(sdk.Source), "func (c *Client) XHeight") {
+		t.Error("the op that CAN cross lost its method to the one that cannot")
+	}
+	if strings.Contains(string(sdk.Source), "XAsset") {
+		t.Error("the op the wire refuses got a method")
+	}
+	if len(sdk.Gaps) == 0 {
+		t.Fatal("no gap reported for the refused op")
+	}
+}
+
+// A field whose own type cannot cross used to be replaced by an empty struct,
+// and the op kept its method: the call succeeded and the value was gone.
+// That is the "compiles and lies" outcome this projection exists to prevent,
+// and it reached real clients — node's admin, info and platformvm all had
+// []struct{} where a payload should be.
+func TestSDK_ANestedRefusalRefusesTheOp(t *testing.T) {
+	type inner struct {
+		ID [32]byte `json:"id"`
+	}
+	type outer struct {
+		Name  string  `json:"name"`
+		Items []inner `json:"items"`
+	}
+	app := zip.New(zip.Config{AppName: "n", DisableStartupMessage: true})
+	zip.Post(app, "/v1/outer", func(_ context.Context, in *outer) (*outer, error) { return in, nil },
+		zip.WithOperationID("n_outer"))
+
+	sdk, err := app.SDK("n")
+	if err != nil {
+		t.Fatalf("SDK: %v", err)
+	}
+	if sdk.Ops() != 0 {
+		t.Errorf("an op whose payload cannot cross got %d method(s):\n%s", sdk.Ops(), sdk.Source)
+	}
+	if strings.Contains(string(sdk.Source), "[]struct{}") {
+		t.Errorf("a field that cannot cross was written as an empty struct:\n%s", sdk.Source)
+	}
+	if len(sdk.Gaps) == 0 {
+		t.Fatal("no gap reported")
+	}
+}
+
+// Two ops sharing one refused type are two ops with no method, so they are two
+// gaps. The memo that remembers the refusal used to answer "no" and say
+// nothing, so the second op vanished from the package with nothing recorded and
+// the only way to notice was to count the methods. node's platformvm had
+// get_tx_rewards disappear exactly this way.
+func TestSDK_EveryOpRefusedIsAnOpReported(t *testing.T) {
+	type shared struct {
+		ID [32]byte `json:"id"`
+	}
+	app := zip.New(zip.Config{AppName: "s", DisableStartupMessage: true})
+	zip.Get(app, "/v1/one", func(_ context.Context, in *shared) (*shared, error) { return in, nil },
+		zip.WithOperationID("s_one"))
+	zip.Get(app, "/v1/two", func(_ context.Context, in *shared) (*shared, error) { return in, nil },
+		zip.WithOperationID("s_two"))
+
+	sdk, err := app.SDK("s")
+	if err != nil {
+		t.Fatalf("SDK: %v", err)
+	}
+	if sdk.Ops() != 0 {
+		t.Fatalf("got %d method(s), want none:\n%s", sdk.Ops(), sdk.Source)
+	}
+	named := map[string]bool{}
+	for _, g := range sdk.Gaps {
+		named[g.Op] = true
+	}
+	for _, op := range []string{"s_one", "s_two"} {
+		if !named[op] {
+			t.Errorf("%s has no method and no gap; gaps are %+v", op, sdk.Gaps)
+		}
+	}
+}
