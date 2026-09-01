@@ -253,3 +253,47 @@ func keysOf(m map[string]any) []string {
 	}
 	return out
 }
+
+// A path parameter is percent-encoded on the wire — it has to be: a space, a
+// slash or a percent has no other spelling between two slashes. The router
+// matches on the raw text, so until this was decoded a handler addressed at
+// /v1/t/things/acme/café was handed "caf%C3%A9" and looked up a name nobody
+// has. Every client encodes, so before this no client could make such a value
+// round-trip.
+func TestPathParamsArriveDecoded(t *testing.T) {
+	for _, c := range []struct{ sent, want string }{
+		{"plain", "plain"},
+		{"a%20b", "a b"},
+		{"a%2Fb", "a/b"},      // a slash inside one segment has only this spelling
+		{"caf%C3%A9", "café"}, // and non-ASCII has only this one
+		{"100%25", "100%"},
+		{"a+b", "a+b"}, // a plus is a plus in a path; only a query reads it as a space
+	} {
+		code, out := do(t, memberApp(t), "GET", "/v1/t/things/acme/"+c.sent, "")
+		if code != 200 {
+			t.Errorf("%q: status = %d, want 200", c.sent, code)
+			continue
+		}
+		if out.Name != c.want {
+			t.Errorf("%q arrived as %q, want %q", c.sent, out.Name, c.want)
+		}
+	}
+}
+
+// The untyped accessor reads the same value the typed binder does. Two
+// spellings of one parameter would be two answers to the same question.
+func TestParamReadsWhatTheBinderBinds(t *testing.T) {
+	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
+	a.Get("/v1/t/raw/:name", func(c *zip.Ctx) error { return c.String(200, c.Param("name")) })
+
+	req, _ := http.NewRequest("GET", "/v1/t/raw/caf%C3%A9", nil)
+	resp, err := a.Fiber().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "café" {
+		t.Errorf("Param = %q, want %q", body, "café")
+	}
+}
