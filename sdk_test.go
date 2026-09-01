@@ -281,17 +281,39 @@ func TestSDK_TheNameIsTheOpsName(t *testing.T) {
 // an unchanged file. A generator whose output depends on map order makes every
 // regeneration a diff, and a diff nobody can read is a diff nobody reviews.
 func TestSDK_IsDeterministic(t *testing.T) {
-	first, err := sdkApp().SDK("platform")
-	if err != nil {
-		t.Fatalf("SDK: %v", err)
+	// Two apps: one whose types cross by derivation, one that states its wire.
+	// The second walks maps the first does not — which types are coded, and
+	// which imports their codecs reach for — and Go randomises map order per
+	// run. A generator that wobbled would fail the regenerate-and-diff gate
+	// downstream on a change nobody made.
+	coded := func() *zip.App {
+		app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
+		zip.Post(app, "/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil },
+			zip.WithOperationID("get_tx"))
+		zip.Post(app, "/v1/ided", func(_ context.Context, in *Ided) (*Ided, error) { return in, nil },
+			zip.WithOperationID("get_ided"))
+		return app
 	}
-	for i := 0; i < 8; i++ {
-		again, err := sdkApp().SDK("platform")
+	for _, build := range []struct {
+		name string
+		app  func() *zip.App
+		pkg  string
+	}{
+		{"derived", sdkApp, "platform"},
+		{"stated", coded, "p"},
+	} {
+		first, err := build.app().SDK(build.pkg)
 		if err != nil {
-			t.Fatalf("SDK: %v", err)
+			t.Fatalf("%s: SDK: %v", build.name, err)
 		}
-		if string(again.Source) != string(first.Source) {
-			t.Fatalf("run %d differs from run 0", i+1)
+		for i := 0; i < 8; i++ {
+			again, err := build.app().SDK(build.pkg)
+			if err != nil {
+				t.Fatalf("%s: SDK: %v", build.name, err)
+			}
+			if string(again.Source) != string(first.Source) {
+				t.Fatalf("%s: run %d differs from run 0", build.name, i+1)
+			}
 		}
 	}
 }
@@ -434,7 +456,7 @@ func TestSDK_AWholeAppStillGeneratesAroundAGap(t *testing.T) {
 // fixable by generating harder: the declared type's MarshalZAP lives in the
 // service's package, and restating the field as [32]uint8 restates the bytes and
 // not the codec.
-func TestSDK_AnIdNeedsItsCodecFirst(t *testing.T) {
+func TestSDK_AnIdCrossesOnTheCodecTheSDKWrites(t *testing.T) {
 	type ID [32]byte
 	type Tx struct {
 		TxID   ID     `json:"txID"`
@@ -447,19 +469,31 @@ func TestSDK_AnIdNeedsItsCodecFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SDK: %v", err)
 	}
-	if sdk.Ops() != 0 {
-		t.Errorf("an op carrying an id got a method that cannot succeed:\n%s", sdk.Source)
+	if len(sdk.Gaps) != 0 {
+		t.Fatalf("an id is not a gap any more: %+v", sdk.Gaps)
 	}
-	if len(sdk.Gaps) != 1 || sdk.Gaps[0].Cause != "no codec" {
-		t.Fatalf("gaps do not name the missing codec: %+v", sdk.Gaps)
+	if sdk.Ops() != 1 {
+		t.Fatalf("the op carrying an id got %d methods:\n%s", sdk.Ops(), sdk.Source)
 	}
-	if !strings.Contains(sdk.Gaps[0].Go, "bytes_fixed[32]") {
-		t.Errorf("the gap does not say what the field is: %+v", sdk.Gaps[0])
+	src := string(sdk.Source)
+	// The offsets are the layout's, not a second derivation's: an id is 32
+	// bytes INLINE aligned to 1, so the u64 after it sits at 32 and not at 64.
+	for _, want := range []string{
+		"txTxIDAt   = 0",
+		"txHeightAt = 32",
+		"txSize     = 40",
+		"ob.SetBytesFixed(txTxIDAt, x.TxID[:])",
+		"copy(x.TxID[:], o.BytesFixed(txTxIDAt, 32))",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the emitted codec does not carry the id inline: want %q\n%s", want, src)
+		}
 	}
-	// The ZAP schema says the same thing about the same field, from the same
-	// layout — the two projections agree on what is out of reach.
+	// The ZAP schema still reports the field, and still should: [Schema.Coded]
+	// is what the REFLECTIVE encoder will not carry, which has not changed. It
+	// is the list of fields that need a codec, and now the SDK writes one.
 	if coded := zip.ZAPSchema("p", app).Coded; len(coded) != 1 || coded[0].Field != "TxID" {
-		t.Errorf("the schema and the SDK disagree about the field: %+v", coded)
+		t.Errorf("the schema stopped reporting the field reflection refuses: %+v", coded)
 	}
 }
 
@@ -495,8 +529,14 @@ func TestSDK_AnEmbeddedUnnameableTypeIsAGapAndNotASyntaxError(t *testing.T) {
 	// Exported, because an embedded unexported type is on no wire at all: the
 	// renderer and the layout both walk exported fields only, and skip it
 	// together. node's is FormattedAssetID.
+	//
+	// The refusal has to come from a value the wire genuinely cannot carry. An
+	// id is no longer one — a fixed array states its own wire now (see
+	// [TestSDK_AnIdCrossesOnTheCodecTheSDKWrites]) — so the field here is an
+	// interface, which names no type and so has nothing to declare. That is
+	// what node's two remaining gaps are.
 	type AssetID struct {
-		ID [32]byte `json:"id"`
+		ID any `json:"id"`
 	}
 	type asset struct {
 		AssetID `json:"assetID"`
@@ -533,7 +573,7 @@ func TestSDK_AnEmbeddedUnnameableTypeIsAGapAndNotASyntaxError(t *testing.T) {
 // []struct{} where a payload should be.
 func TestSDK_ANestedRefusalRefusesTheOp(t *testing.T) {
 	type inner struct {
-		ID [32]byte `json:"id"`
+		ID any `json:"id"`
 	}
 	type outer struct {
 		Name  string  `json:"name"`
@@ -565,7 +605,7 @@ func TestSDK_ANestedRefusalRefusesTheOp(t *testing.T) {
 // get_tx_rewards disappear exactly this way.
 func TestSDK_EveryOpRefusedIsAnOpReported(t *testing.T) {
 	type shared struct {
-		ID [32]byte `json:"id"`
+		ID any `json:"id"`
 	}
 	app := zip.New(zip.Config{AppName: "s", DisableStartupMessage: true})
 	zip.Get(app, "/v1/one", func(_ context.Context, in *shared) (*shared, error) { return in, nil },
