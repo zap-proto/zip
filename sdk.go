@@ -79,7 +79,12 @@ func (a *App) SDK(pkg string) (*SDK, error) {
 	if !validIdent(pkg) {
 		return nil, fmt.Errorf("zip: %q is not a Go package name", pkg)
 	}
-	g := &render{sdk: &SDK{Package: pkg}, named: map[reflect.Type]string{}, taken: map[string]bool{}}
+	g := &render{
+		sdk:   &SDK{Package: pkg},
+		named: map[reflect.Type]string{},
+		why:   map[reflect.Type]Gap{},
+		taken: map[string]bool{},
+	}
 
 	ops := append([]*registeredOp(nil), a.Registry()...)
 	sort.Slice(ops, func(i, j int) bool { return opName(ops[i]) < opName(ops[j]) })
@@ -116,7 +121,12 @@ type call struct {
 type render struct {
 	sdk   *SDK
 	named map[reflect.Type]string // type → the name declared for it, "" while claiming
-	taken map[string]bool         // every name claimed at package scope
+	// why is the refusal remembered for a type that has none. Without it the
+	// SECOND op reaching a refused type is dropped in silence: the memo below
+	// answers "no" and says nothing, so the op has no method and no gap, and
+	// the only way to notice is to count the methods.
+	why   map[reflect.Type]Gap
+	taken map[string]bool // every name claimed at package scope
 	calls []call
 	decls []string
 }
@@ -155,13 +165,17 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 		return "", true
 	}
 	if name, seen := g.named[t]; seen {
-		return name, name != ""
+		if name == "" {
+			// Refused before, by another op. Say so again, against this one.
+			had := g.why[t]
+			g.gap(op, had.Field, had.Go, had.Cause)
+			return "", false
+		}
+		return name, true
 	}
 	shape, err := zapenc.LayoutOf(t)
 	if err != nil {
-		g.named[t] = ""
-		g.gap(op, goName(t), t.String(), causeOf(err))
-		return "", false
+		return "", g.refuse(t, op, goName(t), t.String(), causeOf(err))
 	}
 	// A layout that is right is not the same as a value that crosses. A fixed
 	// array — every id in the fleet — has an offset and a width, so the schema
@@ -177,9 +191,7 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 	// whole answer. It is the same fact [Schema.Coded] reports.
 	for _, s := range shape.Slots {
 		if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
-			g.named[t] = ""
-			g.gap(op, goName(t)+"."+s.Name, s.Type, causeCodec)
-			return "", false
+			return "", g.refuse(t, op, goName(t)+"."+s.Name, s.Type, causeCodec)
 		}
 	}
 
@@ -213,10 +225,24 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 		if d := fields[t.Name()+"."+jsonFieldName(f)]; d != "" {
 			prose(&b, "", d)
 		}
-		goType := g.typeOf(f.Type, op, t.Name()+"."+f.Name, fields)
+		at := t.Name() + "." + f.Name
+		goType, ok := g.typeOf(f.Type, op, at, fields)
+		if !ok {
+			// A field that cannot cross refuses the type that holds it, which
+			// refuses the op. Substituting an empty struct here instead — which
+			// is what this did — emitted a client that compiles, calls, and
+			// arrives with the value gone. Reported once, at the field.
+			return "", g.refuse(t, op, at, f.Type.String(), causeNested)
+		}
 		if f.Anonymous {
 			// An embedded field IS its type's name, and the wire cares: it takes
-			// one nested slot, where the flattened form would take several.
+			// one nested slot, where the flattened form would take several. A
+			// spelling that is not a name — the empty struct an unnameable type
+			// renders as — is not Go there, so the type is refused rather than
+			// written out unparseable.
+			if !isIdent(goType) {
+				return "", g.refuse(t, op, at, f.Type.String(), causeEmbedded)
+			}
 			fmt.Fprintf(&b, "\t%s %s\n", goType, tagOf(f))
 			continue
 		}
@@ -230,36 +256,65 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 // typeOf spells one field's Go type in the generated package: the same type it
 // has here, with any struct it reaches renamed to the declaration this package
 // makes for it.
-func (g *render) typeOf(t reflect.Type, op, at string, fields map[string]string) string {
+func (g *render) typeOf(t reflect.Type, op, at string, fields map[string]string) (string, bool) {
 	switch t.Kind() {
 	case reflect.Pointer:
-		return "*" + g.typeOf(t.Elem(), op, at, fields)
+		elem, ok := g.typeOf(t.Elem(), op, at, fields)
+		return "*" + elem, ok
 	case reflect.Slice:
-		return "[]" + g.typeOf(t.Elem(), op, at, fields)
+		elem, ok := g.typeOf(t.Elem(), op, at, fields)
+		return "[]" + elem, ok
 	case reflect.Array:
-		return "[" + strconv.Itoa(t.Len()) + "]" + g.typeOf(t.Elem(), op, at, fields)
+		elem, ok := g.typeOf(t.Elem(), op, at, fields)
+		return "[" + strconv.Itoa(t.Len()) + "]" + elem, ok
 	case reflect.Map:
 		// A map has no layout: a key set is not a set of offsets. LayoutOf has
 		// already refused the struct that holds it, so this only renders where
 		// the map sits behind something the wire never reaches.
-		return "map[" + g.typeOf(t.Key(), op, at, fields) + "]" + g.typeOf(t.Elem(), op, at, fields)
+		key, kok := g.typeOf(t.Key(), op, at, fields)
+		elem, eok := g.typeOf(t.Elem(), op, at, fields)
+		return "map[" + key + "]" + elem, kok && eok
 	case reflect.Struct:
 		if t.NumField() == 0 {
-			return "struct{}"
+			return "struct{}", true
 		}
-		name, ok := g.declare(t, op, fields)
-		if !ok {
-			return "struct{}"
-		}
-		return name
+		return g.declare(t, op, fields)
 	case reflect.Interface:
+		// An interface field names no type, so there is nothing to declare and
+		// nothing that could cross. It refuses the type that holds it.
 		g.gap(op, at, t.String(), CauseAny)
-		return "any"
+		return "", false
 	}
 	// A basic kind keeps its own spelling — including a named one's underlying
 	// type, because the name belongs to the service's package and the width is
 	// what the wire reads.
-	return t.Kind().String()
+	return t.Kind().String(), true
+}
+
+// refuse records why a type has no wire form, remembers it for the next op to
+// reach the same type, and reports false so the caller can stop.
+func (g *render) refuse(t reflect.Type, op, field, goType, cause string) bool {
+	g.named[t] = ""
+	g.why[t] = Gap{Field: field, Go: goType, Cause: cause}
+	g.gap(op, field, goType, cause)
+	return false
+}
+
+// isIdent says whether a spelling can stand where Go wants a type name, which
+// is the only thing an embedded field may be.
+func isIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // claim reserves one package-scope name, so a type called Client or Dial cannot
@@ -461,6 +516,13 @@ func validIdent(s string) bool {
 const (
 	causeUnnamed = "no name"  // an op whose id spells no Go identifier
 	causeCodec   = "no codec" // a fixed array: the layout is right, reflection refuses it
+	// causeNested is a field whose own type has no wire form. The type holding
+	// it has none either: a struct is its fields, and one that cannot cross
+	// cannot be quietly left out of a value the caller thinks it sent.
+	causeNested = "nested"
+	// causeEmbedded is an embedded field whose type this package cannot name.
+	// Go requires a name there, so there is nothing to write that parses.
+	causeEmbedded = "embedded"
 )
 
 var goReserved = map[string]bool{
