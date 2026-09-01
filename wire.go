@@ -36,9 +36,11 @@ import (
 //
 // It also carries what the derivation cannot express. A fixed-size array is
 // refused outright by the reflective encoder, so an ids.ID — [32]byte, the
-// bytes_fixed[32] of a .zap schema — cannot cross the plane at all today. A type
-// implementing Wire writes it inline (zap.ObjectBuilder.SetBytesFixed) and reads
-// it back as a slice of the buffer that arrived (zap.Object.BytesFixed).
+// bytes_fixed[32] of a .zap schema — crosses the plane on a codec or not at all.
+// A type implementing Wire writes it inline (zap.ObjectBuilder.SetBytesFixed) and
+// reads it back as a slice of the buffer that arrived (zap.Object.BytesFixed).
+// [Codecs] writes that pair for a service's own types, and [App.SDK] writes it
+// for the restatement a generated client holds.
 //
 // The compatibility rule does not change: the layout is still the type, so
 // reordering, inserting or retyping a field changes the wire for every peer.

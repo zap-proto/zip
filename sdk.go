@@ -39,6 +39,7 @@ package zip
 // and [ZAPSchema] keeps the one only it can do, which is refusing.
 
 import (
+	"bytes"
 	"fmt"
 	"go/format"
 	"reflect"
@@ -84,12 +85,18 @@ func (a *App) SDK(pkg string) (*SDK, error) {
 		named: map[reflect.Type]string{},
 		why:   map[reflect.Type]Gap{},
 		taken: map[string]bool{},
+		fld:   map[reflect.Type]map[string]string{},
+		wire:  map[reflect.Type]string{},
+		std:   map[string]bool{},
 	}
 
 	ops := append([]*registeredOp(nil), a.Registry()...)
 	sort.Slice(ops, func(i, j int) bool { return opName(ops[i]) < opName(ops[j]) })
 	for _, op := range ops {
 		g.method(op)
+	}
+	if err := g.codecs(); err != nil {
+		return nil, err
 	}
 
 	src, err := format.Source(g.render(a))
@@ -129,6 +136,18 @@ type render struct {
 	taken map[string]bool // every name claimed at package scope
 	calls []call
 	decls []string
+	// order is the types declared, in the order decls holds them, so a codec
+	// can be written beside the struct it states rather than in a second half
+	// of the file nobody reads next to the fields.
+	order []reflect.Type
+	// fld is what this package calls each declared type's fields. They are the
+	// declared names, with one exception that matters: an embedded field IS its
+	// type's name, and this package renamed the type.
+	fld map[reflect.Type]map[string]string
+	// wire is the codec emitted for a type that states its own bytes, and std
+	// the standard-library imports those codecs need.
+	wire map[reflect.Type]string
+	std  map[string]bool
 }
 
 // method resolves one operation. An op whose In or Out cannot cross this wire
@@ -177,24 +196,19 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 	if err != nil {
 		return "", g.refuse(t, op, goName(t), t.String(), causeOf(err))
 	}
-	// A layout that is right is not the same as a value that crosses. A fixed
-	// array — every id in the fleet — has an offset and a width, so the schema
-	// states it correctly, and the REFLECTIVE encoder still refuses it: the type
-	// is expected to declare its own wire instead (see [Wire]). That refusal
-	// arrives at run time, on a call the client was happy to make, which is the
-	// shape of failure this whole projection exists to remove.
+	// A fixed array — every id in the fleet — is where this used to stop. The
+	// REFLECTIVE encoder refuses bytes_fixed[N] outright, deliberately, so that
+	// an id forces its type to state its own wire (see [Wire]); and the SDK read
+	// that refusal as a fact about the op and reported a gap.
 	//
-	// It is also not something a generated struct can fix by trying harder: the
-	// declared type's MarshalZAP belongs to the service's package, and restating
-	// the field as [32]uint8 here restates the bytes and not the codec. So the
-	// op is out of reach until the type declares its wire, and saying so is the
-	// whole answer. It is the same fact [Schema.Coded] reports.
-	for _, s := range shape.Slots {
-		if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
-			return "", g.refuse(t, op, goName(t)+"."+s.Name, s.Type, causeCodec)
-		}
-	}
-
+	// It is a fact about the ENCODER, not about the op. The layout is right — an
+	// offset and a width — and [Codecs] already writes the two methods that
+	// carry it, inline, from those same offsets. The struct written just below
+	// restates the declared type field for field and in order, so its layout is
+	// the declared type's layout; a codec stating those offsets against these
+	// names is the same wire, spelled in this package. So the SDK writes one
+	// (see [render.codecs]) instead of refusing, and an id crosses.
+	//
 	// The name is claimed BEFORE the fields are walked. That claim is the cycle
 	// guard, and it is why a type that reaches itself through a pointer or a
 	// slice declares once instead of recursing — the same rule the document's
@@ -215,6 +229,10 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 		prose(&b, name, d)
 	}
 	fmt.Fprintf(&b, "type %s struct {\n", name)
+	// wrote is the declared name of each field this package restates, in the
+	// order it restates them, and spelled is what it calls each one.
+	var wrote []string
+	spelled := map[string]string{}
 	// Declaration order, exported fields only — exactly what buildLayout walks.
 	// Anything else here is a different layout wearing the same name.
 	for i := 0; i < t.NumField(); i++ {
@@ -244,51 +262,223 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 				return "", g.refuse(t, op, at, f.Type.String(), causeEmbedded)
 			}
 			fmt.Fprintf(&b, "\t%s %s\n", goType, tagOf(f))
+			// The field's name here is the TYPE's name, which this package just
+			// renamed — so a codec reaching it must reach it by the new one.
+			wrote, spelled[f.Name] = append(wrote, f.Name), goType
 			continue
 		}
 		fmt.Fprintf(&b, "\t%s %s %s\n", f.Name, goType, tagOf(f))
+		wrote, spelled[f.Name] = append(wrote, f.Name), f.Name
 	}
 	b.WriteString("}\n")
+
+	// The struct just written and the layout just read have to be the same
+	// sequence of fields, because the codec states the layout's OFFSETS against
+	// these NAMES. It holds by construction — both walk the exported fields in
+	// declaration order — and is checked anyway, because the failure it would
+	// catch is every field after the first one that moved being read from the
+	// wrong place, with nothing failing. A guessed layout is worse than a gap.
+	if len(wrote) != len(shape.Slots) {
+		return "", g.refuse(t, op, goName(t), t.String(), causeCodec)
+	}
+	for i, s := range shape.Slots {
+		if wrote[i] != s.Name {
+			return "", g.refuse(t, op, goName(t)+"."+s.Name, s.Type, causeCodec)
+		}
+	}
+	g.fld[t] = spelled
 	g.decls = append(g.decls, b.String())
+	g.order = append(g.order, t)
 	return name, true
 }
 
-// typeOf spells one field's Go type in the generated package: the same type it
-// has here, with any struct it reaches renamed to the declaration this package
-// makes for it.
+// typeOf RESOLVES one field's type: it declares every struct the field reaches
+// and reports whether the field can cross at all. What the type is CALLED here
+// is [render.spell]'s answer, so the struct declarations and the codecs beside
+// them cannot spell the same type two ways.
 func (g *render) typeOf(t reflect.Type, op, at string, fields map[string]string) (string, bool) {
 	switch t.Kind() {
-	case reflect.Pointer:
-		elem, ok := g.typeOf(t.Elem(), op, at, fields)
-		return "*" + elem, ok
-	case reflect.Slice:
-		elem, ok := g.typeOf(t.Elem(), op, at, fields)
-		return "[]" + elem, ok
-	case reflect.Array:
-		elem, ok := g.typeOf(t.Elem(), op, at, fields)
-		return "[" + strconv.Itoa(t.Len()) + "]" + elem, ok
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		if _, ok := g.typeOf(t.Elem(), op, at, fields); !ok {
+			return "", false
+		}
 	case reflect.Map:
 		// A map has no layout: a key set is not a set of offsets. LayoutOf has
-		// already refused the struct that holds it, so this only renders where
+		// already refused the struct that holds it, so this only resolves where
 		// the map sits behind something the wire never reaches.
-		key, kok := g.typeOf(t.Key(), op, at, fields)
-		elem, eok := g.typeOf(t.Elem(), op, at, fields)
-		return "map[" + key + "]" + elem, kok && eok
-	case reflect.Struct:
-		if t.NumField() == 0 {
-			return "struct{}", true
+		_, kok := g.typeOf(t.Key(), op, at, fields)
+		_, eok := g.typeOf(t.Elem(), op, at, fields)
+		if !kok || !eok {
+			return "", false
 		}
-		return g.declare(t, op, fields)
+	case reflect.Struct:
+		if t.NumField() > 0 {
+			if _, ok := g.declare(t, op, fields); !ok {
+				return "", false
+			}
+		}
 	case reflect.Interface:
 		// An interface field names no type, so there is nothing to declare and
 		// nothing that could cross. It refuses the type that holds it.
 		g.gap(op, at, t.String(), CauseAny)
 		return "", false
 	}
+	return g.spell(t), true
+}
+
+// spell is one type as Go source in this package: the shape it has in the
+// service, with every struct it reaches renamed to the declaration made here.
+//
+// It answers for the struct fields and for the codecs — which is why it is a
+// function and not a line inside [render.typeOf]. A codec that spelled a type
+// its own way would compile and read the field back as something else.
+func (g *render) spell(t reflect.Type) string {
+	switch t.Kind() {
+	case reflect.Pointer:
+		return "*" + g.spell(t.Elem())
+	case reflect.Slice:
+		return "[]" + g.spell(t.Elem())
+	case reflect.Array:
+		return "[" + strconv.Itoa(t.Len()) + "]" + g.spell(t.Elem())
+	case reflect.Map:
+		return "map[" + g.spell(t.Key()) + "]" + g.spell(t.Elem())
+	case reflect.Struct:
+		if t.NumField() == 0 {
+			return "struct{}"
+		}
+		return g.named[t]
+	}
 	// A basic kind keeps its own spelling — including a named one's underlying
 	// type, because the name belongs to the service's package and the width is
 	// what the wire reads.
-	return t.Kind().String(), true
+	return t.Kind().String()
+}
+
+// name and field are the other two halves of [naming]: what this package calls
+// a declared type, and what it calls one of its fields. Together with spell they
+// are how [Codecs]' emitter writes a codec into a package that did not declare
+// the types it states.
+func (g *render) name(t reflect.Type) string { return g.named[t] }
+
+func (g *render) field(t reflect.Type, declared string) string {
+	if f, ok := g.fld[t][declared]; ok {
+		return f
+	}
+	return declared
+}
+
+// codecs writes the wire for every declared type that has to state its own.
+//
+// A fixed array is the reason any of them do: the reflective encoder refuses
+// bytes_fixed[N], so a value holding one crosses only when its type answers for
+// its own bytes. The set is not just those types. It is closed UPWARD, because a
+// parent encoded reflectively reflects over its children too — a nested codec is
+// reached by the parent's METHOD and never by the reflective walk — and closed
+// DOWNWARD, because a codec calls MarshalZAP on every value it nests.
+//
+// So one id anywhere under an op's In or Out states the wire for that whole
+// tree, and a tree with no id in it keeps the derived wire it already had. That
+// is the point of drawing the line here rather than at "every type": the ops
+// that already crossed are not re-encoded to fix the ones that could not.
+func (g *render) codecs() error {
+	kids, fixed := g.nesting()
+
+	// wants is "this type's tree holds a fixed array". LayoutOf refuses a type
+	// that contains itself, so the nesting is acyclic and the walk terminates.
+	memo := map[reflect.Type]bool{}
+	var wants func(reflect.Type) bool
+	wants = func(t reflect.Type) bool {
+		if v, ok := memo[t]; ok {
+			return v
+		}
+		v := fixed[t]
+		for _, k := range kids[t] {
+			if wants(k) {
+				v = true
+			}
+		}
+		memo[t] = v
+		return v
+	}
+
+	coded := map[reflect.Type]bool{}
+	var mark func(reflect.Type)
+	mark = func(t reflect.Type) {
+		if coded[t] {
+			return
+		}
+		coded[t] = true
+		for _, k := range kids[t] {
+			mark(k)
+		}
+	}
+	for _, t := range g.order {
+		if wants(t) {
+			mark(t)
+		}
+	}
+	for _, t := range g.order {
+		if !coded[t] {
+			continue
+		}
+		src, err := g.codec(t)
+		if err != nil {
+			return err
+		}
+		g.wire[t] = src
+	}
+	return nil
+}
+
+// nesting is, for each declared type, the declared types it holds — through a
+// pointer or a list — and whether its own layout has a fixed array in it.
+//
+// A value with no slots is not among the children: it crosses as a complete and
+// empty message that its parent writes INLINE, which is what [Codecs] does with
+// one, so there is no method to call and nothing to state.
+func (g *render) nesting() (map[reflect.Type][]reflect.Type, map[reflect.Type]bool) {
+	kids := map[reflect.Type][]reflect.Type{}
+	fixed := map[reflect.Type]bool{}
+	for _, t := range g.order {
+		shape, err := zapenc.LayoutOf(t)
+		if err != nil {
+			continue
+		}
+		for _, s := range shape.Slots {
+			if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
+				fixed[t] = true
+			}
+			f, ok := held(t, s.Name)
+			if !ok {
+				continue
+			}
+			if n := nests(f.Type); n != nil && !empty(n) && g.named[n] != "" {
+				kids[t] = append(kids[t], n)
+			}
+		}
+	}
+	return kids, fixed
+}
+
+// codec is one type's two methods, written by the same emitter [Codecs] uses —
+// the same offsets, in the same order, through the same builder calls — with
+// this package's names in place of the service's. Two emitters would be two
+// wires, and the second one would be spoken by nobody.
+func (g *render) codec(t reflect.Type) (string, error) {
+	p := &pkg{
+		alias: map[string]string{},
+		taken: map[string]bool{},
+		plain: map[string]bool{},
+		as:    g,
+	}
+	var b bytes.Buffer
+	if err := declare(&b, t, p); err != nil {
+		return "", err
+	}
+	for q := range p.alias {
+		g.std[q] = true
+	}
+	return b.String(), nil
 }
 
 // refuse records why a type has no wire form, remembers it for the next op to
@@ -348,11 +538,37 @@ func (g *render) render(a *App) []byte {
 	b.WriteString("// Code generated from the typed-op registry by zip. DO NOT EDIT.\n\n")
 	fmt.Fprintf(&b, "// Package %s calls %s's operations over ZAP.\n", g.sdk.Package, name)
 	fmt.Fprintf(&b, "package %s\n\n", g.sdk.Package)
-	b.WriteString("import (\n\t\"context\"\n\n\t\"github.com/zap-proto/zip\"\n)\n\n")
+	// The import block is what the file uses and nothing else. A package with
+	// no codec in it imports zip and context — restating the types is why it
+	// needs no more — and one that states a wire also takes the builder that
+	// writes it, plus whatever the reads reach for.
+	std := []string{"context"}
+	if len(g.wire) > 0 {
+		std = append(std, "fmt")
+	}
+	for q := range g.std {
+		std = append(std, q)
+	}
+	sort.Strings(std)
+	b.WriteString("import (\n")
+	for _, q := range std {
+		fmt.Fprintf(&b, "\t%q\n", q)
+	}
+	b.WriteString("\n")
+	if len(g.wire) > 0 {
+		b.WriteString("\tzap \"github.com/zap-proto/go\"\n")
+	}
+	b.WriteString("\t\"github.com/zap-proto/zip\"\n)\n\n")
 
-	for _, d := range g.decls {
+	// A type's codec is written beside the struct it states, not in a second
+	// half of the file: the offsets and the fields they belong to are one thing
+	// to read.
+	for i, d := range g.decls {
 		b.WriteString(d)
 		b.WriteString("\n")
+		if w := g.wire[g.order[i]]; w != "" {
+			b.WriteString(w)
+		}
 	}
 	b.WriteString(clientPreamble)
 
@@ -514,8 +730,13 @@ func validIdent(s string) bool {
 // causeUnnamed and causeCodec join the [Gap] vocabulary. One string per reason,
 // so counting them ranks what to fix.
 const (
-	causeUnnamed = "no name"  // an op whose id spells no Go identifier
-	causeCodec   = "no codec" // a fixed array: the layout is right, reflection refuses it
+	causeUnnamed = "no name" // an op whose id spells no Go identifier
+	// causeCodec is a type whose restatement here does not have the layout the
+	// declared type has — a different field count, or a field in a different
+	// place. The codec states the DECLARED offsets, so a restatement that moved
+	// would read every field after the move from the wrong place and fail
+	// nothing. A gap is the honest answer; a guessed layout is not.
+	causeCodec = "no codec"
 	// causeNested is a field whose own type has no wire form. The type holding
 	// it has none either: a struct is its fields, and one that cannot cross
 	// cannot be quietly left out of a value the caller thinks it sent.

@@ -19,7 +19,12 @@ package zip
 // width, so the layout knows its shape and a schema states it correctly, and the
 // reflective encoder refuses it outright — deliberately, because an id is
 // exactly the case that should force a type to declare its own wire. An ids.ID
-// is [32]byte, so today a reply carrying one cannot cross the plane at all.
+// is [32]byte, so a reply carrying one crosses on a codec or not at all.
+//
+// The Go SDK writes its own with this emitter rather than a second one, through
+// the [naming] seam: it restates the fleet's types under its own names, so the
+// offsets come from the declared type and the identifiers come from it. See
+// [App.SDK].
 //
 // # The wire does not move
 //
@@ -220,6 +225,41 @@ type pkg struct {
 	alias map[string]string
 	taken map[string]bool
 	plain map[string]bool // imports whose alias is their own name
+	// as is how a file that did NOT declare these types spells them. The Go SDK
+	// restates the fleet's types under its own names and emits their codec
+	// beside them, so the offsets come from the declared type and every
+	// identifier comes from here. nil is the ordinary case — a generator
+	// writing into the package that declared the types, where every name is the
+	// name the type already has.
+	as naming
+}
+
+// naming is what one emitted file calls the types it writes: a declaration's
+// name, a field's name inside it, and the type as Go source. Three questions
+// rather than one, because a rename does not reach them all the same way — an
+// embedded field IS its type's name, and a field of a renamed type is not.
+type naming interface {
+	name(reflect.Type) string
+	field(reflect.Type, string) string
+	spell(reflect.Type) string
+}
+
+// name is what the emitted file calls t.
+func (p *pkg) name(t reflect.Type) string {
+	if p.as != nil {
+		return p.as.name(t)
+	}
+	return t.Name()
+}
+
+// field is what the emitted file calls t's field. It differs from the declared
+// name only for an embedded field, which is spelled as its type — so a file
+// that renamed the type renamed the field with it.
+func (p *pkg) field(t reflect.Type, name string) string {
+	if p.as != nil {
+		return p.as.field(t, name)
+	}
+	return name
 }
 
 func (p *pkg) of(path, name string) string {
@@ -246,6 +286,11 @@ func (p *pkg) std(path string) { p.of(path, path[strings.LastIndex(path, "/")+1:
 
 // spell renders t as Go source inside this file, taking the import it needs.
 func (p *pkg) spell(t reflect.Type) string {
+	if p.as != nil {
+		// A file that restated these types spells them itself, and takes no
+		// import to do it: the restatement is why it has none to take.
+		return p.as.spell(t)
+	}
 	if t.Name() != "" {
 		if a := p.of(t.PkgPath(), strings.SplitN(t.String(), ".", 2)[0]); a != "" {
 			return a + "." + t.Name()
@@ -346,13 +391,13 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 	if err != nil {
 		return fmt.Errorf("zip: %s: %w", goname(t), err)
 	}
-	name := t.Name()
+	name := p.name(t)
 	lo := lower(name)
 
 	fmt.Fprintf(w, "// ---- %s %s\n\n", name, strings.Repeat("-", max(1, 66-len(name))))
 	fmt.Fprint(w, "const (\n")
 	for _, s := range shape.Slots {
-		fmt.Fprintf(w, "\t%s%sAt = %d\n", lo, s.Name, s.Offset)
+		fmt.Fprintf(w, "\t%s%sAt = %d\n", lo, p.field(t, s.Name), s.Offset)
 	}
 	fmt.Fprintf(w, "\t%sSize = %d\n)\n\n", lo, shape.Size)
 	fmt.Fprintf(w, stated, name)
@@ -370,7 +415,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 			continue
 		}
 		if kindOf(s, f.Type) == aList {
-			if err := writeList(w, t, s, f, p); err != nil {
+			if err := writeList(w, p.field(t, s.Name), s, f, p); err != nil {
 				return err
 			}
 		}
@@ -384,7 +429,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		if kindOf(s, f.Type) == aList {
 			continue
 		}
-		if err := writeField(w, lo, s, f, p); err != nil {
+		if err := writeField(w, lo, p.field(t, s.Name), s, f, p); err != nil {
 			return err
 		}
 	}
@@ -393,8 +438,9 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		if !ok || kindOf(s, f.Type) != aList {
 			continue
 		}
-		v := lower(s.Name)
-		fmt.Fprintf(w, "\tif %sN > 0 {\n\t\tob.SetList(%s%sAt, %sAt, %sN)\n\t}\n", v, lo, s.Name, v, v)
+		fn := p.field(t, s.Name)
+		v := lower(fn)
+		fmt.Fprintf(w, "\tif %sN > 0 {\n\t\tob.SetList(%s%sAt, %sAt, %sN)\n\t}\n", v, lo, fn, v, v)
 	}
 	fmt.Fprint(w, "\tob.FinishAsRoot()\n\treturn b.Finish(), nil\n}\n\n")
 
@@ -413,7 +459,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		if !ok {
 			continue
 		}
-		if err := readField(&reads, lo, s, f, p); err != nil {
+		if err := readField(&reads, lo, p.field(t, s.Name), s, f, p); err != nil {
 			return err
 		}
 	}
@@ -470,14 +516,16 @@ var setter = map[string][3]string{
 	"bytes": {"SetBytes", "Bytes", "[]byte"},
 }
 
-func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg) error {
-	at := lo + s.Name + "At"
-	ref, tab, end := "x."+s.Name, "\t", ""
+// writeField emits one field's write. fn is what the file being written calls
+// the field, which is the declared name unless that file restated the type.
+func writeField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p *pkg) error {
+	at := lo + fn + "At"
+	ref, tab, end := "x."+fn, "\t", ""
 	if s.Ptr {
 		// An absent pointer writes nothing: a null, not a zero, and the slot is
 		// already zeroed.
-		fmt.Fprintf(w, "\tif x.%s != nil {\n", s.Name)
-		ref, tab, end = "(*x."+s.Name+")", "\t\t", "\t}\n"
+		fmt.Fprintf(w, "\tif x.%s != nil {\n", fn)
+		ref, tab, end = "(*x."+fn+")", "\t\t", "\t}\n"
 	}
 	switch kindOf(s, f.Type) {
 	case aFixed:
@@ -491,8 +539,8 @@ func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pk
 		// x.F reaches the pointer method on its own: a field of a pointer
 		// receiver is addressable, and a pointer field already is one.
 		fmt.Fprintf(w, "%sinner%s, err := x.%s.MarshalZAP()\n%sif err != nil {\n%s\treturn nil, err\n%s}\n",
-			tab, s.Name, s.Name, tab, tab, tab)
-		fmt.Fprintf(w, "%sob.SetBytes(%s, inner%s)\n", tab, at, s.Name)
+			tab, fn, fn, tab, tab, tab)
+		fmt.Fprintf(w, "%sob.SetBytes(%s, inner%s)\n", tab, at, fn)
 	default:
 		c, ok := setter[s.Type]
 		if !ok {
@@ -504,8 +552,8 @@ func writeField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pk
 	return nil
 }
 
-func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg) error {
-	at := lo + s.Name + "At"
+func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p *pkg) error {
+	at := lo + fn + "At"
 	ft := f.Type
 	if s.Ptr {
 		ft = under(ft)
@@ -513,7 +561,7 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 	switch kindOf(s, f.Type) {
 	case aFixed:
 		if !s.Ptr {
-			fmt.Fprintf(w, "\tcopy(x.%s[:], o.BytesFixed(%s, %d))\n", s.Name, at, s.N)
+			fmt.Fprintf(w, "\tcopy(x.%s[:], o.BytesFixed(%s, %d))\n", fn, at, s.N)
 			return nil
 		}
 		// A POINTER to a fixed array. Reading straight into x.F[:] dereferences
@@ -527,7 +575,7 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 		name := p.spell(ft)
 		fmt.Fprintf(w, "\tif raw := o.BytesFixed(%s, %d); len(raw) > 0 {\n", at, s.N)
 		fmt.Fprintf(w, "\t\tvar v %s\n\t\tcopy(v[:], raw)\n", name)
-		fmt.Fprintf(w, "\t\tif v != (%s{}) {\n\t\t\tx.%s = &v\n\t\t}\n\t}\n", name, s.Name)
+		fmt.Fprintf(w, "\t\tif v != (%s{}) {\n\t\t\tx.%s = &v\n\t\t}\n\t}\n", name, fn)
 		return nil
 	case aNest:
 		if empty(under(f.Type)) {
@@ -535,14 +583,14 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 		}
 		fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n", at)
 		if s.Ptr {
-			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", p.spell(ft), s.Name)
+			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", p.spell(ft), fn)
 		} else {
-			fmt.Fprintf(w, "\t\tif err := x.%s.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n", s.Name)
+			fmt.Fprintf(w, "\t\tif err := x.%s.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n", fn)
 		}
 		fmt.Fprint(w, "\t}\n")
 		return nil
 	case aList:
-		return readList(w, at, s, f, p)
+		return readList(w, at, fn, s, f, p)
 	}
 	c, ok := setter[s.Type]
 	if !ok {
@@ -557,7 +605,7 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 		// whether to allocate.
 		if s.Ptr {
 			fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n\t\tv := %s(append([]byte(nil), raw...))\n\t\tx.%s = &v\n\t}\n",
-				at, spell, s.Name)
+				at, spell, fn)
 			return nil
 		}
 		read = fmt.Sprintf("%s(append([]byte(nil), o.Bytes(%s)...))", spell, at)
@@ -569,10 +617,10 @@ func readField(w *bytes.Buffer, lo string, s Slot, f reflect.StructField, p *pkg
 		p.std("strings")
 	}
 	if s.Ptr {
-		fmt.Fprintf(w, "\tif v := %s; %s {\n\t\tx.%s = &v\n\t}\n", read, present(s, spell), s.Name)
+		fmt.Fprintf(w, "\tif v := %s; %s {\n\t\tx.%s = &v\n\t}\n", read, present(s, spell), fn)
 		return nil
 	}
-	fmt.Fprintf(w, "\tx.%s = %s\n", s.Name, read)
+	fmt.Fprintf(w, "\tx.%s = %s\n", fn, read)
 	return nil
 }
 
@@ -589,11 +637,11 @@ func present(s Slot, spell string) string {
 	return "v != " + spell + "(0)"
 }
 
-func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p *pkg) error {
-	v := lower(s.Name)
-	ref := "x." + s.Name
+func writeList(w *bytes.Buffer, fn string, s Slot, f reflect.StructField, p *pkg) error {
+	v := lower(fn)
+	ref := "x." + fn
 	if s.Ptr {
-		ref = "(*x." + s.Name + ")"
+		ref = "(*x." + fn + ")"
 	}
 	et := under(f.Type).Elem()
 	ptr := et.Kind() == reflect.Pointer
@@ -638,7 +686,7 @@ func writeList(w *bytes.Buffer, t reflect.Type, s Slot, f reflect.StructField, p
 	w = outer
 	if s.Ptr {
 		// An absent pointer writes nothing, and its length cannot be asked for.
-		fmt.Fprintf(w, "\t%sAt, %sN := 0, 0\n\tif x.%s != nil {\n\t\t%sN = len(%s)\n\t}\n", v, v, s.Name, v, ref)
+		fmt.Fprintf(w, "\t%sAt, %sN := 0, 0\n\tif x.%s != nil {\n\t\t%sN = len(%s)\n\t}\n", v, v, fn, v, ref)
 	} else {
 		fmt.Fprintf(w, "\t%sAt, %sN := 0, len(%s)\n", v, v, ref)
 	}
@@ -670,7 +718,7 @@ func element(s Slot, ref string) string {
 	return fmt.Sprintf("uint64(%s[i])", ref)
 }
 
-func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg) error {
+func readList(w *bytes.Buffer, at, fn string, s Slot, f reflect.StructField, p *pkg) error {
 	ft := under(f.Type)
 	et := ft.Elem()
 	ptr := et.Kind() == reflect.Pointer
@@ -708,9 +756,9 @@ func readList(w *bytes.Buffer, at string, s Slot, f reflect.StructField, p *pkg)
 	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n", at)
 	fmt.Fprintf(w, "\t\trows := make(%s, l.Len())\n\t\tfor %s range rows {\n", p.spell(ft), index(&elem))
 	w.Write(elem.Bytes())
-	assign := "x." + s.Name + " = rows"
+	assign := "x." + fn + " = rows"
 	if s.Ptr {
-		assign = "x." + s.Name + " = &rows"
+		assign = "x." + fn + " = &rows"
 	}
 	fmt.Fprintf(w, "\t\t}\n\t\t%s\n\t}\n", assign)
 	return nil

@@ -461,6 +461,52 @@ only the type names changed: the layout is identical by construction rather than
 by a rule someone has to keep. A document-derived client would lay its fields
 alphabetically and read every value after the first from the wrong offset.
 
+### The SDK writes the codec too (v1.36.41)
+
+The restatement being layout-identical is what lets the SDK do the one thing it
+used to refuse. `bytes_fixed[N]` — an `ids.ID` is `[32]byte` — has an offset and
+a width, and the REFLECTIVE encoder still refuses it (see `codec.go` below, and
+that refusal stays). The SDK read the refusal as a fact about the op and reported
+a gap, so half of node's contract had no Go client: **43 of 94 ops**, while the
+Rust and C++ legs carried all 94.
+
+It is a fact about the encoder, not the op. `Codecs` already writes the two
+methods that carry an id inline, from those same offsets. So the SDK writes one:
+same emitter, same `LayoutOf` shape, same builder calls, with this package's
+names substituted through a `naming` seam (`name` / `field` / `spell`) that
+`codec.go`'s emitter now asks instead of reading `t.Name()`. **One emitter. Two
+emitters would be two wires, and the second would be spoken by nobody.**
+
+Which types get one is not "all of them". `Wire` is checked at the ROOT of
+Marshal and Unmarshal only, so the set has to be closed BOTH ways:
+
+- **upward**, because a parent encoded reflectively reflects over its children —
+  a nested codec is reached by the parent's method and never by the walk;
+- **downward**, because a codec calls `MarshalZAP` on every value it nests.
+
+So one id anywhere under an op's In or Out states the wire for that whole tree,
+and a tree with no id in it keeps the derived wire it already had. That is the
+line: the ops that already crossed are not re-encoded to fix the ones that could
+not, and their generated source does not move.
+
+**Two guards, because a wrong offset is worse than a gap.** The restatement is
+checked against the layout it claims — same field count, same names, same order —
+and a mismatch is a gap (`no codec`), never a guessed layout. And `spell`
+preserves `reflect.Kind` for every kind that has a layout, which is what makes
+the widths identical: `int` stays `int`, a named `uint32` becomes `uint32`, a
+`[32]byte` becomes `[32]uint8`. Kind determines width, so the layouts cannot
+diverge.
+
+Measured over node's nine apps: **43 of 94 ops → 91 of 94**, and the three left
+are `any`-rooted (`admin.get_config`, `xsvm.get_block`, `xsvm.get_block_last`) —
+an interface names no type, so there is nothing to declare. `get_block` was one
+of them all along; its In refused first, so nobody could see it. Every op is
+still a method XOR a gap. The document, the tool list, the command tree and both
+HTTP clients are byte-identical across the change — 9/9 `openapi.json`, 9/9
+`mcp.json`, 9/9 `commands.json`, 18/18 Rust files, 18/18 C++ files — and the
+three apps that had no gaps have byte-identical Go SDKs too. Only the six legs
+that were wrong moved.
+
 ### The ONE socket-path scheme
 
 ```
