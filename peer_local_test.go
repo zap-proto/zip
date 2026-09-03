@@ -8,8 +8,8 @@ import (
 	"github.com/zap-proto/zip"
 )
 
-type whoIn struct{}
-type whoOut struct {
+type localIn struct{}
+type localOut struct {
 	Local bool `json:"local"`
 	Peer  bool `json:"peer"`
 }
@@ -20,14 +20,14 @@ func TestLocalSeparatesHereFromTheSocket(t *testing.T) {
 	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 	app := zip.New(zip.Config{AppName: "who"})
-	zip.Post[whoIn, whoOut](app, "/who", func(ctx context.Context, _ *whoIn) (*whoOut, error) {
-		return &whoOut{Local: zip.Local(ctx), Peer: zip.PeerOf(ctx) != nil}, nil
+	zip.Post[localIn, localOut](app, "/who", func(ctx context.Context, _ *localIn) (*localOut, error) {
+		return &localOut{Local: zip.Local(ctx), Peer: zip.PeerOf(ctx) != nil}, nil
 	}, zip.WithOperationID("who"))
 	sock := zip.SocketPath("who")
 	go func() { _ = app.Listen(sock) }()
 	waitFor(t, sock)
 
-	here, err := zip.Here[whoIn, whoOut](context.Background(), app, "who", &whoIn{})
+	here, err := zip.Here[localIn, localOut](context.Background(), app, "who", &localIn{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestLocalSeparatesHereFromTheSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	over, err := zip.Call[whoIn, whoOut](context.Background(), conn, "who", &whoIn{})
+	over, err := zip.Call[localIn, localOut](context.Background(), conn, "who", &localIn{})
 	if err != nil {
 		t.Fatal(err)
 	}
