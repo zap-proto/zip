@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,6 +124,14 @@ type Config struct {
 	// `~/work/hanzo/hips/docs/SCALE_STANDARD.md`. With Hanzo's verified
 	// 8 KiB/conn budget, 100_000 sits at ~800 MiB inside a 1 GiB pod.
 	Concurrency int
+
+	// SocketMode is the file mode a unix socket is bound with. Zero is 0600:
+	// only the user running the app may connect, and the socket is the
+	// boundary. A server that instead attests every peer from what the
+	// kernel says about it — [PeerOf], [Peer.PodUID] — may open the mode,
+	// because the attestation is then the boundary and the mode is only the
+	// door.
+	SocketMode os.FileMode
 
 	// ReadBufferSize is fasthttp's per-conn request-read buffer (default
 	// 4 KiB). Raise only for header-heavy upstreams; raising it inflates
