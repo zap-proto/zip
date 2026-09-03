@@ -433,6 +433,11 @@ func (p *Peer) String() string {
 	return "pid=" + strconv.Itoa(p.PID) + " uid=" + strconv.Itoa(p.UID) + " gid=" + strconv.Itoa(p.GID)
 }
 
+// Local reports a call with no transport behind it: this process asking
+// itself, through [Here]. A server that scopes by the peer's credential asks
+// this first — there is no peer to read, and there is no one to refuse.
+func Local(ctx context.Context) bool { return requestOf(ctx) == nil }
+
 // PeerOf returns the credential of the process that made this call, or nil
 // when there is nothing to attest — the request arrived over tcp, or the host
 // OS does not report peer credentials (see peerOf).

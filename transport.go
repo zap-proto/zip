@@ -578,6 +578,7 @@ func splitScheme(raw string) (scheme, addr string) {
 // another transport in the registry.
 type httpServer struct {
 	addr string
+	mode os.FileMode
 	srv  *fasthttp.Server
 }
 
@@ -591,7 +592,11 @@ type httpServer struct {
 // /var/lib/…", which is what binding it as tcp amounts to.
 func (h *httpServer) ListenAndServe() error {
 	if NetworkOf(h.addr) == "unix" {
-		return h.srv.ListenAndServeUNIX(h.addr, 0o600)
+		mode := h.mode
+		if mode == 0 {
+			mode = 0o600
+		}
+		return h.srv.ListenAndServeUNIX(h.addr, mode)
 	}
 	return h.srv.ListenAndServe(h.addr)
 }
@@ -609,6 +614,7 @@ type tunableServer interface{ applyConfig(cfg Config) }
 // it. This is the seam that makes zip.Config{ReadBufferSize: 32768} raise the
 // 431 header ceiling on the wire.
 func (h *httpServer) applyConfig(cfg Config) {
+	h.mode = cfg.SocketMode
 	if cfg.ReadBufferSize > 0 {
 		h.srv.ReadBufferSize = cfg.ReadBufferSize
 	}
