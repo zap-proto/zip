@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,8 @@ func main() {
 		runSDK(args)
 	case "mcp":
 		runMCP(args)
+	case "cli":
+		runCLI(args)
 	case "docs":
 		runDocs(args)
 	default:
@@ -39,6 +42,7 @@ func usage() {
 Commands:
   sdk    Generate native Go, Rust, or C++ client SDK with full doc comments
   mcp    Generate native Go, Rust, or C++ MCP server and tools
+  cli    Generate native Go, Rust, or C++ CLI commands and runners
   docs   Generate @hanzo/docs compatible MDX documentation pages
 
 Run 'zipgen <command> -h' for command options.
@@ -106,6 +110,39 @@ func runMCP(args []string) {
 		writeOutput(*out, "mcp.hpp", res.Header)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust or cpp)\n", *lang)
+		os.Exit(1)
+	}
+}
+
+func runCLI(args []string) {
+	fs := flag.NewFlagSet("cli", flag.ExitOnError)
+	lang := fs.String("lang", "rust", "target language: rust, cpp, or go")
+	pkg := fs.String("pkg", "cli", "package/crate/namespace name")
+	out := fs.String("o", "", "output directory or file")
+	fs.Parse(args)
+
+	app := zip.New(zip.Config{AppName: *pkg})
+	switch strings.ToLower(*lang) {
+	case "rust", "rs":
+		res, err := app.RustCLI(*pkg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
+			os.Exit(1)
+		}
+		writeOutput(*out, "cli.rs", res.Source)
+	case "cpp", "c++":
+		res, err := app.CppCLI(*pkg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
+			os.Exit(1)
+		}
+		writeOutput(*out, "cli.hpp", res.Header)
+	case "go":
+		cmds := app.Commands()
+		data, _ := json.MarshalIndent(cmds, "", "  ")
+		writeOutput(*out, "cli.json", data)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust, cpp, or go)\n", *lang)
 		os.Exit(1)
 	}
 }
