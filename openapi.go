@@ -266,6 +266,29 @@ func (a *App) buildOpenAPI() map[string]any {
 			opObj["responses"] = resp
 		}
 
+		// A gated service can hold ANY op, so its document publishes the held body
+		// beside every op's success response and a generated client reads the pair
+		// rather than mistaking a held op for a finished one.
+		//
+		// The op is asked, not the app, because they can differ: a composed child
+		// answers to whatever included it (see [adopt]), and a MOUNTED op has no
+		// local rule at all — it is another service's op, forwarded, so this
+		// document must not promise an answer this app would never send. Never
+		// over a 202 the op declared itself, either, which is the op's own meaning
+		// for that code.
+		if op.rule != nil && op.rule() != nil {
+			if resp, ok := opObj["responses"].(map[string]any); ok {
+				if _, taken := resp["202"]; !taken {
+					resp["202"] = map[string]any{
+						"description": "held for approval",
+						"content": map[string]any{
+							"application/json": map[string]any{"schema": schemaOf(approvalType, reg, nil)},
+						},
+					}
+				}
+			}
+		}
+
 		paths[path][strings.ToLower(op.Method)] = opObj
 	}
 

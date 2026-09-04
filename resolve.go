@@ -254,6 +254,14 @@ func (e *graph) call(ctx context.Context, op *registeredOp, s *gqlSel, path []an
 		e.fail(path, err.Error())
 		return nil
 	}
+	// A held op has no value, and a graph answer has only two lanes — data and
+	// errors — so it is reported beside the field it was selected for. Projecting
+	// the [Approval] through the selection instead would describe it against the
+	// op's Out type, which is a shape it does not have.
+	if a, ok := out.(*Approval); ok {
+		e.fail(path, a.Error())
+		return nil
+	}
 	if out == nil {
 		// A void op answers that it happened, which is what its Boolean says.
 		return true

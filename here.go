@@ -73,6 +73,11 @@ func Serving(name string) *App {
 // In and Out must be the pair the op declared. A socket call learns that from a
 // decode failure at the far end; here it is a type assertion, and the error says
 // so plainly.
+//
+// A HELD OP IS NOT AN OUT. When the rule approves rather than allows, the
+// handler does not run and there is no reply to hand back, so the [Approval]
+// comes back on the error lane and [HeldOf] reads it — the same answer the 202
+// carries over REST and the call plane.
 func Here[In, Out any](ctx context.Context, a *App, op string, in *In) (*Out, error) {
 	if a == nil {
 		return nil, fmt.Errorf("zip: %s: no app here", op)
@@ -90,6 +95,11 @@ func Here[In, Out any](ctx context.Context, a *App, op string, in *In) (*Out, er
 	}
 	if out == nil {
 		return nil, nil
+	}
+	// Held, not mistyped. Surfacing the Approval before the assertion is what
+	// keeps a policy outcome from being reported as the caller's type mistake.
+	if a, ok := out.(*Approval); ok {
+		return nil, a
 	}
 	reply, ok := out.(*Out)
 	if !ok {

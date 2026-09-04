@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -200,13 +199,13 @@ func TestNest_MiddlewareStaysInsideTheChild(t *testing.T) {
 func TestNest_ChildAuthorizerStillFires(t *testing.T) {
 	child := childApp(t, "iam", nil)
 	var seen []string
-	child.Authorize(func(_ context.Context, op zip.Op, _ any) error {
+	child.Authorize(func(_ context.Context, op zip.Op, _ any) (zip.Decision, error) {
 		seen = append(seen, op.OperationID)
-		return errors.New("denied by iam")
+		return zip.Decision{Effect: zip.Deny, Clause: "iam", Reason: "denied by iam"}, nil
 	})
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	// A host authorizer that would ALLOW, to prove whose rule ran.
-	host.Authorize(func(context.Context, zip.Op, any) error { return nil })
+	host.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) { return zip.Decision{Effect: zip.Allow}, nil })
 	host.Use(child)
 	if err := host.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
@@ -509,9 +508,9 @@ func TestNest_HostRuleReachesAComposedChild(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 
 	var seen []string
-	host.Authorize(func(_ context.Context, op zip.Op, _ any) error {
+	host.Authorize(func(_ context.Context, op zip.Op, _ any) (zip.Decision, error) {
 		seen = append(seen, op.OperationID)
-		return zip.ErrForbidden("refused by host")
+		return zip.Decision{Effect: zip.Deny, Clause: "host", Reason: "refused by host"}, nil
 	})
 	host.Use(child)
 	if err := host.Build(); err != nil {
@@ -544,9 +543,13 @@ func TestNest_HostRuleReachesAComposedChild(t *testing.T) {
 // Tighter wins, looser is not expressible.
 func TestNest_AChildRuleStillWins(t *testing.T) {
 	child := childApp(t, "iam", nil)
-	child.Authorize(func(context.Context, zip.Op, any) error { return zip.ErrForbidden("refused by iam") })
+	child.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) {
+		return zip.Decision{Effect: zip.Deny, Clause: "iam", Reason: "refused by iam"}, nil
+	})
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	host.Authorize(func(context.Context, zip.Op, any) error { return nil }) // would allow
+	host.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) { // would allow
+		return zip.Decision{Effect: zip.Allow}, nil
+	})
 	host.Use(child)
 	if err := host.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
@@ -570,9 +573,11 @@ func TestNest_AChildRuleStillWins(t *testing.T) {
 func TestNest_TwoRulesThatDisagreeRefuseToCompose(t *testing.T) {
 	child := childApp(t, "iam", nil)
 	strict := zip.New(zip.Config{AppName: "strict", DisableStartupMessage: true})
-	strict.Authorize(func(context.Context, zip.Op, any) error { return zip.ErrForbidden("no") })
+	strict.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) {
+		return zip.Decision{Effect: zip.Deny, Clause: "strict", Reason: "no"}, nil
+	})
 	loose := zip.New(zip.Config{AppName: "loose", DisableStartupMessage: true})
-	loose.Authorize(func(context.Context, zip.Op, any) error { return nil })
+	loose.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) { return zip.Decision{Effect: zip.Allow}, nil })
 
 	strict.Use(child)
 	if err := strict.Build(); err != nil {
@@ -598,7 +603,9 @@ func TestNest_OneRuleAndNoRuleIsNotADisagreement(t *testing.T) {
 	child := childApp(t, "iam", nil)
 	open := zip.New(zip.Config{AppName: "open", DisableStartupMessage: true})
 	ruled := zip.New(zip.Config{AppName: "ruled", DisableStartupMessage: true})
-	ruled.Authorize(func(context.Context, zip.Op, any) error { return zip.ErrForbidden("refused by ruled") })
+	ruled.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) {
+		return zip.Decision{Effect: zip.Deny, Clause: "ruled", Reason: "refused by ruled"}, nil
+	})
 
 	open.Use(child)
 	if err := open.Build(); err != nil {

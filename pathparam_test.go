@@ -122,11 +122,11 @@ func TestNoParamsLeavesBodyIntact(t *testing.T) {
 func TestAuthorizerSeesPathTarget(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
 	var sawOwner, sawName string
-	a.Authorize(func(_ context.Context, _ zip.Op, in any) error {
+	a.Authorize(func(_ context.Context, _ zip.Op, in any) (zip.Decision, error) {
 		if m, ok := in.(*memberIn); ok {
 			sawOwner, sawName = m.Owner, m.Name
 		}
-		return nil
+		return zip.Decision{Effect: zip.Allow}, nil
 	})
 	zip.Patch(a, "/v1/t/things/:owner/:name", echoMember)
 	if code, _ := do(t, a, "PATCH", "/v1/t/things/acme/widget", `{"owner":"victim"}`); code != 200 {

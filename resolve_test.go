@@ -210,12 +210,12 @@ func TestAHeaderCannotBeSuppliedAsAnArgument(t *testing.T) {
 func TestTheAuthorizerRunsOnTheGraphPath(t *testing.T) {
 	app := resApp(t)
 	var saw []string
-	app.Authorize(func(ctx context.Context, op Op, in any) error {
+	app.Authorize(func(ctx context.Context, op Op, in any) (Decision, error) {
 		saw = append(saw, op.OperationID)
 		if op.OperationID == "user" {
-			return errors.New("denied by policy")
+			return Decision{Effect: Deny, Clause: "policy", Reason: "denied by policy"}, nil
 		}
-		return nil
+		return Decision{Effect: Allow}, nil
 	})
 
 	r := ask(t, app, `{ user(id: "u1") { id email } }`, nil, nil)
@@ -235,11 +235,11 @@ func TestTheAuthorizerRunsOnTheGraphPath(t *testing.T) {
 func TestTheAuthorizerSeesTheTypedInput(t *testing.T) {
 	app := resApp(t)
 	var got *resGet
-	app.Authorize(func(ctx context.Context, op Op, in any) error {
+	app.Authorize(func(ctx context.Context, op Op, in any) (Decision, error) {
 		if v, ok := in.(*resGet); ok {
 			got = v
 		}
-		return nil
+		return Decision{Effect: Allow}, nil
 	})
 	ask(t, app, `{ user(id: "u7") { id } }`, nil, nil)
 	if got == nil {
