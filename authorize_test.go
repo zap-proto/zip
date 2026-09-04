@@ -32,16 +32,16 @@ func TestAuthorizer_GatesDecodedInputAcrossRESTandMCP(t *testing.T) {
 
 	// The decision keys on the DECODED owner: only "self" passes.
 	var seen []string
-	app.Authorize(func(_ context.Context, op zip.Op, in any) error {
+	app.Authorize(func(_ context.Context, op zip.Op, in any) (zip.Decision, error) {
 		ti, ok := in.(*thingIn)
 		if !ok {
 			t.Fatalf("authorizer got %T, want *thingIn (the decoded input)", in)
 		}
 		seen = append(seen, op.OperationID+"/"+op.Method+":"+ti.Owner)
 		if ti.Owner != "self" {
-			return zip.ErrForbidden("forbidden")
+			return zip.Decision{Effect: zip.Deny, Clause: "owner", Reason: "forbidden"}, nil
 		}
-		return nil
+		return zip.Decision{Effect: zip.Allow}, nil
 	})
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
@@ -158,9 +158,9 @@ func groupedOps(t *testing.T, gateFirst bool) {
 
 	var seen []string
 	gate := func() {
-		app.Authorize(func(_ context.Context, op zip.Op, _ any) error {
+		app.Authorize(func(_ context.Context, op zip.Op, _ any) (zip.Decision, error) {
 			seen = append(seen, op.OperationID)
-			return zip.ErrForbidden("no")
+			return zip.Decision{Effect: zip.Deny, Clause: "shut", Reason: "no"}, nil
 		})
 	}
 	if gateFirst {

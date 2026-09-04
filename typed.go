@@ -66,6 +66,12 @@ type registeredOp struct {
 	// other. It is the child's own AppName, never a prefix or a deployment
 	// choice: it says WHO declared the type, which is a property of the code.
 	Origin string
+	// rule is the [Authorizer] in force over this op. Asked rather than stored,
+	// because composition settles it at build (see [adopt]) and the op was
+	// registered long before that. The invoke seam asks it on every call and the
+	// document asks it once — so "is this op governed" has one answer, and a
+	// gated op cannot publish a contract its seam does not keep.
+	rule   func() Authorizer
 	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error)
 	// direct is invoke with the decoding removed: the In arrives as the *In the
 	// caller already holds. It exists for the one transport that is not a
@@ -611,6 +617,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		o(op)
 	}
 	op.readsHeaders = len(headerFields(op.InType)) > 0
+	op.rule = app.rule
 
 	// The op's stable identity, resolved once (after opts) and handed to the
 	// authorizer on every invoke — REST and MCP alike.
@@ -626,9 +633,24 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		}
 		// Authorize the DECODED input — the exact value the handler will bind — so
 		// the decision cannot diverge from execution. Runs for REST and MCP alike.
-		if auth := app.rule(); auth != nil {
-			if err := auth(ctx, meta, in); err != nil {
-				return nil, err
+		//
+		// The three-valued [Decision] is resolved HERE, at the one seam every
+		// projection funnels through, so allow, deny and approve reach REST, MCP,
+		// the call plane, the graph and the CLI without a branch in any of them.
+		if auth := op.rule(); auth != nil {
+			d, err := auth(ctx, meta, in)
+			if err != nil {
+				return nil, err // the check itself failed, which is not a refusal
+			}
+			switch d.Effect {
+			case Deny:
+				return nil, d.refusal()
+			case Approve:
+				// Held: the handler does not run, and the [Approval] is the result.
+				// One value, and each projection renders it — a 202 over REST and
+				// the call plane, the value over MCP and the CLI, the error lane to
+				// a Go caller, who reads it with [HeldOf].
+				return d.approval(), nil
 			}
 		}
 		out, err := fn(ctx, in)
@@ -711,6 +733,14 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path, header)
 		if err != nil {
 			return err
+		}
+		// A held op renders its own answer: 202 and the [Approval], not the
+		// handler's 200. Read before the declared-status path because an Approval
+		// is a framework value and not the op's Out — statusOf would refuse a 202
+		// the op never declared, which is the right answer about Out and the wrong
+		// one about this.
+		if a, ok := out.(*Approval); ok {
+			return c.Status(202).JSON(a)
 		}
 		if out == nil {
 			// A void op answers with the status it DECLARED, else the 204 a nil

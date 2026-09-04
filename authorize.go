@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 )
 
 // Op identifies a typed handler to an [Authorizer], so a decision can key on the
@@ -26,6 +27,95 @@ type Op struct {
 	OperationID string
 }
 
+// Effect is the outcome of authorizing an op, and there are three of them: run
+// it, refuse it, or hold it until a person answers. That is the whole
+// vocabulary, so every projection renders exactly these three and none can
+// invent a fourth the others would not know how to show.
+type Effect uint8
+
+const (
+	Allow   Effect = iota // run the handler
+	Deny                  // refuse before the handler runs
+	Approve               // hold the op for a person; the handler does not run
+)
+
+// Decision is what an [Authorizer] answers with.
+//
+// Clause names which clause of the rule reached the outcome — a stable token a
+// client dispatches on, written as the refusal's `code` over REST — and Reason
+// is the sentence a person reads. Both are meaningful on a Deny and on an
+// Approve and are ignored on an Allow, which withheld nothing and so has
+// nothing to explain.
+//
+// It is written as a literal, which is the whole notation:
+//
+//	return zip.Decision{Effect: zip.Allow}, nil
+//	return zip.Decision{Effect: zip.Deny, Clause: "owner", Reason: "not the owner"}, nil
+//	return zip.Decision{Effect: zip.Approve, Clause: "spend.cap", Reason: "over the cap"}, nil
+type Decision struct {
+	Effect Effect
+	Clause string
+	Reason string
+}
+
+// Held is the ONE word for an op a Decision stopped and nobody has answered
+// yet. One spelling, so a caller — or a generated client reading the pair of
+// responses the document publishes — tells a held op from a finished one
+// without guessing.
+const Held = "held"
+
+// Approval is what a held op yields: the handler did NOT run, Status is [Held],
+// Clause names the clause that asked for sign-off, and Reason is what a person
+// reads before answering it.
+//
+// It carries no id, because minting and tracking an approval belongs to the
+// authority that will answer it. zip says once, in one shape, that the op is
+// held and why: REST and the call plane give that shape a 202, MCP and the CLI
+// carry it in the value, the graph reports it beside the field, and a Go caller
+// reads it off the error lane — so no projection can report a held op as a
+// finished one.
+type Approval struct {
+	Status string `json:"status"` // always Held
+	Clause string `json:"clause"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Error lets an Approval travel the lane every Go caller already reads. A held
+// op has no Out and never will have one — the handler did not run — so a
+// projection that must answer (*Out, error) has exactly one honest shape for
+// it. It is not a failure: nothing broke, and the next step is a person.
+func (a *Approval) Error() string {
+	if a.Reason == "" {
+		return "held for approval: " + a.Clause
+	}
+	return "held for approval: " + a.Clause + ": " + a.Reason
+}
+
+// HeldOf reads the Approval back out of an error — the ONE way a caller asks
+// whether an op was held, on any projection, with no status to match and no
+// string to parse.
+func HeldOf(err error) (*Approval, bool) {
+	var a *Approval
+	return a, errors.As(err, &a)
+}
+
+// approval is the record a held op answers with.
+func (d Decision) approval() *Approval {
+	return &Approval{Status: Held, Clause: d.Clause, Reason: d.Reason}
+}
+
+// refusal is the 403 a denied op answers with, carrying the clause as its code
+// and the reason as its message. Reusing the error lane is what fans a refusal
+// out to REST, MCP, the call plane, the graph and the CLI with no
+// per-projection branch: refusal already had exactly one shape.
+func (d Decision) refusal() error {
+	return &HTTPError{Status: 403, Code: d.Clause, Msg: d.Reason}
+}
+
+// approvalType is the type the OpenAPI projection publishes for the 202, so a
+// gated service documents the held body beside every op's success response.
+var approvalType = reflect.TypeOf(Approval{})
+
 // Authorizer authorizes a decoded, validated typed request at the op-invoke
 // seam — the ONE point every projection of a typed handler funnels through. It
 // runs after the request is decoded into the op's typed In and validated, and
@@ -33,10 +123,16 @@ type Op struct {
 // is exactly the value the handler will act on: there is no second parse of the
 // body for it to diverge from. in is the *In the handler will receive.
 //
-// Returning a non-nil error aborts the op before the handler runs, and that
-// error is the response — return a zip.Err* (e.g. ErrForbidden) for a clean
-// status.
-type Authorizer func(ctx context.Context, op Op, in any) error
+// It answers a [Decision], and every projection renders the three effects the
+// same way: [Allow] runs the handler, [Deny] refuses with a 403 carrying the
+// clause and the reason, [Approve] holds the op and renders it held without
+// running it.
+//
+// The error return is for a genuine failure of the CHECK ITSELF — the authority
+// is unreachable, say. It is not how a refusal is spelled; a refusal is a Deny.
+// A non-nil error aborts the op and is the response, so return a zip.Err* for a
+// clean status.
+type Authorizer func(ctx context.Context, op Op, in any) (Decision, error)
 
 // Authorize installs fn as the op-invoke authorization rule. It is the op-level
 // counterpart to Use: Use wraps the whole request with transport middleware,

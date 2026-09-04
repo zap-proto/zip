@@ -162,6 +162,19 @@ func (a *App) installCallPlane() {
 		if out == nil {
 			return fc.SendStatus(fiber.StatusNoContent)
 		}
+		// A held op answers 202 here exactly as it does over REST, and the STATUS
+		// is what carries it: sending the [Approval] as the op's ordinary reply
+		// would put it under a 200, and the far side would decode those bytes into
+		// Out and report a value the handler never produced.
+		if a, ok := out.(*Approval); ok {
+			body, merr := zapenc.Marshal(a)
+			if merr != nil {
+				return sendCallError(fc, ErrInternal("zip: encode approval: "+merr.Error()))
+			}
+			fc.Set(fiber.HeaderContentType, CallContentType)
+			fc.Status(fiber.StatusAccepted)
+			return fc.Send(body)
+		}
 		// The call plane owns this response — one request, one op — so a declared
 		// response header is written here exactly as it is over REST.
 		hdrs, herr := responseHeadersOf(op, out)
@@ -299,6 +312,15 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 	switch code := resp.StatusCode(); {
 	case code == fasthttp.StatusNoContent:
 		return nil, nil
+	case code == fasthttp.StatusAccepted:
+		// The callee held the op, so these bytes are an [Approval] and not an Out.
+		// Decoding them into Out is precisely how a held op becomes a fabricated
+		// success, so it comes back as the Approval itself, which [HeldOf] reads.
+		var a Approval
+		if err := zapenc.Unmarshal(resp.Body(), &a); err != nil {
+			return nil, Errorf(502, "zip: decode %s approval: %v", op, err)
+		}
+		return nil, &a
 	case code < 200 || code > 299:
 		return nil, remoteError(code, op, resp.Body())
 	}
