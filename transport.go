@@ -3,8 +3,10 @@ package zip
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -69,7 +71,7 @@ var (
 	transports   = map[string]Transport{
 		"zap": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
-				return &http.Server{Network: NetworkOf(addr), Addr: addr, Handler: h}
+				return &zapServer{addr: addr, srv: &http.Server{Network: NetworkOf(addr), Addr: addr, Handler: h}}
 			},
 			Dial: func(addr string) Client { return http.Dial(NetworkOf(addr), addr) },
 		},
@@ -592,15 +594,89 @@ type httpServer struct {
 // /var/lib/…", which is what binding it as tcp amounts to.
 func (h *httpServer) ListenAndServe() error {
 	if NetworkOf(h.addr) == "unix" {
-		mode := h.mode
-		if mode == 0 {
-			mode = 0o600
+		ln, err := bindSocket(h.addr, h.mode)
+		if err != nil {
+			return err
 		}
-		return h.srv.ListenAndServeUNIX(h.addr, mode)
+		return h.srv.Serve(ln)
 	}
 	return h.srv.ListenAndServe(h.addr)
 }
 func (h *httpServer) Close() error { return h.srv.Shutdown() }
+
+// zapServer adapts zap-proto/http.Server the same way, and for the same
+// reason the HTTP one exists: the mode a socket is bound with is the App's to
+// decide and the upstream server takes an address, binds it, and never learns
+// what [Config.SocketMode] said. Binding through [bindSocket] here is what
+// makes the config true on the PRIMARY transport — a bare address is ZAP, so
+// the canonical [SocketPath] socket every plugin and peer is reached on is
+// this one, and left to net.Listen it carried 0777 masked by the process
+// umask (0755 under the usual 022) whatever the deployment asked for.
+type zapServer struct {
+	addr string
+	mode os.FileMode
+	srv  *http.Server
+}
+
+func (z *zapServer) ListenAndServe() error {
+	if NetworkOf(z.addr) == "unix" {
+		ln, err := bindSocket(z.addr, z.mode)
+		if err != nil {
+			return err
+		}
+		return z.srv.Serve(ln)
+	}
+	return z.srv.ListenAndServe()
+}
+func (z *zapServer) Close() error           { return z.srv.Close() }
+func (z *zapServer) applyConfig(cfg Config) { z.mode = cfg.SocketMode }
+
+// staleWait bounds the dial that tells a socket left by a dead process from
+// one something is still answering on.
+const staleWait = 200 * time.Millisecond
+
+// bindSocket binds a unix socket and gives it the mode the deployment asked
+// for, zero meaning 0600 — see [Config.SocketMode].
+//
+// A socket has a mode only because something chmods it: net.Listen creates it
+// 0777 masked by the process umask on Linux and darwin alike, which is a value
+// the deployment never chose. Doing it here, once, is what keeps "the socket
+// carries the config's mode" one fact rather than one per scheme — the umask
+// is process-wide and shared with every other file the program writes, so
+// narrowing it around a bind would answer a question about one socket by
+// changing the answer for everything. The window between bind and chmod is
+// closed by the directory: [makeSocketDir] creates it 0700.
+//
+// A stale socket is cleared first, because it outlives the process that made
+// it and bind refuses the leftover file; a socket something is still answering
+// on is left alone and reported, because that is a second process and not a
+// crash.
+func bindSocket(addr string, mode os.FileMode) (net.Listener, error) {
+	if mode == 0 {
+		mode = 0o600
+	}
+	// An abstract socket (@name) is a name in the kernel, not a file: it has no
+	// directory, no leftover to clear, and no mode to carry.
+	if strings.HasPrefix(addr, "@") {
+		return net.Listen("unix", addr)
+	}
+	if c, err := net.DialTimeout("unix", addr, staleWait); err == nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("zip: %s is already served by a live process", addr)
+	}
+	if err := os.Remove(addr); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("zip: clearing %s: %w", addr, err)
+	}
+	ln, err := net.Listen("unix", addr)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(addr, mode); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("zip: mode %#o on %s: %w", mode, addr, err)
+	}
+	return ln, nil
+}
 
 // tunableServer is a transport whose underlying server accepts the App's
 // per-conn wire tuning. Listen applies it after construction so zip.Config's
