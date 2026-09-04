@@ -169,3 +169,40 @@ func TestDocsMarkdown_GeneratesHanzoDocsPages(t *testing.T) {
 		}
 	}
 }
+
+func TestRustCLI_GeneratesRustCLIBindings(t *testing.T) {
+	app := crossApp()
+	cli, err := app.RustCLI("ledger")
+	if err != nil {
+		t.Fatalf("RustCLI error: %v", err)
+	}
+	src := string(cli.Source)
+	if !strings.Contains(src, "pub struct CommandDescriptor") {
+		t.Errorf("Rust CLI missing CommandDescriptor struct")
+	}
+	if !strings.Contains(src, "pub trait CliRunner") {
+		t.Errorf("Rust CLI missing CliRunner trait")
+	}
+	if !strings.Contains(src, "pub async fn run_cli") {
+		t.Errorf("Rust CLI missing run_cli dispatcher")
+	}
+}
+
+func TestCppCLI_GeneratesCppCLIBindings(t *testing.T) {
+	app := crossApp()
+	cli, err := app.CppCLI("ledger")
+	if err != nil {
+		t.Fatalf("CppCLI error: %v", err)
+	}
+	hdr := string(cli.Header)
+	if !strings.Contains(hdr, "struct CommandDescriptor") {
+		t.Errorf("C++ CLI missing CommandDescriptor struct")
+	}
+	if !strings.Contains(hdr, "class CliRunner") {
+		t.Errorf("C++ CLI missing CliRunner class")
+	}
+	if !strings.Contains(hdr, "inline std::string run_cli") {
+		t.Errorf("C++ CLI missing run_cli dispatcher")
+	}
+}
+
