@@ -30,6 +30,8 @@ func main() {
 		runCLI(args)
 	case "docs":
 		runDocs(args)
+	case "zap":
+		runZap(args)
 	default:
 		usage()
 		os.Exit(1)
@@ -44,6 +46,7 @@ Commands:
   mcp    Generate native Go, Rust, or C++ MCP server and tools
   cli    Generate native Go, Rust, or C++ CLI commands and runners
   docs   Generate @hanzo/docs compatible MDX documentation pages
+  zap    Generate the ZAP wire runtime (reader + builder) for a target language
 
 Run 'zipgen <command> -h' for command options.
 `)
@@ -81,6 +84,26 @@ func runSDK(args []string) {
 		writeOutput(*out, "client.go", res.Source)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust, cpp, or go)\n", *lang)
+		os.Exit(1)
+	}
+}
+
+// runZap emits the ZAP wire runtime itself — the reader and the builder — for a
+// target language. This is the codec every generated SDK and every hand-written
+// chain reads and writes bytes with, so it is stated once here rather than
+// ported per repository.
+func runZap(args []string) {
+	fs := flag.NewFlagSet("zap", flag.ExitOnError)
+	lang := fs.String("lang", "cpp", "target language: cpp")
+	ns := fs.String("ns", "lux::zap", "namespace for the emitted runtime")
+	out := fs.String("o", "", "output directory or file")
+	fs.Parse(args)
+
+	switch strings.ToLower(*lang) {
+	case "cpp", "c++":
+		writeOutput(*out, "zap.hpp", zip.CppZap(*ns))
+	default:
+		fmt.Fprintf(os.Stderr, "unknown language: %s (choose cpp)\n", *lang)
 		os.Exit(1)
 	}
 }
