@@ -59,12 +59,14 @@ Run 'zipgen <command> -h' for command options.
 
 func runSDK(args []string) {
 	fs := flag.NewFlagSet("sdk", flag.ExitOnError)
+	schema := fs.String("schema", "", "path to the .zap schema declaring the ops to project")
+	iface := fs.String("interface", "", "which interface of the schema to project (required when it declares more than one)")
 	lang := fs.String("lang", "rust", "target language: rust, cpp, or go")
 	pkg := fs.String("pkg", "client", "package/crate/namespace name")
 	out := fs.String("o", "", "output directory or file")
 	fs.Parse(args)
 
-	app := source(zip.New(zip.Config{AppName: *pkg}), "an SDK")
+	app := source(*schema, *iface, "an SDK")
 	switch strings.ToLower(*lang) {
 	case "rust", "rs":
 		res, err := app.RustSDK(*pkg)
@@ -115,12 +117,14 @@ func runZap(args []string) {
 
 func runMCP(args []string) {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	schema := fs.String("schema", "", "path to the .zap schema declaring the ops to project")
+	iface := fs.String("interface", "", "which interface of the schema to project (required when it declares more than one)")
 	lang := fs.String("lang", "rust", "target language: rust, cpp, or go")
 	pkg := fs.String("pkg", "mcp", "package/crate/namespace name")
 	out := fs.String("o", "", "output directory or file")
 	fs.Parse(args)
 
-	app := source(zip.New(zip.Config{AppName: *pkg}), "an MCP server")
+	app := source(*schema, *iface, "an MCP server")
 	switch strings.ToLower(*lang) {
 	case "rust", "rs":
 		res, err := app.RustMCP(*pkg)
@@ -144,12 +148,14 @@ func runMCP(args []string) {
 
 func runCLI(args []string) {
 	fs := flag.NewFlagSet("cli", flag.ExitOnError)
+	schema := fs.String("schema", "", "path to the .zap schema declaring the ops to project")
+	iface := fs.String("interface", "", "which interface of the schema to project (required when it declares more than one)")
 	lang := fs.String("lang", "rust", "target language: rust, cpp, or go")
 	pkg := fs.String("pkg", "cli", "package/crate/namespace name")
 	out := fs.String("o", "", "output directory or file")
 	fs.Parse(args)
 
-	app := source(zip.New(zip.Config{AppName: *pkg}), "a CLI")
+	app := source(*schema, *iface, "a CLI")
 	switch strings.ToLower(*lang) {
 	case "rust", "rs":
 		res, err := app.RustCLI(*pkg)
@@ -177,11 +183,13 @@ func runCLI(args []string) {
 
 func runDocs(args []string) {
 	fs := flag.NewFlagSet("docs", flag.ExitOnError)
+	schema := fs.String("schema", "", "path to the .zap schema declaring the ops to project")
+	iface := fs.String("interface", "", "which interface of the schema to project (required when it declares more than one)")
 	title := fs.String("title", "API Reference", "documentation title")
 	out := fs.String("o", "./docs", "output directory for MDX pages")
 	fs.Parse(args)
 
-	app := source(zip.New(zip.Config{AppName: *title}), "documentation")
+	app := source(*schema, *iface, "documentation")
 	bundle, err := app.DocsMarkdown(*title)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
@@ -199,44 +207,82 @@ func runDocs(args []string) {
 	fmt.Printf("Generated %d documentation pages in %s\n", len(bundle.Pages)+1, *out)
 }
 
-// source returns the app whose registry the projections are computed from,
-// or refuses.
+// source is the app whose registry the projections are computed from, read
+// from the schema that declares it.
 //
-// zipgen builds its app from flags alone, so the registry is empty and every
-// projection of it is empty too: an SDK with no methods, an MCP server with
-// no tools, a docs page whose operations table has no rows, a CLI spec that
-// is the two bytes "[]". Writing those out is worse than writing nothing —
-// each one is a plausible-looking file that a reader takes for the API, and
-// the emptiness is only visible to someone who counts. So the command says
-// what it is missing and stops.
+// zipgen used to build its app from flags alone, so the registry was empty and
+// every projection of it was empty too: an SDK with no methods, an MCP server
+// with no tools, a docs page whose operations table has no rows, a CLI spec
+// that is the two bytes "[]". Each of those was written out and reported as a
+// success, which is worse than writing nothing — a plausible-looking file that
+// a reader takes for the API, whose emptiness is only visible to someone who
+// counts.
 //
-// What it is missing is a way to be pointed at a schema. The ops that fill a
-// registry are Go declarations today, which is why this command cannot read
-// one: a .zap schema is parsed by github.com/zap-proto/go/idl, and turning a
-// parsed schema into a registry is the wire that does not exist yet. Until
-// it does, the honest answer to "generate the SDK for this service" is that
-// zipgen cannot see the service.
-func source(a *zip.App, what string) *zip.App {
-	if err := projectable(a, what); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+// The registry now comes from a .zap schema, which is where a service that is
+// not this process states its contract. zip.ReadZAP parses it with the same
+// package cmd/zapgen parses it with and derives one op per method; from there
+// every projection is the one it always was. A run with no schema still has
+// nothing to see, and still says so.
+//
+// A schema declares one service per interface and may declare several, so which
+// one to project is named rather than assumed. Only a file with exactly one can
+// leave it out.
+func source(schema, want, what string) *zip.App {
+	if schema == "" {
+		fmt.Fprintf(os.Stderr, `zipgen: cannot generate %s — no operations to project.
+
+Name the .zap schema that declares them:
+
+    zipgen ... -schema path/to/service.zap
+
+Without one this command has an empty registry, and every projection of an
+empty registry is empty. Emitting one would publish a file that looks like an
+API and describes nothing.
+`, what)
 		os.Exit(1)
 	}
-	return a
+	src, err := os.ReadFile(schema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
+		os.Exit(1)
+	}
+	apps, err := zip.ReadZAP(schema, src)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
+		os.Exit(1)
+	}
+	app := choose(apps, want, schema)
+	// A schema whose interface declares no methods parses, and projects nothing.
+	// The read above accounts for every method it could not express, so reaching
+	// here with an empty registry means the interface was empty.
+	if len(app.Registry()) == 0 {
+		fmt.Fprintf(os.Stderr, "zipgen: cannot generate %s — interface %s declares no methods\n", what, app.Name())
+		os.Exit(1)
+	}
+	return app
 }
 
-// projectable reports why a is not a source, or nil if it is.
-func projectable(a *zip.App, what string) error {
-	if len(a.Registry()) > 0 {
-		return nil
+// choose is the service to project, by name, or the only one there is.
+func choose(apps []*zip.App, want, schema string) *zip.App {
+	names := make([]string, len(apps))
+	for i, a := range apps {
+		names[i] = a.Name()
+		if a.Name() == want {
+			return a
+		}
 	}
-	return fmt.Errorf(`zipgen: cannot generate %s — no operations to project.
-
-zipgen builds its app from flags, so its typed-op registry is empty, and
-every projection of an empty registry is empty. Emitting one would publish
-a file that looks like an API and describes nothing.
-
-An op registry comes from Go declarations today. Reading it from a .zap
-schema (parsed by github.com/zap-proto/go/idl) is the missing wire.`, what)
+	switch {
+	case want != "":
+		fmt.Fprintf(os.Stderr, "zipgen: %s declares no interface %s; it declares %s\n",
+			schema, want, strings.Join(names, ", "))
+	case len(apps) == 1:
+		return apps[0]
+	default:
+		fmt.Fprintf(os.Stderr, "zipgen: %s declares %d interfaces (%s); name one with -interface\n",
+			schema, len(apps), strings.Join(names, ", "))
+	}
+	os.Exit(1)
+	return nil
 }
 
 func writeOutput(outPath, defaultName string, data []byte) {

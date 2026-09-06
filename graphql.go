@@ -238,7 +238,7 @@ func deref(t reflect.Type) reflect.Type {
 // is not reused here: it lower-cases, which is right for a component key and
 // wrong for a type.
 func gqlType(t reflect.Type, hint string) string {
-	if n := t.Name(); n != "" {
+	if n := typeName(t); n != "" {
 		return title(gqlName(n))
 	}
 	if hint == "" {

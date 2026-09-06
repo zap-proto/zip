@@ -394,7 +394,7 @@ func (e *emitter) payload(t reflect.Type) (string, bool) {
 func (e *emitter) define(t reflect.Type) string {
 	if name, ok := e.named[t]; ok {
 		if name == "" {
-			e.gap(t.Name(), goName(t), CauseReaches) // re-blame for THIS op
+			e.gap(typeName(t), goName(t), CauseReaches) // re-blame for THIS op
 		}
 		return name
 	}
@@ -407,7 +407,7 @@ func (e *emitter) define(t reflect.Type) string {
 	}
 	if len(shape.Slots) == 0 {
 		e.named[t] = ""
-		e.gap(t.Name(), goName(t), CauseEmpty)
+		e.gap(typeName(t), goName(t), CauseEmpty)
 		return ""
 	}
 
@@ -519,7 +519,7 @@ func (e *emitter) diagnose(t reflect.Type) {
 			continue // this field is fine; another one is why the type refused
 		}
 		ft := deref(f.Type)
-		path := t.Name() + "." + f.Name
+		path := typeName(t) + "." + f.Name
 		if ft == nil {
 			e.gap(path, "nil", CauseAny)
 			continue
@@ -583,7 +583,7 @@ func (e *emitter) gap(field, goType, cause string) {
 // naming idea, not two — and it is deterministic because the ops are walked in
 // sorted order, so the first claimant is the same on every run.
 func (e *emitter) name(t reflect.Type) string {
-	base := idlName(t.Name())
+	base := idlName(typeName(t))
 	if base == "" || base == "_" {
 		base = idlName(e.op) + "_anon"
 	}
@@ -655,10 +655,14 @@ func goName(t reflect.Type) string {
 	if t == nil {
 		return "nil"
 	}
-	if p := t.PkgPath(); p != "" && t.Name() != "" {
-		return p[strings.LastIndexByte(p, '/')+1:] + "." + t.Name()
+	n := typeName(t)
+	if n == "" {
+		return t.String()
 	}
-	return t.String()
+	if p := t.PkgPath(); p != "" {
+		return p[strings.LastIndexByte(p, '/')+1:] + "." + n
+	}
+	return n
 }
 
 // ---- rendering --------------------------------------------------------------

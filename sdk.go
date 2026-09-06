@@ -217,7 +217,7 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 	// service's package is not part of it — until two packages both declare a
 	// Config, and then the qualifier is the honest distinction rather than an
 	// ordinal nobody can read.
-	name := exportIdent(t.Name())
+	name := exportIdent(typeName(t))
 	if name == "" || g.taken[name] {
 		name = exportIdent(goName(t))
 	}
@@ -225,7 +225,7 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 	g.named[t] = name
 
 	var b strings.Builder
-	if d := fields[t.Name()]; d != "" {
+	if d := fields[typeName(t)]; d != "" {
 		prose(&b, name, d)
 	}
 	fmt.Fprintf(&b, "type %s struct {\n", name)
@@ -240,10 +240,10 @@ func (g *render) declare(t reflect.Type, op string, fields map[string]string) (s
 		if !f.IsExported() {
 			continue
 		}
-		if d := fields[t.Name()+"."+jsonFieldName(f)]; d != "" {
+		if d := fields[typeName(t)+"."+jsonFieldName(f)]; d != "" {
 			prose(&b, "", d)
 		}
-		at := t.Name() + "." + f.Name
+		at := typeName(t) + "." + f.Name
 		goType, ok := g.typeOf(f.Type, op, at, fields)
 		if !ok {
 			// A field that cannot cross refuses the type that holds it, which

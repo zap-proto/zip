@@ -135,6 +135,28 @@ this is" and carrying on. A ZAP field IS an offset and a width, so a value the
 IDL cannot name is a value that cannot cross. `Schema.Gaps` and `SDK.Gaps` are
 therefore half the answer, not a footnote.
 
+The IDL projection also runs BACKWARDS. `zapread.go`'s `zip.ReadZAP` reads a
+.zap file with `github.com/zap-proto/go/idl` — the same package `cmd/zapgen`
+parses it with, so there is one grammar and not two — and answers with one app
+per declared interface, each carrying one `*registeredOp` per method. It is the
+exact inverse of `ZAPSchema`, which takes any number of apps and writes them as
+one interface each, so a file read and projected back is the same text. That is
+what lets `cmd/zipgen` generate an SDK, an MCP server, a CLI or docs for a
+service whose contract is a schema rather than Go declarations: everything
+downstream reads the registry and cannot tell where it came from.
+
+Two things make that possible and are worth knowing. Go has no named types at
+run time, so a struct built from a declaration carries the name it was declared
+under in a `decl:` tag on its fields, and `typeName` (openapi.go) is the one
+place every projection asks for a type's name — without it `struct Ping { Seq
+u64 @0 }` and `struct Pong { Seq u64 @0 }` intern to ONE reflect type and a
+method declared to answer Pong answers Ping. And the schema STATES an offset
+while `LayoutOf` DERIVES one: `ReadZAP` compares them field by field and refuses
+where they differ, naming every disagreement. That refusal is not theoretical —
+the IDL's own offset assignment packs and this layout aligns, so a hand-written
+schema with an `i32` before a wider field describes a wire this process does not
+speak.
+
 An **untyped** `app.Get(path, func(c *zip.Ctx) error)` registers no op, so it
 appears in none of them. That is the single biggest source of surface that
 "exists" but cannot be documented, called by an agent, driven from a script, or

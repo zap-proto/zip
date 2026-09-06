@@ -676,6 +676,14 @@ func pathParams(path string) []pathParam {
 	return out
 }
 
+// typeName is the name a type was declared under, which is usually its Go name.
+//
+// A type built at run time has no Go name — reflect makes no named types — so a
+// struct that [ReadZAP] derived from a .zap declaration carries the name it was
+// declared under on its fields instead, and this is where that is read. Every
+// projection asks this rather than reflect, so a schema-derived type is named in
+// the SDK, the document, the tool list and the schema written back out by the
+// name its author gave it, and not by the Go spelling of its shape.
 func typeName(t reflect.Type) string {
 	if t == nil {
 		return ""
@@ -683,10 +691,13 @@ func typeName(t reflect.Type) string {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t.Name() == "" {
-		return ""
+	if n := t.Name(); n != "" {
+		return n
 	}
-	return t.Name()
+	if t.Kind() == reflect.Struct && t.NumField() > 0 {
+		return t.Field(0).Tag.Get("decl")
+	}
+	return ""
 }
 
 // Where a projection keeps the definitions its schemas refer to. An OpenAPI
@@ -766,12 +777,12 @@ func (r *schemaRegistry) nameFor(t reflect.Type) string {
 	if r.origin != "" {
 		qual = r.origin + "."
 	}
-	base := qual + t.Name()
+	base := qual + typeName(t)
 	if _, taken := r.defs[base]; !taken {
 		return base
 	}
 	if p := t.PkgPath(); p != "" {
-		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + t.Name()
+		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + typeName(t)
 	}
 	for name, n := base, 2; ; n++ {
 		if _, taken := r.defs[name]; !taken {
@@ -861,7 +872,7 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 		if reg == nil {
 			return map[string]any{"type": "object"}
 		}
-		if t.Name() == "" {
+		if typeName(t) == "" {
 			// Anonymous: nothing to name a definition after — and nothing that
 			// can name it, so Go cannot spell a recursive one either.
 			out := map[string]any{}
@@ -922,7 +933,7 @@ func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fiel
 			continue // exists, but the body does not carry it.
 		}
 		fs := schemaOf(f.Type, reg, fields)
-		if d := fields[t.Name()+"."+name]; d != "" {
+		if d := fields[typeName(t)+"."+name]; d != "" {
 			fs["description"] = d
 		}
 		props[name] = fs

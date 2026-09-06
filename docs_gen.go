@@ -133,7 +133,7 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		fmt.Fprintf(&p, "client, err := sdk.Dial(\"127.0.0.1:9630\")\n")
 		fmt.Fprintf(&p, "if err != nil {\n\tlog.Fatal(err)\n}\n")
 		if op.InType != nil && deref(op.InType).NumField() > 0 {
-			fmt.Fprintf(&p, "res, err := client.%s(ctx, &sdk.%s{\n\t// ...\n})\n", goMethod, exportIdent(op.InType.Name()))
+			fmt.Fprintf(&p, "res, err := client.%s(ctx, &sdk.%s{\n\t// ...\n})\n", goMethod, exportIdent(typeName(op.InType)))
 		} else {
 			fmt.Fprintf(&p, "res, err := client.%s(ctx)\n", goMethod)
 		}
@@ -143,7 +143,7 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		p.WriteString("  <Tab value=\"Rust\">\n```rust\n")
 		fmt.Fprintf(&p, "let client = sdk::Client::new(\"127.0.0.1:9630\");\n")
 		if op.InType != nil && deref(op.InType).NumField() > 0 {
-			fmt.Fprintf(&p, "let res = client.%s(&%s { ..Default::default() }).await?;\n", rustMethod, exportIdent(op.InType.Name()))
+			fmt.Fprintf(&p, "let res = client.%s(&%s { ..Default::default() }).await?;\n", rustMethod, exportIdent(typeName(op.InType)))
 		} else {
 			fmt.Fprintf(&p, "let res = client.%s().await?;\n", rustMethod)
 		}
@@ -153,7 +153,7 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		p.WriteString("  <Tab value=\"C++\">\n```cpp\n")
 		fmt.Fprintf(&p, "auto client = sdk::create_client(\"127.0.0.1:9630\");\n")
 		if op.InType != nil && deref(op.InType).NumField() > 0 {
-			fmt.Fprintf(&p, "%s req{};\nauto res = client->%s(req);\n", exportIdent(op.InType.Name()), cppMethod)
+			fmt.Fprintf(&p, "%s req{};\nauto res = client->%s(req);\n", exportIdent(typeName(op.InType)), cppMethod)
 		} else {
 			fmt.Fprintf(&p, "auto res = client->%s();\n", cppMethod)
 		}
@@ -188,7 +188,7 @@ func inspectFields(t reflect.Type, docs map[string]string) []fieldInfo {
 			continue
 		}
 		wire := jsonFieldName(f)
-		doc := docs[t.Name()+"."+wire]
+		doc := docs[typeName(t)+"."+wire]
 		required := strings.Contains(f.Tag.Get("validate"), "required")
 		res = append(res, fieldInfo{
 			Name:     f.Name,
