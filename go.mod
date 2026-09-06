@@ -23,7 +23,7 @@ require (
 	github.com/luxfi/zap v1.2.7
 	github.com/valyala/fasthttp v1.70.0
 	github.com/zap-proto/fiber/v3 v3.2.1
-	github.com/zap-proto/go v1.3.0
+	github.com/zap-proto/go v1.8.3
 )
 
 require (

@@ -120,7 +120,7 @@ func (g *cppRender) declare(t reflect.Type, op string, fields map[string]string)
 		}
 	}
 
-	name := exportIdent(t.Name())
+	name := exportIdent(typeName(t))
 	if name == "" || g.taken[name] {
 		name = exportIdent(goName(t))
 	}
@@ -128,7 +128,7 @@ func (g *cppRender) declare(t reflect.Type, op string, fields map[string]string)
 	g.named[t] = name
 
 	var b strings.Builder
-	if d := fields[t.Name()]; d != "" {
+	if d := fields[typeName(t)]; d != "" {
 		cppDoxygen(&b, "", d)
 	}
 	fmt.Fprintf(&b, "struct %s {\n", name)
@@ -140,10 +140,10 @@ func (g *cppRender) declare(t reflect.Type, op string, fields map[string]string)
 			continue
 		}
 		jsonName := jsonFieldName(f)
-		if d := fields[t.Name()+"."+jsonName]; d != "" {
+		if d := fields[typeName(t)+"."+jsonName]; d != "" {
 			cppDoxygen(&b, "    ", d)
 		}
-		cppType := g.typeOf(f.Type, op, t.Name()+"."+f.Name, fields)
+		cppType := g.typeOf(f.Type, op, typeName(t)+"."+f.Name, fields)
 		fieldName := snakeCase(f.Name)
 		if isCppKeyword(fieldName) {
 			fieldName += "_"

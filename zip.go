@@ -358,6 +358,14 @@ type App struct {
 	prepared atomic.Bool
 }
 
+// Name is the app's [Config.AppName] — the one name it answers to.
+//
+// Exported because a caller holding several apps has to tell them apart, and
+// the name is the only thing that does. [ReadZAP] answers with one app per
+// interface a schema declares, and picking one of them out is exactly that
+// question.
+func (a *App) Name() string { return a.cfg.AppName }
+
 // New constructs an App with the given config. Defaults are applied
 // for any zero-valued field.
 func New(cfg Config) *App {
