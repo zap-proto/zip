@@ -5,7 +5,6 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/zap-proto/zip/internal/jsonenc"
 	"github.com/zap-proto/zip/internal/jsontag"
+	"github.com/zap-proto/zip/manifest"
 )
 
 // SpecPath and DocsPath are where an app serves its own OpenAPI document and
@@ -59,16 +59,23 @@ func (a *App) installOpenAPIRoutes() {
 
 // buildOpenAPI walks the registered typed ops and builds an OpenAPI 3.1
 // spec as a plain map (json.Marshal serializes anything map-shaped).
-func (a *App) buildOpenAPI() map[string]any {
-	cfg := a.cfg.OpenAPI
-	if cfg.Title == "" {
-		cfg.Title = a.cfg.AppName
+func (a *App) buildOpenAPI() map[string]any { return openAPI(a.Manifest()) }
+
+// openAPI is the document one manifest describes. It reads nothing but the
+// manifest, so the document a Go app publishes and the document written from a
+// C++ or Rust app's own source are produced by this one function — which is what
+// makes them the same document rather than three programs that agree for now.
+func openAPI(m *manifest.App) map[string]any {
+	title := m.Title
+	if title == "" {
+		title = m.Name
 	}
-	if cfg.Title == "" {
-		cfg.Title = "zip API"
+	if title == "" {
+		title = "zip API"
 	}
-	if cfg.Version == "" {
-		cfg.Version = "0.0.0"
+	version := m.Version
+	if version == "" {
+		version = "0.0.0"
 	}
 
 	paths := map[string]map[string]any{}
@@ -76,16 +83,9 @@ func (a *App) buildOpenAPI() map[string]any {
 	// definition in components.schemas that both point at.
 	reg := newSchemaRegistry(specDefs)
 
-	// Sort ops by path,method for deterministic output.
-	ops := append([]*registeredOp{}, a.Registry()...)
-	sort.Slice(ops, func(i, j int) bool {
-		if ops[i].Path != ops[j].Path {
-			return ops[i].Path < ops[j].Path
-		}
-		return ops[i].Method < ops[j].Method
-	})
-
-	for _, op := range ops {
+	// The ops arrive sorted by address — see [App.Manifest] — which is the order
+	// this document has always been built in.
+	for _, op := range m.Ops {
 		// Whose types these are. Empty for this app's own ops, so a document
 		// with nothing composed into it is byte-identical to one from an app
 		// that composes nothing.
@@ -106,19 +106,19 @@ func (a *App) buildOpenAPI() map[string]any {
 		if _, ok := paths[path]; !ok {
 			paths[path] = map[string]any{}
 		}
-		// opName is the ONE place the id rule lives, shared with the MCP tool
+		// opID is the ONE place the id rule lives, shared with the MCP tool
 		// list, the op-call plane and the Authorizer's Op — so an operation is
 		// addressed by the same token whichever projection you came through.
 		opObj := map[string]any{
-			"operationId": opName(op),
+			"operationId": opID(op.ID, op.Method, op.Path),
 			"summary":     op.Summary,
 		}
-		// Prose and examples extracted from the source by cmd/zipdoc. Absent
-		// when the generator has not run, which degrades to the schema-only
-		// spec rather than failing — a spec without descriptions is still a
-		// usable spec.
-		doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
-		if hasDoc {
+		// Prose and examples the front end lifted from the source: Go's doc pass,
+		// Rust's macro reading #[doc], C++'s pass reading ///. Absent when nothing
+		// read the source, which degrades to the schema-only spec rather than
+		// failing — a spec without descriptions is still a usable spec.
+		doc := op.Doc
+		if doc != nil {
 			if doc.Description != "" {
 				opObj["description"] = doc.Description
 			}
@@ -129,14 +129,15 @@ func (a *App) buildOpenAPI() map[string]any {
 		if len(op.Tags) > 0 {
 			opObj["tags"] = op.Tags
 		}
+		fields := doc.Prose()
 
 		// Request body.
-		if hasRequestBody(op) {
-			media := map[string]any{"schema": schemaOf(op.InType, reg, docFields(hasDoc, doc))}
+		if hasRequestBody(m, op) {
+			media := map[string]any{"schema": schemaOf(m, op.In, reg, fields)}
 			// An example is what makes a spec explorable — it is the difference
 			// between a reference someone reads and one they can press "try it"
 			// on.
-			if hasDoc && len(doc.Example) > 0 {
+			if doc != nil && len(doc.Example) > 0 {
 				media["example"] = json.RawMessage(doc.Example)
 			}
 			opObj["requestBody"] = map[string]any{
@@ -155,16 +156,21 @@ func (a *App) buildOpenAPI() map[string]any {
 		// linked-in one describing the same argument the same way — the
 		// alternative is a spec that silently has nothing to say about an
 		// argument the registry documents fine.
-		fields := docFields(hasDoc, doc)
-		inName := typeName(op.InType)
+		inName := ""
+		if op.In != nil {
+			inName = op.In.Name
+		}
 		// A parameter's example is that field's value in the op's OWN example —
 		// the one the doc comment already wrote, split across the parameters
 		// that carry it. A bodyless op has no requestBody for the example to
 		// live in, and an example that only survives for methods with a body is
 		// an example missing from every GET and DELETE in the document.
-		example := exampleFields(doc.Example)
+		var example map[string]json.RawMessage
+		if doc != nil {
+			example = exampleFields(doc.Example)
+		}
 		// Two keys, because the two lookups are filed under different names. Prose
-		// is filed by the GO FIELD, which is what a doc comment documents; an
+		// is filed by the DECLARED FIELD, which is what a doc comment documents; an
 		// example is a value in the op's own example document, so it is keyed by
 		// the name that value carries on the WIRE. They coincide for most
 		// parameters and do not for a wildcard, whose wire name is fiber's *N.
@@ -183,7 +189,7 @@ func (a *App) buildOpenAPI() map[string]any {
 		// the document reads that one set too — declaring every path param a
 		// string while consulting the input for query params described the same
 		// value two different ways depending on which half of the URL it rode in.
-		url := urlFields(op.InType)
+		url := urlFields(m, op.In)
 		params := pathParams(op.Path)
 		decls := make([]any, 0, len(params))
 		named := make(map[string]bool, len(params))
@@ -197,14 +203,13 @@ func (a *App) buildOpenAPI() map[string]any {
 				"schema": url.paramSchema(p.Key),
 			}, url.docKey(p.Key), p.Key))
 		}
-		// Header parameters. A field carrying `header:"X-Foo"` is a REQUEST FACT
+		// Header parameters. A field carrying a header name is a REQUEST FACT
 		// the op declared, so the document names it — that is what makes reading
 		// a header part of the contract instead of something a middleware does
 		// off to the side where no projection can see it. Declared for every
 		// method, because a header rides a POST as readily as a GET, and excluded
 		// from the query list below so one field is never described twice.
-		hdr := headerFields(op.InType)
-		for _, h := range hdr {
+		for _, h := range headerParams(m, op.In) {
 			named[strings.ToLower(h.field)] = true
 			decls = append(decls, describe(map[string]any{
 				"name": h.header, "in": "header", "required": h.required,
@@ -237,9 +242,9 @@ func (a *App) buildOpenAPI() map[string]any {
 		// reason WithStatus is on the op rather than set per request: a 201 that
 		// only reached the wire would leave every generated client expecting a
 		// 200 the service never sends.
-		if op.OutType != nil && typeName(op.OutType) != "" {
-			respMedia := map[string]any{"schema": schemaOf(op.OutType, reg, docFields(hasDoc, doc))}
-			if hasDoc && len(doc.Response) > 0 {
+		if op.Out != nil && op.Out.Name != "" {
+			respMedia := map[string]any{"schema": schemaOf(m, op.Out, reg, fields)}
+			if doc != nil && len(doc.Response) > 0 {
 				respMedia["example"] = json.RawMessage(doc.Response)
 			}
 			resp := map[string]any{}
@@ -276,13 +281,13 @@ func (a *App) buildOpenAPI() map[string]any {
 		// document must not promise an answer this app would never send. Never
 		// over a 202 the op declared itself, either, which is the op's own meaning
 		// for that code.
-		if op.rule != nil && op.rule() != nil {
+		if op.Held {
 			if resp, ok := opObj["responses"].(map[string]any); ok {
 				if _, taken := resp["202"]; !taken {
 					resp["202"] = map[string]any{
 						"description": "held for approval",
 						"content": map[string]any{
-							"application/json": map[string]any{"schema": schemaOf(approvalType, reg, nil)},
+							"application/json": map[string]any{"schema": schemaOf(zipTypes, approvalType, reg, nil)},
 						},
 					}
 				}
@@ -295,15 +300,25 @@ func (a *App) buildOpenAPI() map[string]any {
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title":       cfg.Title,
-			"description": cfg.Description,
-			"version":     cfg.Version,
+			"title":       title,
+			"description": m.Description,
+			"version":     version,
 		},
 		"paths": paths,
 		"components": map[string]any{
 			"schemas": reg.defs,
 		},
 	}
+}
+
+// opID is an operation's name: the one it declared, or the rule for deriving one
+// from its address. Both the manifest's ops and the registry's read it, so an
+// operation carries one token on every surface.
+func opID(id, method, path string) string {
+	if id != "" {
+		return id
+	}
+	return ID(method, path)
 }
 
 // ID is an operation's name, derived from its method and its ABSOLUTE path.
@@ -437,15 +452,11 @@ func hasBody(method string) bool {
 // path last, so a body that repeated a path param never won anyway. The only
 // thing that changes is what the document, and therefore every client generated
 // from it, believes it has to send.
-func hasRequestBody(op *registeredOp) bool {
-	if !hasBody(op.Method) || typeName(op.InType) == "" {
+func hasRequestBody(m *manifest.App, op manifest.Op) bool {
+	if !hasBody(op.Method) || op.In == nil || op.In.Name == "" {
 		return false
 	}
-	t := op.InType
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
+	if op.In.Kind != manifest.Record {
 		return true // the body IS the whole value — a list, a raw message
 	}
 	named := map[string]bool{}
@@ -453,17 +464,17 @@ func hasRequestBody(op *registeredOp) bool {
 		named[strings.ToLower(p.Name)] = true
 		named[strings.ToLower(p.Key)] = true
 	}
-	// wireFields, not NumField: an embedded struct's fields ARE in the body, and
-	// asking the outer type alone declared no body for an input whose own fields
-	// were all path params — the phantom body's mirror image.
-	for _, f := range wireFields(t) {
-		// A field is in the body when `json:` puts it there, and is already carried
-		// when `url:` binds it to a segment the route matched on. The two tags
+	// Every field the wire carries, which includes those an embedded struct
+	// promotes: asking the outer declaration alone declared no body for an input
+	// whose own fields were all path params — the phantom body's mirror image.
+	for _, f := range m.Fields(op.In) {
+		// A field is in the body when the body names it, and is already carried
+		// when the URL binds it to a segment the route matched on. The two names
 		// answer two questions, so both are asked.
-		if jsonFieldName(f) == "-" {
+		if f.JSON == "-" {
 			continue
 		}
-		if !named[strings.ToLower(urlFieldName(f))] {
+		if !named[strings.ToLower(f.URL)] {
 			return true
 		}
 	}
@@ -497,26 +508,23 @@ type urlField struct {
 // An id is [32]byte and a time is a struct, and each is one word in the URL and
 // the same word in the JSON body beside it; schemaOf describes what a value is
 // MADE of, which for these is not what it looks like.
-func urlSchema(t reflect.Type) map[string]any {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
+func urlSchema(m *manifest.App, t *manifest.Type) map[string]any {
+	if t == nil {
+		return nil
 	}
-	if readsText(t) {
+	if t.Text {
 		return map[string]any{"type": "string"}
 	}
-	switch t.Kind() {
-	case reflect.String, reflect.Bool,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return schemaOf(t, nil, nil)
-	case reflect.Slice:
+	switch t.Kind {
+	case manifest.String, manifest.Bool, manifest.Int, manifest.Uint, manifest.Float:
+		return schemaOf(m, t, nil, nil)
+	case manifest.List:
 		// A []byte with no written form of its own is one base64 string, which
 		// the binder does not split and cannot read — so nothing is published.
-		if t.Elem().Kind() == reflect.Uint8 {
+		if t.Elem != nil && t.Elem.Kind == manifest.Uint && t.Elem.Format == "uint8" {
 			return nil
 		}
-		if item := urlSchema(t.Elem()); item != nil {
+		if item := urlSchema(m, t.Elem); item != nil {
 			return map[string]any{"type": "array", "items": item}
 		}
 	}
@@ -529,9 +537,9 @@ func urlSchema(t reflect.Type) map[string]any {
 // are the same kind of value, so the document describes them from the same
 // place. What the binder cannot fill is omitted, because naming it would
 // promise a parameter that silently does nothing.
-func urlFields(t reflect.Type) urlFieldList {
+func urlFields(m *manifest.App, t *manifest.Type) urlFieldList {
 	var out urlFieldList
-	collectURLFields(t, "", map[reflect.Type]bool{}, &out)
+	collectURLFields(m, t, "", map[string]bool{}, &out)
 	return out
 }
 
@@ -539,53 +547,44 @@ func urlFields(t reflect.Type) urlFieldList {
 // t itself. A struct is that, unless it has a written form of its own — a time
 // and an id are one word in a URL, not a pair of braces — in which case
 // [urlSchema] already describes it and there is nothing to reach inside.
-func urlRecord(t reflect.Type) bool {
-	for t != nil && t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	return t != nil && t.Kind() == reflect.Struct && !readsText(t) && !isMarshaler(t)
+func urlRecord(t *manifest.Type) bool {
+	return t != nil && t.Kind == manifest.Record && !t.Text && !t.States
 }
 
 // collectURLFields appends t's URL-borne leaves, naming a record's own leaves
 // through it. inside is the record already being walked, so a self-referential
 // input names its leaves once rather than forever: the binder stops at the keys
 // a caller actually wrote, and a document walk has no keys to stop at.
-func collectURLFields(t reflect.Type, prefix string, inside map[reflect.Type]bool, out *urlFieldList) {
-	if t == nil {
+func collectURLFields(m *manifest.App, t *manifest.Type, prefix string, inside map[string]bool, out *urlFieldList) {
+	if t == nil || t.Kind != manifest.Record || inside[t.Ref] {
 		return
 	}
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct || inside[t] {
-		return
-	}
-	inside[t] = true
-	defer delete(inside, t)
-	for _, f := range wireFields(t) {
-		name := urlFieldName(f)
+	inside[t.Ref] = true
+	defer delete(inside, t.Ref)
+	for _, f := range m.Fields(t) {
+		name := f.URL
 		if name == "-" {
 			continue // on the wire, but not in the URL.
 		}
 		name = prefix + name
-		if urlRecord(f.Type) {
-			collectURLFields(f.Type, name+".", inside, out)
+		if urlRecord(&f.Type) {
+			collectURLFields(m, &f.Type, name+".", inside, out)
 			continue
 		}
-		schema := urlSchema(f.Type)
+		schema := urlSchema(m, &f.Type)
 		if schema == nil {
 			continue // on the wire, but not something a URL carries.
 		}
 		*out = append(*out, urlField{
 			name:   name,
-			field:  jsonFieldName(f),
+			field:  f.JSON,
 			schema: schema,
-			// The same `validate:"required"` that makes a body field required in
-			// its schema makes a URL-borne one required in its parameter. The
-			// handler refuses the request either way; a document that called it
-			// optional was describing a call that cannot succeed, and every
-			// generated client made the argument optional to match.
-			required: strings.Contains(f.Tag.Get("validate"), "required"),
+			// The same requirement that makes a body field required in its schema
+			// makes a URL-borne one required in its parameter. The handler refuses
+			// the request either way; a document that called it optional was
+			// describing a call that cannot succeed, and every generated client
+			// made the argument optional to match.
+			required: f.Required,
 		})
 	}
 }
@@ -719,9 +718,9 @@ const (
 // definitions live; the derivation that fills them is the same one either way.
 type schemaRegistry struct {
 	prefix string
-	defs   map[string]any          // name → definition
-	names  map[reflect.Type]string // type → the name it is defined under
-	refs   map[string]int          // name → how many $refs point at it
+	defs   map[string]any    // name → definition
+	names  map[string]string // the manifest's struct key → the name it is defined under
+	refs   map[string]int    // name → how many $refs point at it
 
 	// origin is the app that DECLARED the op currently being described, when
 	// that op arrived through composition — empty for the host's own. It
@@ -737,7 +736,7 @@ func newSchemaRegistry(prefix string) *schemaRegistry {
 	return &schemaRegistry{
 		prefix: prefix,
 		defs:   map[string]any{},
-		names:  map[reflect.Type]string{},
+		names:  map[string]string{},
 		refs:   map[string]int{},
 	}
 }
@@ -745,15 +744,15 @@ func newSchemaRegistry(prefix string) *schemaRegistry {
 // define describes t in the registry, if it is not there already, and returns
 // the name it is described under. The entry is claimed before the fields are
 // walked: whatever the walk reaches — including t itself — finds it.
-func (r *schemaRegistry) define(t reflect.Type, fields map[string]string) string {
-	if name, ok := r.names[t]; ok {
+func (r *schemaRegistry) define(m *manifest.App, t *manifest.Type, fields map[string]string) string {
+	if name, ok := r.names[t.Ref]; ok {
 		return name
 	}
 	name := r.nameFor(t)
 	def := map[string]any{}
-	r.names[t] = name
+	r.names[t.Ref] = name
 	r.defs[name] = def
-	structSchema(def, t, r, fields)
+	structSchema(m, def, t, r, fields)
 	return name
 }
 
@@ -769,7 +768,7 @@ func (r *schemaRegistry) define(t reflect.Type, fields map[string]string) string
 // room: add a schema to one app and another app's type silently renames, which
 // renames a method's argument type in every generated SDK. One rule, one extra
 // input — not a second naming scheme.
-func (r *schemaRegistry) nameFor(t reflect.Type) string {
+func (r *schemaRegistry) nameFor(t *manifest.Type) string {
 	// Qualifiers, outermost first: the app that DECLARED the type — always,
 	// when it came in through composition — then its package, only when a different type
 	// already holds the name, then an ordinal, only when even that collides.
@@ -777,12 +776,12 @@ func (r *schemaRegistry) nameFor(t reflect.Type) string {
 	if r.origin != "" {
 		qual = r.origin + "."
 	}
-	base := qual + typeName(t)
+	base := qual + t.Name
 	if _, taken := r.defs[base]; !taken {
 		return base
 	}
-	if p := t.PkgPath(); p != "" {
-		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + typeName(t)
+	if p := t.Pkg; p != "" {
+		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + t.Name
 	}
 	for name, n := base, 2; ; n++ {
 		if _, taken := r.defs[name]; !taken {
@@ -808,78 +807,63 @@ func (r *schemaRegistry) ref(name string) map[string]any {
 // reg may be nil, which describes a struct by its shape without expanding it: a
 // caller that only needs to know WHAT a value is — the CLI asking a field's flag
 // kind — has nowhere to put a definition and no use for one.
-func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map[string]any {
+func schemaOf(m *manifest.App, t *manifest.Type, reg *schemaRegistry, fields map[string]string) map[string]any {
 	if t == nil {
 		return map[string]any{"type": "object"}
 	}
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	// A type that states its own wire form — MarshalJSON — is not described by
-	// what it is made of, and this is read FIRST because the rule is about the
-	// MARSHALER, not about being a struct. json.RawMessage is the case that
-	// mattered: a []byte whose MarshalJSON emits raw JSON. Below the slice rule
-	// it was published as an array of integers; under a struct-only check it
-	// would still be. A relay whose answer is frequently an array or null was
-	// asserted to be an object in openapi.yaml and in every SDK built from it.
-	if isMarshaler(t) {
-		// A type that writes its own JSON may also STATE its own shape. That is
-		// the same fact twice — the bytes and the schema both belong to the
-		// type — so it is declared once, next to MarshalJSON, rather than
-		// guessed here or listed in a table this package would have to keep.
-		if s := declaredSchema(t); s != nil {
-			return s
+	// A type that states its own wire form is not described by what it is made
+	// of, and this is read FIRST because the rule is about the STATEMENT, not
+	// about being a struct. json.RawMessage is the case that mattered: a []byte
+	// whose JSON is raw JSON. Below the slice rule it was published as an array
+	// of integers; under a struct-only check it would still be. A relay whose
+	// answer is frequently an array or null was asserted to be an object in
+	// openapi.yaml and in every SDK built from it.
+	if t.States {
+		if len(t.Schema) > 0 {
+			return maps.Clone(t.Schema)
 		}
-		if t == timeType {
-			// The one marshaler whose output shape is DOCUMENTED: RFC 3339,
-			// which OpenAPI spells `format: date-time`. Its fields are all
-			// unexported, so describing it by them published `{}` properties for
-			// every timestamp in the fleet — an object where a string goes.
-			return map[string]any{"type": "string", "format": "date-time"}
-		}
-		// Otherwise: any JSON. Unconstrained is not undocumented — the field's
-		// prose still lands on it — and it is the only true thing to say.
+		// Any JSON. Unconstrained is not undocumented — the field's prose still
+		// lands on it — and it is the only true thing to say.
 		return map[string]any{}
 	}
-	switch t.Kind() {
-	case reflect.String:
+	switch t.Kind {
+	case manifest.String:
 		return map[string]any{"type": "string"}
-	case reflect.Bool:
+	case manifest.Bool:
 		return map[string]any{"type": "boolean"}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return map[string]any{"type": "integer", "format": numberFormat(t.Kind())}
-	case reflect.Float32, reflect.Float64:
-		return map[string]any{"type": "number", "format": numberFormat(t.Kind())}
-	case reflect.Slice, reflect.Array:
-		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
-			// encoding/json writes a byte SLICE as a base64 string, not as an
-			// array of numbers — and a byte ARRAY as the numbers, which is why
-			// this is not both kinds. A named []byte that means something else
-			// says so with MarshalJSON, and is caught above.
+	case manifest.Int, manifest.Uint:
+		return map[string]any{"type": "integer", "format": t.Format}
+	case manifest.Float:
+		return map[string]any{"type": "number", "format": t.Format}
+	case manifest.List, manifest.Fixed:
+		if t.Kind == manifest.List && t.Elem != nil && t.Elem.Kind == manifest.Uint && t.Elem.Format == "uint8" {
+			// A byte SLICE is written as a base64 string, not as an array of
+			// numbers — and a byte ARRAY as the numbers, which is why this is not
+			// both kinds. A named []byte that means something else states its own
+			// wire form, and is caught above.
 			return map[string]any{"type": "string", "contentEncoding": "base64"}
 		}
 		return map[string]any{
 			"type":  "array",
-			"items": schemaOf(t.Elem(), reg, fields),
+			"items": schemaOf(m, t.Elem, reg, fields),
 		}
-	case reflect.Map:
+	case manifest.Table:
 		return map[string]any{
 			"type":                 "object",
-			"additionalProperties": schemaOf(t.Elem(), reg, fields),
+			"additionalProperties": schemaOf(m, t.Elem, reg, fields),
 		}
-	case reflect.Struct:
+	case manifest.Record:
 		if reg == nil {
 			return map[string]any{"type": "object"}
 		}
-		if typeName(t) == "" {
+		if t.Name == "" {
 			// Anonymous: nothing to name a definition after — and nothing that
-			// can name it, so Go cannot spell a recursive one either.
+			// can name it, so no declaration can spell a recursive one either.
 			out := map[string]any{}
-			structSchema(out, t, reg, fields)
+			structSchema(m, out, t, reg, fields)
 			return out
 		}
-		return reg.ref(reg.define(t, fields))
+		return reg.ref(reg.define(m, t, fields))
 	}
 	return map[string]any{"type": "object"}
 }
@@ -924,21 +908,20 @@ func numberFormat(k reflect.Kind) string {
 // structSchema fills in one struct's object schema. It is separate from schemaOf
 // because a definition is claimed in the registry before it is filled — that
 // claim is the cycle guard, and it needs the map to exist first.
-func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fields map[string]string) {
+func structSchema(m *manifest.App, into map[string]any, t *manifest.Type, reg *schemaRegistry, fields map[string]string) {
 	props := map[string]any{}
 	var required []string
-	for _, f := range wireFields(t) {
-		name := jsonFieldName(f)
-		if name == "-" {
+	for _, f := range m.Fields(t) {
+		if f.JSON == "-" {
 			continue // exists, but the body does not carry it.
 		}
-		fs := schemaOf(f.Type, reg, fields)
-		if d := fields[typeName(t)+"."+name]; d != "" {
+		fs := schemaOf(m, &f.Type, reg, fields)
+		if d := fields[t.Name+"."+f.JSON]; d != "" {
 			fs["description"] = d
 		}
-		props[name] = fs
-		if tag := f.Tag.Get("validate"); strings.Contains(tag, "required") {
-			required = append(required, name)
+		props[f.JSON] = fs
+		if f.Required {
+			required = append(required, f.JSON)
 		}
 	}
 	into["type"] = "object"
@@ -954,9 +937,9 @@ func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fiel
 // value is self-contained wherever it is sent. What it describes is the same
 // definition the OpenAPI document carries, which is the point: one type, one
 // schema, whichever projection you read it from.
-func rootSchemaOf(t reflect.Type, fields map[string]string) map[string]any {
+func rootSchemaOf(m *manifest.App, t *manifest.Type, fields map[string]string) map[string]any {
 	reg := newSchemaRegistry(selfDefs)
-	root := schemaOf(t, reg, fields)
+	root := schemaOf(m, t, reg, fields)
 	ref, isRef := root["$ref"].(string)
 	if !isRef {
 		return root // already inline: a scalar, a slice, an anonymous struct
@@ -1272,14 +1255,13 @@ func (a *App) OpenAPISpec() map[string]any { return a.buildOpenAPI() }
 // document says both; publishing one would leave a generated client with no
 // branch for the other, which is precisely the hole a per-request status slot
 // left open.
-func declaredStatuses(op *registeredOp, dflt int) []int {
+func declaredStatuses(op manifest.Op, dflt int) []int {
 	if len(op.Statuses) == 0 {
 		return []int{dflt}
 	}
 	return op.Statuses
 }
-
-func primaryStatus(op *registeredOp) int {
+func primaryStatus(op manifest.Op) int {
 	if len(op.Statuses) == 0 {
 		return 0
 	}
@@ -1299,27 +1281,17 @@ type headerField struct {
 // same wireFields the decoder does, so a promoted field of an embedded struct
 // declares its header exactly as an own field would — the document and the
 // binder cannot disagree about which fields exist.
-func headerFields(t reflect.Type) []headerField {
-	if t == nil {
-		return nil
-	}
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		return nil
-	}
+func headerParams(m *manifest.App, t *manifest.Type) []headerField {
 	var out []headerField
-	for _, f := range wireFields(t) {
-		name := headerFieldName(f)
-		if name == "" {
+	for _, f := range m.Fields(t) {
+		if f.Header == "" {
 			continue
 		}
 		out = append(out, headerField{
-			header:   name,
-			field:    jsonFieldName(f),
-			required: strings.Contains(f.Tag.Get("validate"), "required"),
-			schema:   schemaOf(f.Type, nil, nil),
+			header:   f.Header,
+			field:    f.JSON,
+			required: f.Required,
+			schema:   schemaOf(m, &f.Type, nil, nil),
 		})
 	}
 	return out
@@ -1332,12 +1304,12 @@ func headerFields(t reflect.Type) []headerField {
 // a Set-Cookie — is part of the contract, so the document names it. Without this
 // the header would be set on the wire and described nowhere, which is the same
 // invisibility that made a context slot the wrong home for it.
-func responseHeaderSchemas(op *registeredOp) map[string]any {
-	if len(op.ResponseHeaders) == 0 {
+func responseHeaderSchemas(op manifest.Op) map[string]any {
+	if len(op.Headers) == 0 {
 		return nil
 	}
-	out := make(map[string]any, len(op.ResponseHeaders))
-	for _, name := range op.ResponseHeaders {
+	out := make(map[string]any, len(op.Headers))
+	for _, name := range op.Headers {
 		out[name] = map[string]any{
 			"description": "Set by " + op.Method + " " + op.Path + ".",
 			"schema":      map[string]any{"type": "string"},

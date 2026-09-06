@@ -53,7 +53,8 @@ func TestDeclaredSchemaBeatsTheEmptyObject(t *testing.T) {
 		{"time.Time keeps the shape it already had", reflect.TypeOf(time.Time{}),
 			map[string]any{"type": "string", "format": "date-time"}},
 	} {
-		got := schemaOf(tc.in, nil, nil)
+		m, ty := describeType(tc.in)
+		got := schemaOf(m, ty, nil, nil)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
 		}
@@ -64,9 +65,10 @@ func TestDeclaredSchemaBeatsTheEmptyObject(t *testing.T) {
 // map the document then edits — one field's constraints would leak into every
 // other field of the same type.
 func TestTheTypesAnswerIsNotShared(t *testing.T) {
-	a := schemaOf(reflect.TypeOf(quoted(0)), nil, nil)
+	qm, qt := describeType(reflect.TypeOf(quoted(0)))
+	a := schemaOf(qm, qt, nil, nil)
 	a["description"] = "the first field"
-	b := schemaOf(reflect.TypeOf(quoted(0)), nil, nil)
+	b := schemaOf(qm, qt, nil, nil)
 	if _, leaked := b["description"]; leaked {
 		t.Fatal("editing one field's schema changed the next one")
 	}
@@ -78,7 +80,8 @@ func TestAReplyFieldIsDescribed(t *testing.T) {
 	type reply struct {
 		Height quoted `json:"height"`
 	}
-	got := rootSchemaOf(reflect.TypeOf(reply{}), nil)
+	m, ty := describeType(reflect.TypeOf(reply{}))
+	got := rootSchemaOf(m, ty, nil)
 	props, _ := got["properties"].(map[string]any)
 	h, _ := props["height"].(map[string]any)
 	if h["type"] != "string" {

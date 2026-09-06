@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"github.com/zap-proto/zip/internal/jsonenc"
 	"io"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/valyala/fasthttp"
+	"github.com/zap-proto/zip/manifest"
 )
 
 // CLI — the FOURTH projection. The same typed-op registry (a.registry) that produces
@@ -109,13 +109,19 @@ type Flag struct {
 // Commands projects every registered typed op into a command. This is the whole
 // derivation: no registration, no list of commands, no per-endpoint code.
 func (a *App) Commands() []Command {
-	ops := a.Registry()
-	cmds := make([]Command, 0, len(ops))
-	for _, op := range ops {
-		doc, has := docFor(op.Pkg, op.Method, op.Path)
-		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
-		c.op = op
-		c.Args, c.Flags = bindIn(op.InType, pathParams(op.Path), docFields(has, doc), hasBody(op.Method))
+	m := a.Manifest()
+	// What each command RUNS, which is the one thing a manifest cannot carry: a
+	// handler is code, and the address is what names it. Keyed on the address
+	// because that is what the router already holds unique.
+	run := make(map[string]*registeredOp, len(m.Ops))
+	for _, op := range a.Registry() {
+		run[op.Method+" "+op.Path] = op
+	}
+	cmds := make([]Command, 0, len(m.Ops))
+	for _, op := range m.Ops {
+		c := newCommand(op.Method, op.Path, opID(op.ID, op.Method, op.Path), op.Summary, op.Doc)
+		c.op = run[op.Method+" "+op.Path]
+		c.Args, c.Flags = bindIn(m, op)
 		cmds = append(cmds, c)
 	}
 	sortCommands(cmds)
@@ -124,10 +130,10 @@ func (a *App) Commands() []Command {
 
 // newCommand fills in everything that comes from the op's identity and its doc,
 // which is the half both derivations share.
-func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
+func newCommand(method, path, id, summary string, doc *manifest.Doc) Command {
 	svc, name := commandName(method, path, id)
 	c := Command{Service: svc, Name: name, OperationID: id, Summary: summary, Method: method, Path: path}
-	if has {
+	if doc != nil {
 		c.Description = doc.Description
 		c.Example = doc.Example
 		if c.Summary == "" {
@@ -147,21 +153,21 @@ func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
 // list the document reads. Offering the rest would offer flags the wire cannot
 // carry: a `--tags '["a"]'` on a DELETE marshalled fine, went out as a query
 // value, and was dropped by the binder, so the command silently did nothing.
-func bindIn(in reflect.Type, params []pathParam, fieldDocs map[string]string, body bool) ([]Arg, []Flag) {
+func bindIn(m *manifest.App, op manifest.Op) ([]Arg, []Flag) {
+	params := pathParams(op.Path)
+	fieldDocs := op.Doc.Prose()
+	in := op.In
+	name := ""
+	if in != nil {
+		name = in.Name
+	}
 	args := make([]Arg, 0, len(params))
 	for _, p := range params {
 		// The argument a person types is the DOCUMENT's name: a wildcard's router
 		// key is *1, which is not something to ask anyone to write.
-		args = append(args, Arg{Name: p.Name, Help: fieldDocs[typeName(in)+"."+p.Name]})
+		args = append(args, Arg{Name: p.Name, Help: fieldDocs[name+"."+p.Name]})
 	}
-	if in == nil {
-		return args, nil
-	}
-	t := in
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
+	if in == nil || in.Kind != manifest.Record {
 		return args, nil
 	}
 	var flags []Flag
@@ -170,35 +176,36 @@ func bindIn(in reflect.Type, params []pathParam, fieldDocs map[string]string, bo
 	// is not always the field's JSON name: a body field tagged `url:"-"` shares
 	// its name with a path param on purpose (the worker's source vs its name), and
 	// offering no flag for it left the command unable to send the body at all.
-	add := func(name, url, kind string, required bool) {
-		if name == "-" || isParam(params, url) {
+	add := func(field, url, kind string, required bool) {
+		if field == "-" || isParam(params, url) {
 			return
 		}
 		flags = append(flags, Flag{
-			Name:     kebab(name),
-			Field:    name,
+			Name:     kebab(field),
+			Field:    field,
 			Type:     kind,
-			Help:     fieldDocs[t.Name()+"."+name],
+			Help:     fieldDocs[name+"."+field],
 			Required: required,
 		})
 	}
-	if body {
-		// wireFields, so an embedded body type's promoted fields get flags. Reading
-		// only the outer type left a command unable to send them at all.
-		for _, f := range wireFields(t) {
-			add(jsonFieldName(f), urlFieldName(f), flagType(f.Type), strings.Contains(f.Tag.Get("validate"), "required"))
+	if hasBody(op.Method) {
+		// Every field the wire carries, so an embedded body type's promoted
+		// fields get flags. Reading only the outer declaration left a command
+		// unable to send them at all.
+		for _, f := range m.Fields(in) {
+			add(f.JSON, f.URL, flagType(m, &f.Type), f.Required)
 		}
 	} else {
-		for _, f := range urlFields(t) {
+		for _, f := range urlFields(m, in) {
 			kind, _ := f.schema["type"].(string)
 			add(f.name, f.name, specType(kind), f.required)
 		}
 	}
-	// The args' help lives under the field's own json name, which is what the
+	// The args' help lives under the field's own wire name, which is what the
 	// extraction keyed it by; look it up now that the type is in hand.
 	for i, a := range args {
 		if a.Help == "" {
-			args[i].Help = fieldDocs[t.Name()+"."+a.Name]
+			args[i].Help = fieldDocs[name+"."+a.Name]
 		}
 	}
 	return args, flags
@@ -225,8 +232,8 @@ func isParam(params []pathParam, name string) bool {
 // already encodes. No registry is passed because none is needed — the kind of a
 // struct is "object" whatever its fields are, and expanding them here would
 // build a definition with nowhere to live.
-func flagType(t reflect.Type) string {
-	kind, _ := schemaOf(t, nil, nil)["type"].(string)
+func flagType(m *manifest.App, t *manifest.Type) string {
+	kind, _ := schemaOf(m, t, nil, nil)["type"].(string)
 	return specType(kind)
 }
 

@@ -13,6 +13,7 @@ import (
 	zapmcp "github.com/zap-proto/mcp"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
+	"github.com/zap-proto/zip/manifest"
 )
 
 // MCP — the THIRD projection. The same typed-op registry (a.registry) that produces
@@ -248,9 +249,9 @@ type mcpTool struct {
 // per-caller half has to know what the build-time half already claims and reading
 // that back out of the bytes would re-parse hundreds of schemas per request.
 func (a *App) composeTools() (json.RawMessage, map[string]bool) {
-	own := a.Registry()
+	own := a.Manifest()
 	pluginTools := a.tools()
-	all := make([]mcpTool, 0, len(own)+len(pluginTools))
+	all := make([]mcpTool, 0, len(own.Ops)+len(pluginTools))
 	// The undeclared routes, read from the plan.
 	//
 	// NOT from Declaration(): that calls prepare(), and prepare is what installs
@@ -263,7 +264,7 @@ func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 			hidden[r.method+" "+o.abs(r.path)] = true
 		}
 	}
-	for _, op := range own {
+	for _, op := range own.Ops {
 		// An op kept out of the contract is kept out of the tool list.
 		//
 		// [Undeclared] promises exactly this — "and so in none of the
@@ -280,12 +281,13 @@ func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 		if hidden[op.Method+" "+op.Path] {
 			continue
 		}
-		b, err := json.Marshal(mcpToolOf(op))
+		id := opID(op.ID, op.Method, op.Path)
+		b, err := json.Marshal(mcpToolOf(own, op))
 		if err != nil {
-			a.logger.Warn("zip mcp: op has no renderable schema", "op", opName(op), "err", err)
+			a.logger.Warn("zip mcp: op has no renderable schema", "op", id, "err", err)
 			continue
 		}
-		all = append(all, mcpTool{name: opName(op), raw: b})
+		all = append(all, mcpTool{name: id, raw: b})
 	}
 	all = append(all, pluginTools...)
 	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
@@ -612,10 +614,10 @@ func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
 // build-time catalogue — and an artifact ordered by registration churns on an
 // edit that changed nothing a client can see.
 func (a *App) mcpTools() []map[string]any {
-	reg := a.Registry()
-	tools := make([]map[string]any, 0, len(reg))
-	for _, op := range reg {
-		tools = append(tools, mcpToolOf(op))
+	m := a.Manifest()
+	tools := make([]map[string]any, 0, len(m.Ops))
+	for _, op := range m.Ops {
+		tools = append(tools, mcpToolOf(m, op))
 	}
 	sort.Slice(tools, func(i, j int) bool {
 		return tools[i]["name"].(string) < tools[j]["name"].(string)
@@ -626,16 +628,15 @@ func (a *App) mcpTools() []map[string]any {
 // mcpToolOf is the ONE op→tool descriptor. Both the in-process projection
 // (MCPTools) and the composed list read it, so a host's catalogue and a plugin's
 // own /mcp can never describe one op two ways.
-func mcpToolOf(op *registeredOp) map[string]any {
-	doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
+func mcpToolOf(m *manifest.App, op manifest.Op) map[string]any {
 	desc := op.Summary
-	if hasDoc && doc.Description != "" {
-		desc = doc.Description
+	if op.Doc != nil && op.Doc.Description != "" {
+		desc = op.Doc.Description
 	}
 	return map[string]any{
-		"name":        opName(op),
+		"name":        opID(op.ID, op.Method, op.Path),
 		"description": desc,
-		"inputSchema": rootSchemaOf(op.InType, docFields(hasDoc, doc)),
+		"inputSchema": rootSchemaOf(m, op.In, op.Doc.Prose()),
 		// readOnlyHint is derived from the METHOD, because that is where the
 		// answer already lives: a GET op is a read by construction, and no op can
 		// be annotated inconsistently with the route it IS.
@@ -661,7 +662,7 @@ func mcpToolOf(op *registeredOp) map[string]any {
 // that treats it as a mutation is wrong in the only direction that costs a
 // prompt. Everything else — POST, PUT, PATCH, DELETE — is left unsaid rather
 // than asserted safe, so an unknown or custom method fails toward caution.
-func mcpAnnotationsOf(op *registeredOp) map[string]any {
+func mcpAnnotationsOf(op manifest.Op) map[string]any {
 	switch op.Method {
 	case http.MethodGet, http.MethodHead:
 		return map[string]any{"readOnlyHint": true}
@@ -816,13 +817,10 @@ func (a *App) opByName(name string) *registeredOp {
 	return nil
 }
 
-// opName is the stable tool/operation id: the explicit OperationID, else the
-// method+path default (shared with OpenAPI so the two surfaces agree).
+// opName is a registered op's stable tool/operation id — [opID] asked of the
+// registry, which is the plane that holds the handler to run.
 func opName(op *registeredOp) string {
-	if op.OperationID != "" {
-		return op.OperationID
-	}
-	return ID(op.Method, op.Path)
+	return opID(op.OperationID, op.Method, op.Path)
 }
 
 // serveMCP brings the ZAP-native MCP listener up when this process owns an

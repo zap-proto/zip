@@ -408,7 +408,7 @@ func bindFields(v reflect.Value, prefix string, values map[string]string) bool {
 		if !fv.CanSet() {
 			continue
 		}
-		if urlRecord(fv.Type()) {
+		if bindsThrough(fv.Type()) {
 			bound = bindRecord(fv, name+".", values) || bound
 			continue
 		}
@@ -616,7 +616,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	for _, o := range opts {
 		o(op)
 	}
-	op.readsHeaders = len(headerFields(op.InType)) > 0
+	op.readsHeaders = readsHeaders(op.InType)
 	op.rule = app.rule
 
 	// The op's stable identity, resolved once (after opts) and handed to the
@@ -782,4 +782,37 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// about what exists — which is what makes composition a walk rather than a
 	// merge of a router and a registry that were written separately.
 	app.addRoute(here(2), route{method: method, path: path, serve: handler, op: op})
+}
+
+// bindsThrough reports whether a URL names t's LEAVES through it rather than
+// carrying t itself — a struct, unless it has a written form of its own, since a
+// time and an id are one word in a URL and not a pair of braces.
+//
+// It is the binder's plane of the question [urlRecord] answers for the document.
+// They cannot disagree: the manifest the document reads carries Text and States
+// because THESE are the facts that decide it, derived from this same type.
+func bindsThrough(t reflect.Type) bool {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t != nil && t.Kind() == reflect.Struct && !readsText(t) && !isMarshaler(t)
+}
+
+// readsHeaders reports whether an input declares any header-bound field, asked
+// ONCE at registration: without it every request would walk the input by
+// reflection to discover that it declares none, which is the answer for almost
+// every op.
+func readsHeaders(t reflect.Type) bool {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return false
+	}
+	for _, f := range wireFields(t) {
+		if headerFieldName(f) != "" {
+			return true
+		}
+	}
+	return false
 }

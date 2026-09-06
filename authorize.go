@@ -114,7 +114,10 @@ func (d Decision) refusal() error {
 
 // approvalType is the type the OpenAPI projection publishes for the 202, so a
 // gated service documents the held body beside every op's success response.
-var approvalType = reflect.TypeOf(Approval{})
+// zipTypes is the manifest it is described in: its own, because Approval is
+// zip's type and not the app's — every app's document publishes the same held
+// body, in whatever language the app was written.
+var zipTypes, approvalType = describeType(reflect.TypeOf(Approval{}))
 
 // Authorizer authorizes a decoded, validated typed request at the op-invoke
 // seam — the ONE point every projection of a typed handler funnels through. It
