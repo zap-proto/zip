@@ -41,21 +41,32 @@ import (
 // SDL and not a Go type graph, because SDL is what every GraphQL client, code
 // generator and editor already reads. The document is the artifact; publishing
 // it is what makes the projection usable by anything that is not this process.
-func (a *App) GraphQLSDL() string {
+//
+// It is [ProjectGraphQL] over this app's [Manifest], as the document, the tool
+// list and the command tree are over theirs: one derivation, so a schema for a
+// service declared in Rust and a schema for one declared in Go are the same
+// program's answer and cannot drift. What follows it is that derivation done
+// again from the Go types, kept for the test that compares them.
+func (a *App) GraphQLSDL() string { return ProjectGraphQL(a.Manifest()) }
+
+// graphQLByReflection is the schema derived straight from the Go types. It is
+// the ORACLE for the one above and has no other caller; see [OpenAPIByReflection].
+func (a *App) graphQLByReflection() string {
 	ops := a.Registry()
-	sort.Slice(ops, func(i, j int) bool { return ops[i].OperationID < ops[j].OperationID })
+	sort.Slice(ops, func(i, j int) bool { return opName(ops[i]) < opName(ops[j]) })
 
 	g := &sdl{types: map[string]string{}, building: map[string]bool{}}
 	var query, mutation []string
 	for _, op := range ops {
-		if op.OperationID == "" {
-			// An op with no id has no name to be called by. It is reachable over
-			// REST by its path, which GraphQL has no equivalent of, so it is
-			// absent here rather than given an invented name that would change
-			// the first time the path did.
-			continue
-		}
-		f := g.field(op)
+		// [opName] and not op.OperationID: an id a handler did not spell is
+		// still an id, derived by [ID] from the method and the path, and it is
+		// the token the document, the tool list, the command line and the call
+		// plane all use. Reading the raw field here made this the one projection
+		// that disagreed, and since almost no service names every op by hand,
+		// what it disagreed into was an EMPTY schema — `type Query {}` omitted
+		// for want of fourteen fields that were all there. Every test it had
+		// passed, because every one of them named its ops.
+		f := g.field(op, opName(op), a.summaryOf(op))
 		if op.Method == "GET" {
 			query = append(query, f)
 			continue
@@ -78,6 +89,21 @@ func (a *App) GraphQLSDL() string {
 		b.WriteString(g.types[n])
 	}
 	return b.String()
+}
+
+// summaryOf is the one line an op says about itself: what it declared, or the
+// first sentence of its doc comment. It is the rule the document and the tool
+// list apply, read here too rather than a second time — a projection that only
+// printed an explicit summary printed nothing for every op whose prose was
+// written where prose belongs, above the handler.
+func (a *App) summaryOf(op *registeredOp) string {
+	if op.Summary != "" {
+		return op.Summary
+	}
+	if doc, ok := docFor(op.Pkg, op.Method, op.Path); ok {
+		return firstSentence(doc.Description)
+	}
+	return ""
 }
 
 // writeBlock emits one root type, or nothing when it has no fields. An empty
@@ -103,12 +129,12 @@ type sdl struct {
 	building map[string]bool
 }
 
-func (g *sdl) field(op *registeredOp) string {
+func (g *sdl) field(op *registeredOp, id, summary string) string {
 	var b strings.Builder
-	if op.Summary != "" {
-		b.WriteString(`"""` + op.Summary + `""" `)
+	if summary != "" {
+		b.WriteString(`"""` + summary + `""" `)
 	}
-	b.WriteString(gqlName(op.OperationID))
+	b.WriteString(gqlName(id))
 	if args := g.args(op.InType); args != "" {
 		b.WriteString("(" + args + ")")
 	}

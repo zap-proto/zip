@@ -70,6 +70,13 @@ func TestGoAndRustProjectOneCommandTree(t *testing.T) {
 	}
 }
 
+func TestGoAndRustProjectOneGraphSchema(t *testing.T) {
+	want := corpus().GraphQLSDL()
+	if got := string(rustSide(t, "graph.sdl")); got != want {
+		t.Errorf("the two front ends publish different schemas\n--- go\n%s\n--- rust\n%s", want, got)
+	}
+}
+
 // The ZAP schemas agree about the CONTRACT — the structs, their field types,
 // their offsets and the interface — and differ in two places that are facts
 // about the language and not about the operation: a field's identifier follows

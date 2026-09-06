@@ -6,7 +6,8 @@
 //
 // It reads a [zip.Manifest] — one JSON document, or a directory of the
 // fragments a front end writes as it compiles — and writes the OpenAPI
-// document, the MCP tool list, the CLI command tree and the ZAP IDL. Nothing it
+// document, the MCP tool list, the CLI command tree, the GraphQL schema and
+// the ZAP IDL. Nothing it
 // reads is Go and nothing it writes is Go, so the language that DECLARED the
 // ops is the language it was declared in and no other:
 //
@@ -83,6 +84,7 @@ func run(in, out, pkg string) error {
 	if files["cli.json"], err = pretty(zip.ProjectCLI(m)); err != nil {
 		return err
 	}
+	files["graph.sdl"] = []byte(zip.ProjectGraphQL(m))
 	files[pkg+".zap"] = []byte(zip.ProjectZAP(pkg, m).String())
 
 	names := make([]string, 0, len(files))

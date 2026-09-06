@@ -154,3 +154,29 @@ func section(s, head string) string {
 	}
 	return rest
 }
+
+// An app whose ops carry no explicit id still has a schema.
+//
+// This is the case that was missing: the projection read op.OperationID rather
+// than the id every other projection uses, so a service that named none of its
+// ops — which is nearly all of them, because a derived id is the point — got
+// `type Query {}` omitted entirely and a schema with nothing in it. Every test
+// here passed, because every one of them named its ops.
+func TestOpsWithNoDeclaredIDStillHaveFields(t *testing.T) {
+	app := New(Config{AppName: "svc", DisableStartupMessage: true})
+	Get(app, "/v1/users/:id", func(ctx context.Context, _ *gqlGetIn) (*gqlUser, error) {
+		return &gqlUser{}, nil
+	})
+	Post(app, "/v1/users", func(ctx context.Context, _ *gqlMakeIn) (*gqlUser, error) {
+		return &gqlUser{}, nil
+	})
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	s := app.GraphQLSDL()
+	for _, want := range []string{"type Query {", "get_users_by_id", "type Mutation {", "post_users"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the schema does not carry %q:\n%s", want, s)
+		}
+	}
+}

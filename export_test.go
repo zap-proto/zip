@@ -15,3 +15,6 @@ package zip
 
 // OpenAPIByReflection is buildOpenAPIReflect, for project_corpus_test.go.
 func OpenAPIByReflection(a *App) map[string]any { return a.buildOpenAPIReflect() }
+
+// GraphQLByReflection is graphQLByReflection, for project_corpus_test.go.
+func GraphQLByReflection(a *App) string { return a.graphQLByReflection() }

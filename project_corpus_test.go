@@ -73,3 +73,16 @@ func TestProjectZAPMatchesRegistry(t *testing.T) {
 		t.Errorf("zap: registry and manifest disagree\n--- registry\n%s\n--- manifest\n%s", want, got)
 	}
 }
+
+// TestProjectGraphQLMatchesRegistry is the sixth projection's oracle: the
+// schema derived straight from the Go types against the one derived from the
+// description of them. App.GraphQLSDL ships the second, so this reaches for the
+// first by name, as the document's oracle does.
+func TestProjectGraphQLMatchesRegistry(t *testing.T) {
+	app := corpus()
+	want := zip.GraphQLByReflection(app)
+	got := zip.ProjectGraphQL(app.Manifest())
+	if want != got {
+		t.Errorf("graphql: registry and manifest disagree\n--- registry\n%s\n--- manifest\n%s", want, got)
+	}
+}

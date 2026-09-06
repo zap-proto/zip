@@ -1,0 +1,107 @@
+# Generated from this app's typed ops. Do not edit.
+# Every field below is one op; there is no separate schema to drift from it.
+
+type Query {
+  """Bootstrapped reports whether a chain has finished bootstrapping on this node.""" get_chain_bootstrapped(chain: String!): Bootstrapped
+  """ChainID resolves a chain's alias to the id it names.""" get_chain_id(alias: String!): ChainID
+  """Chains are the chains this node is running, which is a subset of the chains the P-Chain knows about.""" get_chains: Chains
+  """Fees are the transaction fees this node charges, in nLUX.""" get_fees: Fees
+  """LPs is where the network's stake stands on every current Lux Proposal.""" get_lps: LPs
+  """NetworkID is the number of the network this node is on.""" get_network_id: NetworkID
+  """NetworkName is the name of the network this node is on.""" get_network_name: NetworkName
+  """Identity is this node's id, with the proof it holds the staking key that id is derived from.""" get_node_id: NodeID
+  """Address is where this node tells its peers to reach it.""" get_node_ip: NodeIP
+  """NodeVersion is what this node is running: its own release, the database format it reads, and the VM protocol it speaks.""" get_node_version: NodeVersion
+  """Peers are the nodes this one is connected to.""" get_peers(nodeIDs: [String]): Peers
+  """Upgrades is the upgrade schedule this node runs.""" get_upgrades: Upgrades
+  """Uptime is how much of the network, by stake, reports having seen this node up.""" get_uptime: Uptime
+  """VMs are the virtual machines installed on this node, and the feature extensions its UTXO chains understand.""" get_vms: VMs
+}
+
+type Bootstrapped {
+  isBootstrapped: Boolean
+}
+
+type Chain {
+  id: String
+  name: String
+  vmID: String
+  bootstrapped: Boolean
+}
+
+type ChainID {
+  blockchainID: String
+}
+
+type Chains {
+  chains: [Chain]
+}
+
+type Fees {
+  txFee: JSON
+  createAssetTxFee: JSON
+  createChainTxFee: JSON
+}
+
+type LPs {
+  lps: JSON
+}
+
+type NetworkID {
+  networkID: Int
+}
+
+type NetworkName {
+  networkName: String
+}
+
+type NodeID {
+  nodeID: String
+  nodePOP: ProofOfPossession
+}
+
+type NodeIP {
+  ip: String
+}
+
+type NodeVersion {
+  version: String
+  databaseVersion: String
+  rpcProtocolVersion: Int
+  gitCommit: String
+}
+
+type Peer {
+  ip: String
+  publicIP: String
+  nodeID: String
+  version: String
+  observedUptime: Int
+  trackedChains: [String]
+}
+
+type Peers {
+  numPeers: JSON
+  peers: [Peer]
+}
+
+type ProofOfPossession {
+  publicKey: String
+  proofOfPossession: String
+}
+
+type Upgrades {
+  stopVertexID: String
+  epochDuration: JSON
+}
+
+type Uptime {
+  rewardingStakePercentage: String
+  weightedAveragePercentage: String
+}
+
+type VMs {
+  vms: JSON
+  fxs: JSON
+}
+
