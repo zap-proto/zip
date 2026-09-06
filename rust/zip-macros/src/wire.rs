@@ -42,13 +42,16 @@ pub fn derive(input: DeriveInput) -> Result<TokenStream, syn::Error> {
                 .iter()
                 .map(Field::read)
                 .collect::<Result<_, _>>()?;
-            frag::write("types", &id, &record(&id, &prose.text, &fields));
-            Ok(shape(&name, &id, &fields))
+            Ok(shape(
+                &name,
+                &id,
+                &record(&id, &prose.text, &fields),
+                &fields,
+            ))
         }
         Fields::Unnamed(un) if un.unnamed.len() == 1 => {
             let inner = &un.unnamed[0].ty;
-            frag::write("types", &id, &value(&id, &own, inner));
-            Ok(newtype(&name, &id, &own, inner))
+            Ok(newtype(&name, &id, &value(&id, &own, inner), inner, &own))
         }
         _ => Err(syn::Error::new_spanned(
             &input.ident,
@@ -137,9 +140,9 @@ fn value(id: &str, a: &Attrs, inner: &Type) -> String {
     o.finish()
 }
 
-/// shape is the impl for a struct: the description a binder reads, and the JSON
-/// the wire carries.
-fn shape(name: &syn::Ident, id: &str, fields: &[Field]) -> TokenStream {
+/// shape is the impl for a struct: the description a binder reads, the entry a
+/// manifest carries, and the JSON the wire binds.
+fn shape(name: &syn::Ident, id: &str, stated: &str, fields: &[Field]) -> TokenStream {
     let descs = fields.iter().map(|f| {
         let n = f.name.to_string();
         let j = &f.json;
@@ -176,6 +179,11 @@ fn shape(name: &syn::Ident, id: &str, fields: &[Field]) -> TokenStream {
         quote! { #at: #r }
     });
 
+    let reaches = fields
+        .iter()
+        .filter_map(|f| named_in(&f.ty))
+        .map(|path| quote!(<#path as ::zip::Wire>::reach(into);));
+
     quote! {
         impl ::zip::Wire for #name {
             fn describe() -> &'static ::zip::TypeDesc {
@@ -185,6 +193,14 @@ fn shape(name: &syn::Ident, id: &str, fields: &[Field]) -> TokenStream {
                     fields: &[#(#descs),*],
                 };
                 &DESC
+            }
+            fn stated() -> &'static str { #stated }
+            fn reach(into: &mut ::std::vec::Vec<(&'static str, &'static str)>) {
+                if into.iter().any(|(k, _)| *k == #id) {
+                    return; // claimed before the fields are walked: the cycle guard.
+                }
+                into.push((#id, #stated));
+                #(#reaches)*
             }
             fn write_json(&self, out: &mut ::std::string::String) {
                 out.push('{');
@@ -200,7 +216,15 @@ fn shape(name: &syn::Ident, id: &str, fields: &[Field]) -> TokenStream {
 
 /// newtype is the impl for a value type. `text` carries it as one word, which
 /// is what a quoted decimal is and what a URL can hold.
-fn newtype(name: &syn::Ident, id: &str, a: &Attrs, inner: &Type) -> TokenStream {
+fn newtype(name: &syn::Ident, id: &str, stated: &str, inner: &Type, a: &Attrs) -> TokenStream {
+    let says = quote! {
+        fn stated() -> &'static str { #stated }
+        fn reach(into: &mut ::std::vec::Vec<(&'static str, &'static str)>) {
+            if into.iter().all(|(k, _)| *k != #id) {
+                into.push((#id, #stated));
+            }
+        }
+    };
     if a.text {
         return quote! {
             impl ::zip::Wire for #name {
@@ -208,6 +232,7 @@ fn newtype(name: &syn::Ident, id: &str, a: &Attrs, inner: &Type) -> TokenStream 
                     static DESC: ::zip::TypeDesc = ::zip::TypeDesc { id: #id, text: true, fields: &[] };
                     &DESC
                 }
+                #says
                 fn write_json(&self, out: &mut ::std::string::String) {
                     ::zip::json::write_str(out, &::std::string::ToString::to_string(&self.0));
                 }
@@ -229,6 +254,7 @@ fn newtype(name: &syn::Ident, id: &str, a: &Attrs, inner: &Type) -> TokenStream 
                 static DESC: ::zip::TypeDesc = ::zip::TypeDesc { id: #id, text: false, fields: &[] };
                 &DESC
             }
+            #says
             fn write_json(&self, out: &mut ::std::string::String) { #w; }
             fn read_json(v: &::zip::Json) -> ::std::result::Result<Self, ::zip::Error> {
                 Ok(#name(#r))
@@ -253,8 +279,18 @@ fn scalar_of(t: &Type) -> TokenStream {
             let e = scalar_of(&inner);
             quote!(::zip::Scalar::List(&#e))
         }
-        Shape::Named => quote!(::zip::Scalar::Named),
+        Shape::Named(_) => quote!(::zip::Scalar::Named),
         _ => quote!(::zip::Scalar::Body),
+    }
+}
+
+/// named_in is the path of the described type a field reaches, through whatever
+/// container holds it, or None for a field made only of primitives.
+fn named_in(t: &Type) -> Option<syn::Path> {
+    match shape_of(t) {
+        Shape::Named(p) => Some(p),
+        Shape::Opt(inner) | Shape::List(inner) | Shape::Map(inner) => named_in(&inner),
+        _ => None,
     }
 }
 
@@ -264,7 +300,7 @@ enum Shape {
     Opt(Type),
     List(Type),
     Map(Type),
-    Named,
+    Named(syn::Path),
     Other,
 }
 
@@ -301,7 +337,7 @@ fn shape_of(t: &Type) -> Shape {
                 ("HashMap", 2) | ("BTreeMap", 2) => Shape::Map(args[1].clone()),
                 _ => match ty::prim(t) {
                     Some(p) => Shape::Prim(p),
-                    None => Shape::Named,
+                    None => Shape::Named(p.path.clone()),
                 },
             }
         }
