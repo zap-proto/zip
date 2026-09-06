@@ -57,11 +57,11 @@ fn over_http(addr: &str, target: &str) -> (u16, String) {
 fn over_zap(addr: &str, target: &str) -> (u16, String) {
     let mut c = TcpStream::connect(addr).unwrap();
     let frame = zip::zaphttp::ask("GET", target, &[]);
-    c.write_all(&(frame.len() as u32).to_le_bytes()).unwrap();
+    c.write_all(&zip::zaphttp::prefix(frame.len())).unwrap();
     c.write_all(&frame).unwrap();
     let mut head = [0u8; 4];
     c.read_exact(&mut head).unwrap();
-    let mut body = vec![0u8; u32::from_le_bytes(head) as usize];
+    let mut body = vec![0u8; zip::zaphttp::length(head)];
     c.read_exact(&mut body).unwrap();
 
     // The answer is a ZAP message: the magic is there, the flags say what kind

@@ -28,7 +28,7 @@ import (
 // ProjectZAP is m as a ZAP schema.
 func ProjectZAP(pkg string, ms ...Manifest) *Schema {
 	s := &Schema{Package: pkg}
-	e := &idl{schema: s, named: map[string]string{}, taken: map[string]bool{}}
+	e := &file{schema: s, named: map[string]string{}, taken: map[string]bool{}}
 	for i, m := range ms {
 		e.types = newProjector(m)
 		ops := append([]ManifestOp(nil), m.Ops...)
@@ -61,8 +61,8 @@ func ProjectZAP(pkg string, ms ...Manifest) *Schema {
 	return s
 }
 
-// idl carries one file's naming state while the manifests are walked.
-type idl struct {
+// file carries one schema file's naming state while the manifests are walked.
+type file struct {
 	schema  *Schema
 	types   *projector
 	named   map[string]string // type id → the name it is declared under, "" for refused
@@ -72,7 +72,7 @@ type idl struct {
 	op      string
 }
 
-func (e *idl) method(op ManifestOp) {
+func (e *file) method(op ManifestOp) {
 	e.op = op.ID
 	req, reqOK := e.payload(op.In)
 	rep, repOK := e.payload(op.Out)
@@ -84,7 +84,7 @@ func (e *idl) method(op ManifestOp) {
 	})
 }
 
-func (e *idl) methodName(id string) string {
+func (e *file) methodName(id string) string {
 	if name := idlName(id); name == id {
 		return id
 	}
@@ -99,7 +99,7 @@ func (e *idl) methodName(id string) string {
 
 // payload names the struct one direction carries, "" for a direction that
 // carries nothing. The bool is whether it could be expressed at all.
-func (e *idl) payload(id string) (string, bool) {
+func (e *file) payload(id string) (string, bool) {
 	td := e.types.types[id]
 	if td == nil || td.Kind != "struct" || len(td.Fields) == 0 {
 		return "", true
@@ -112,7 +112,7 @@ func (e *idl) payload(id string) (string, bool) {
 }
 
 // define declares td and returns its name, or "" when it cannot be declared.
-func (e *idl) define(td *TypeDesc) string {
+func (e *file) define(td *TypeDesc) string {
 	if name, ok := e.named[td.ID]; ok {
 		if name == "" {
 			e.gap(td.Name, td.Spell, CauseReaches) // re-blame for THIS op
@@ -156,7 +156,7 @@ func (e *idl) define(td *TypeDesc) string {
 // The layout stops at the first field it refuses, which is the answer an encoder
 // needs; a work list has to name them all, or it understates the migration by
 // however many problems each type has.
-func (e *idl) diagnose(td *TypeDesc) {
+func (e *file) diagnose(td *TypeDesc) {
 	for _, f := range td.Fields {
 		if _, ok := e.types.slotOf(f.Type, map[string]bool{}); ok {
 			continue // this field is fine; another one is why the type refused.
@@ -168,7 +168,7 @@ func (e *idl) diagnose(td *TypeDesc) {
 // cause is why a field has no fixed form, from the vocabulary the ledger groups
 // by. It asks the description, which is what the front end's own layout already
 // refused on.
-func (e *idl) cause(r TypeRef) string {
+func (e *file) cause(r TypeRef) string {
 	switch {
 	case r.Map != nil:
 		return CauseMap
@@ -195,7 +195,7 @@ func (e *idl) cause(r TypeRef) string {
 // opacity records a field whose bytes are exact and whose TYPE NAME is lost: a
 // nested value crosses as `bytes`, so the schema says something is there and
 // not what it is.
-func (e *idl) opacity(decl string, f FieldDesc, s slot) {
+func (e *file) opacity(decl string, f FieldDesc, s slot) {
 	inner := func(r TypeRef) *TypeDesc {
 		if r.Ref == "" {
 			return nil
@@ -216,7 +216,7 @@ func (e *idl) opacity(decl string, f FieldDesc, s slot) {
 
 // dropped names a field whose VALUE does not cross on a type the layout
 // accepted: a nested value with no slots of its own crosses as an empty message.
-func (e *idl) dropped(decl string, f FieldDesc) {
+func (e *file) dropped(decl string, f FieldDesc) {
 	r := f.Type
 	if r.List != nil {
 		r = *r.List
@@ -232,7 +232,7 @@ func (e *idl) dropped(decl string, f FieldDesc) {
 
 // name is the IDL name for a described type: its own name, qualified by its
 // package when a different type already holds that name.
-func (e *idl) name(td *TypeDesc) string {
+func (e *file) name(td *TypeDesc) string {
 	base := idlName(td.Name)
 	if base == "" || base == "_" {
 		base = idlName(e.op) + "_anon"
@@ -251,7 +251,7 @@ func (e *idl) name(td *TypeDesc) string {
 	}
 }
 
-func (e *idl) gap(field, spell, cause string) {
+func (e *file) gap(field, spell, cause string) {
 	e.schema.Gaps = append(e.schema.Gaps, Gap{Op: e.op, Field: field, Go: spell, Cause: cause})
 }
 

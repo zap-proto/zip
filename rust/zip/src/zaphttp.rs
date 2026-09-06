@@ -30,6 +30,22 @@ use crate::{zap, App};
 pub const FRAME_REQUEST: u16 = 0x01;
 pub const FRAME_RESPONSE: u16 = 0x02;
 
+/// The frame's length prefix: four bytes, BIG-endian, ahead of the message.
+///
+/// The prefix belongs to the transport and not to the message. A ZAP buffer is
+/// little-endian all the way through, and this number is not in one — it is the
+/// four bytes zap-proto/http puts in front, and that package writes them
+/// big-endian. A door that wrote them the other way round answered its own
+/// client and nothing else, which is the failure a closed test loop cannot see.
+pub fn prefix(n: usize) -> [u8; 4] {
+    (n as u32).to_be_bytes()
+}
+
+/// length is the frame size a prefix announces.
+pub fn length(head: [u8; 4]) -> usize {
+    u32::from_be_bytes(head) as usize
+}
+
 /// The largest frame this door will read. A length prefix is a promise from
 /// whoever sent it, and a door that believes one has handed the peer a way to
 /// ask for all the memory there is.
@@ -65,8 +81,8 @@ fn serve(app: &App, mut conn: TcpStream) -> std::io::Result<()> {
                 body: crate::http::refuse(&crate::Error::bad("malformed request frame")),
             },
         };
-        let body = build(answer.status, answer.kind, &answer.body);
-        out.write_all(&(body.len() as u32).to_le_bytes())?;
+        let body = reply(answer.status, answer.kind, &answer.body);
+        out.write_all(&prefix(body.len()))?;
         out.write_all(&body)?;
         out.flush()?;
     }
@@ -80,7 +96,7 @@ fn read_frame(conn: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let n = u32::from_le_bytes(head) as usize;
+    let n = length(head);
     if n == 0 || n > MAX_FRAME {
         return Ok(None);
     }
@@ -125,9 +141,11 @@ fn run<'a>(raw: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
     Some(s)
 }
 
-/// build writes one answer frame: the status, the content type as the one
-/// header, and the body.
-fn build(status: u16, kind: &str, body: &[u8]) -> Vec<u8> {
+/// reply is one answer frame: the status, the content type as its one header,
+/// and the body. It is the counterpart of [ask], and public for the same
+/// reason — a test that pins these bytes is what says this door speaks the
+/// wire everyone else speaks.
+pub fn reply(status: u16, kind: &str, body: &[u8]) -> Vec<u8> {
     let mut headers = Vec::new();
     headers.extend_from_slice(&1u32.to_le_bytes());
     push(&mut headers, b"Content-Type");
