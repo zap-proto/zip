@@ -39,12 +39,8 @@
 // carry it whatever it is made of.
 #define ZIP_TEXT ZIP_NOTE("text")
 
-// On a handler: what it is called on every surface, what it is grouped under,
-// which statuses it may answer with, and which headers it may set.
-#define ZIP_ID(name) ZIP_NOTE("id:" name)
-#define ZIP_SUMMARY(line) ZIP_NOTE("summary:" line)
-#define ZIP_TAGS(list) ZIP_NOTE("tags:" list)
-#define ZIP_STATUS(list) ZIP_NOTE("status:" list)
-#define ZIP_ANSWERS(list) ZIP_NOTE("header:" list)
+// What an OP declares beyond its address — its id, its tags, the status it
+// answers with — is not here: it is stated at the registration (zip::status,
+// zip::id, zip::tags), where Go states it too. One op, one line.
 
 #endif  // ZIP_MARK_HPP_

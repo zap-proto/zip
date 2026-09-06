@@ -29,21 +29,27 @@ import (
 // two front ends; it is one framework and one client that agrees for now. There
 // is no weaker way to state the claim, which is why it is stated this way.
 func TestTwoFrontEndsOneDocument(t *testing.T) {
-	dir := both(t)
-
-	for _, name := range []string{"openapi.json", "mcp.json", "cli.json", "info.zap"} {
-		want, err := os.ReadFile(filepath.Join(dir, "go", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := os.ReadFile(filepath.Join(dir, "cpp", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(want) != string(got) {
-			t.Errorf("%s differs between the Go source and the C++ source\n--- go\n%s\n--- cpp\n%s",
-				name, first(want), first(got))
-		}
+	// Two services, because one of them is all reads. The store uses the half a
+	// read-only service never reaches: a body, a path parameter, a header, a
+	// declared status and a declared id.
+	for _, corpus := range []string{"info", "store"} {
+		t.Run(corpus, func(t *testing.T) {
+			dir := both(t, corpus)
+			for _, name := range []string{"openapi.json", "mcp.json", "cli.json", corpus + ".zap"} {
+				want, err := os.ReadFile(filepath.Join(dir, "go", name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := os.ReadFile(filepath.Join(dir, "cpp", name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(want) != string(got) {
+					t.Errorf("%s differs between the Go source and the C++ source\n--- go\n%s\n--- cpp\n%s",
+						name, first(want), first(got))
+				}
+			}
+		})
 	}
 }
 
@@ -54,7 +60,7 @@ func TestTwoFrontEndsOneDocument(t *testing.T) {
 // It is the pipeline exactly as CMakeLists.txt runs it — zipgen, then the pass,
 // then zipc, then the compiler — spelled here so the claim is checked by `go
 // test` and not only by a build somebody ran once.
-func both(t *testing.T) string {
+func both(t *testing.T, corpus string) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("the C++ front end is built from source; -short skips it")
@@ -78,8 +84,8 @@ func both(t *testing.T) string {
 	}
 
 	// Go's side: the app describes itself, and zipc projects it.
-	run("go", "run", "./examples/info/main", "manifest", filepath.Join(dir, "go.json"))
-	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "go"), "-pkg", "info", filepath.Join(dir, "go.json"))
+	run("go", "run", "./examples/"+corpus+"/main", "manifest", filepath.Join(dir, "go.json"))
+	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "go"), "-pkg", corpus, filepath.Join(dir, "go.json"))
 
 	// C++'s side: the pass reads the source, and the SAME zipc projects it.
 	pass := filepath.Join(dir, "zipc-cpp")
@@ -91,24 +97,24 @@ func both(t *testing.T) string {
 		t.Fatal(err)
 	}
 	run("go", "run", "./cmd/zipgen", "zap", "-lang", "cpp", "-ns", "zip::zap", "-o", filepath.Join(dir, "zip/zap.hpp"))
-	if err := os.WriteFile(filepath.Join(dir, "info.zip.hpp"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, corpus+".zip.hpp"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(pass, "cpp/example/info/ops.cpp", "--version", "v1.36.178",
+	cmd := exec.Command(pass, "cpp/example/"+corpus+"/ops.cpp",
 		"-o", filepath.Join(dir, "cpp.json"), "--",
 		"-std=c++23", "-Icpp/include", "-Icpp/example", "-I"+dir)
 	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/usr/lib/llvm-18/lib")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("the pass could not read the C++ ops: %v\n%s", err, out)
 	}
-	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "cpp"), "-lang", "cpp", "-pkg", "info", filepath.Join(dir, "cpp.json"))
+	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "cpp"), "-lang", "cpp", "-pkg", corpus, filepath.Join(dir, "cpp.json"))
 
 	// And the service itself, against the bindings that were just written.
-	if err := os.Rename(filepath.Join(dir, "cpp", "info.zip.hpp"), filepath.Join(dir, "info.zip.hpp")); err != nil {
+	if err := os.Rename(filepath.Join(dir, "cpp", corpus+".zip.hpp"), filepath.Join(dir, corpus+".zip.hpp")); err != nil {
 		t.Fatal(err)
 	}
 	run(clang, "-std=c++23", "-O1", "-I", "cpp/include", "-I", "cpp/example", "-I", dir,
-		"cpp/example/info/ops.cpp", "cpp/example/info/main.cpp", "-o", filepath.Join(dir, "info"))
+		"cpp/example/"+corpus+"/ops.cpp", "cpp/example/"+corpus+"/main.cpp", "-o", filepath.Join(dir, corpus))
 	return dir
 }
 
@@ -122,7 +128,7 @@ func both(t *testing.T) string {
 //
 // There is no Go in the C++ process. It links libstdc++ and nothing else.
 func TestTheCppServiceAnswersOverBothDoors(t *testing.T) {
-	dir := both(t)
+	dir := both(t, "info")
 
 	zapAddr, httpAddr := spare(t), spare(t)
 	cpp := exec.Command(filepath.Join(dir, "info"), zapAddr, "http://"+httpAddr)
@@ -134,6 +140,7 @@ func TestTheCppServiceAnswersOverBothDoors(t *testing.T) {
 
 	goZap, goHTTP := spare(t), spare(t)
 	golang := exec.Command("go", "run", "./examples/info/main", goZap, "http://"+goHTTP)
+	_ = goZap
 	if err := golang.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +165,80 @@ func TestTheCppServiceAnswersOverBothDoors(t *testing.T) {
 			t.Errorf("GET %s over ZAP:\n go : %s\n cpp: %s", path, want, got)
 		}
 	}
+}
+
+// The C++ store refuses, answers and addresses exactly as the Go store does.
+//
+// The info service is all reads, so it never exercises a body, a path
+// parameter, a header, a declared status or a refusal. This does: a document
+// that publishes required:true and a 201 describes a service that REFUSES
+// without the value and answers 201 with it, and a service that does neither
+// has a document that lies about it.
+func TestTheCppStoreKeepsWhatItsDocumentPromises(t *testing.T) {
+	dir := both(t, "store")
+
+	cppHTTP, goHTTP := spare(t), spare(t)
+	cpp := exec.Command(filepath.Join(dir, "store"), spare(t), "http://"+cppHTTP)
+	cpp.Stderr = os.Stderr
+	if err := cpp.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cpp.Process.Kill() }()
+
+	golang := exec.Command("go", "run", "./examples/store/main", spare(t), "http://"+goHTTP)
+	if err := golang.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = golang.Process.Kill() }()
+	for _, addr := range []string{cppHTTP, goHTTP} {
+		if !listening(addr) {
+			t.Fatalf("%s never came up", addr)
+		}
+	}
+
+	for _, ask := range []struct {
+		what   string
+		method string
+		path   string
+		tenant string
+		body   string
+	}{
+		{"a body and a header", "POST", "/v1/items", "hanzo", `{"name":"anvil","count":3}`},
+		{"the address", "GET", "/v1/items/item-1", "", ""},
+		{"a body over an address", "PATCH", "/v1/items/item-9", "", `{"name":"vise","count":4}`},
+		{"an address alone", "DELETE", "/v1/items/item-3", "", ""},
+		{"a missing header", "POST", "/v1/items", "", `{"name":"anvil"}`},
+		{"a missing member", "POST", "/v1/items", "hanzo", `{"count":3}`},
+		{"an address nothing answers", "GET", "/v1/nothing", "", ""},
+	} {
+		wantCode, wantBody := send(t, "http://"+goHTTP+ask.path, ask.method, ask.tenant, ask.body)
+		gotCode, gotBody := send(t, "http://"+cppHTTP+ask.path, ask.method, ask.tenant, ask.body)
+		if wantCode != gotCode || wantBody != gotBody {
+			t.Errorf("%s (%s %s):\n go : %d %s\n cpp: %d %s",
+				ask.what, ask.method, ask.path, wantCode, wantBody, gotCode, gotBody)
+		}
+	}
+}
+
+// send asks one question and answers with the status and the body, whatever
+// they are: a refusal is as much of the contract as an answer.
+func send(t *testing.T, url, method, tenant, body string) (int, string) {
+	t.Helper()
+	req, resp := fasthttp.AcquireRequest(), fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod(method)
+	if tenant != "" {
+		req.Header.Set("X-Tenant", tenant)
+	}
+	if body != "" {
+		req.SetBodyString(body)
+	}
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	return resp.StatusCode(), strings.TrimSpace(string(resp.Body()))
 }
 
 // spare is an address nothing is listening on, found by listening on one.

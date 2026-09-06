@@ -37,11 +37,29 @@ func validate(v any) error {
 		// flag all read. Reporting the Go name told someone who sent `reason`
 		// that `"Reason"` was missing — a name that appears nowhere in the
 		// document they were working from.
-		if err := validateField(jsonFieldName(field), val.Field(i), tag); err != nil {
+		if err := validateField(calledIt(field), val.Field(i), tag); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// calledIt is the name the CALLER used for a field: the body's, or the header's
+// for a field the body does not carry, or the URL's. Reporting the body's name
+// unconditionally told someone who had sent no X-Tenant header that field "-"
+// was required — a name that appears nowhere in the document they were working
+// from, which is the very failure the wire-name rule exists to prevent.
+func calledIt(f reflect.StructField) string {
+	if name := jsonFieldName(f); name != "-" {
+		return name
+	}
+	if name := headerFieldName(f); name != "" {
+		return name
+	}
+	if name := urlFieldName(f); name != "" && name != "-" {
+		return name
+	}
+	return f.Name
 }
 
 func validateField(name string, val reflect.Value, tag string) error {

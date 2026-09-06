@@ -28,6 +28,7 @@
 
 #include <cstring>
 #include <functional>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -98,6 +99,28 @@ struct sig<Out (*)(const In&)> {
 
 }  // namespace detail
 
+// Option is what an op declares beyond its address and its types: the status it
+// answers with, the name it carries on every surface, what it is grouped under,
+// and the headers it may set. It is stated at the REGISTRATION, where Go states
+// it, so one line says everything about one op and the pass that reads the
+// source reads it from there.
+//
+// Only the status changes what the service DOES; the rest is what the document,
+// the tool list and the CLI call it. They are one type all the same, because
+// they are one idea — a fact about the op that its signature cannot carry — and
+// two would mean two places to look.
+struct Option {
+    enum class What { Status, Id, Tags, Summary, Answers } what = What::Status;
+    int number = 0;
+    std::string text;
+};
+
+inline Option status(int code) { return Option{Option::What::Status, code, {}}; }
+inline Option id(std::string name) { return Option{Option::What::Id, 0, std::move(name)}; }
+inline Option tags(std::string list) { return Option{Option::What::Tags, 0, std::move(list)}; }
+inline Option summary(std::string line) { return Option{Option::What::Summary, 0, std::move(line)}; }
+inline Option answers(std::string list) { return Option{Option::What::Answers, 0, std::move(list)}; }
+
 // Route is one address the router matches on. segs is the pattern already split,
 // because a match is a walk over segments and splitting it per request would be
 // work the registration already did.
@@ -106,6 +129,10 @@ struct Route {
     std::string path;
     std::vector<std::string> segs;
     Run run;
+    // The status a SUCCESSFUL answer carries. Zero means the default, which is
+    // 200 — an op that declares 201 and answers 200 is a service its own
+    // document does not describe.
+    int status = 0;
 };
 
 inline std::vector<std::string> split(std::string_view path) {
@@ -123,17 +150,26 @@ inline std::vector<std::string> split(std::string_view path) {
 
 class App {
   public:
-    explicit App(std::string name) : name_(std::move(name)) {}
+    // An app is what it is called and, when it has one, what release this is.
+    // Both are read by the pass that writes the manifest, and the app's own doc
+    // comment is the document's title and description — one comment, one place,
+    // exactly as an op's is.
+    explicit App(std::string name, std::string version = {})
+        : name_(std::move(name)), version_(std::move(version)) {}
 
     const std::string& name() const { return name_; }
+    const std::string& version() const { return version_; }
     const std::vector<Route>& routes() const { return routes_; }
 
-    void add(std::string method, std::string path, Run run) {
+    void add(std::string method, std::string path, Run run, std::vector<Option> opts = {}) {
         Route r;
         r.segs = split(path);
         r.method = std::move(method);
         r.path = std::move(path);
         r.run = std::move(run);
+        for (const Option& o : opts) {
+            if (o.what == Option::What::Status) r.status = o.number;
+        }
         routes_.push_back(std::move(r));
     }
 
@@ -141,6 +177,15 @@ class App {
     // HTTP door and the ZAP door both arrive here, so an op cannot behave one
     // way over one transport and another way over the other.
     int answer(std::string_view method, std::string_view target, std::string_view body,
+               std::string* out) const {
+        return answer(method, target, body, {}, out);
+    }
+
+    // The same, told what the request carried in its headers. A field that
+    // declares one is part of the op's contract — the document names it — so
+    // the binder has to fill it, or the contract is a claim about nothing.
+    int answer(std::string_view method, std::string_view target, std::string_view body,
+               const std::vector<std::pair<std::string, std::string>>& headers,
                std::string* out) const {
         std::string_view path = target;
         std::string_view query;
@@ -162,26 +207,27 @@ class App {
             if (!body.empty()) {
                 json::Value parsed;
                 if (!json::read(body, &parsed)) {
-                    *out = R"({"error":"the body is not JSON"})";
+                    *out = problem(400, "the body is not JSON");
                     return 400;
                 }
                 if (parsed.kind() == json::Kind::Record) merged = std::move(parsed);
             }
+            for (const auto& [k, v] : headers) merged.set(k, json::Value::text(v));
             for (const auto& [k, v] : fields(query)) merged.set(k, json::Value::text(v));
             for (const auto& [k, v] : in.body()) merged.set(k, v);
 
             try {
                 *out = r.run(merged).write();
-                return 200;
+                return r.status == 0 ? 200 : r.status;
             } catch (const Error& e) {
-                *out = R"({"error":")" + json::escape(e.what()) + R"("})";
+                *out = problem(e.status, e.what());
                 return e.status;
             } catch (const std::exception& e) {
-                *out = R"({"error":")" + json::escape(e.what()) + R"("})";
+                *out = problem(500, e.what());
                 return 500;
             }
         }
-        *out = R"({"error":"no such route"})";
+        *out = problem(404, reason(404));
         return 404;
     }
 
@@ -200,6 +246,15 @@ class App {
             });
         }
         for (std::thread& t : doors) t.join();
+    }
+
+    // problem is a refusal as RFC 7807 writes one, which is what a zip service
+    // answers with in any language: the same four members, in the order a sorted
+    // encoder puts them, so two implementations of one op refuse identically.
+    static std::string problem(int status, std::string_view detail) {
+        return std::string(R"({"detail":")") + json::escape(detail) + R"(","status":)" +
+               std::to_string(status) + R"(,"title":")" + std::string(reason(status)) +
+               R"(","type":"about:blank"})";
     }
 
   private:
@@ -318,8 +373,10 @@ class App {
                 if (used == 0) break;
                 if (used < 0) return;
                 std::string body;
-                const int status = answer(req.method, req.target, req.body, &body);
-                const std::string out = http::answer(status, reason(status), body, req.keepalive);
+                const int status = answer(req.method, req.target, req.body, req.headers, &body);
+                const std::string out =
+                    http::answer(status, reason(status), body, req.keepalive,
+                                 status >= 400 ? "application/problem+json" : "application/json");
                 if (!send(c, out)) return;
                 buf.erase(0, std::size_t(used));
                 if (!req.keepalive) return;
@@ -355,7 +412,8 @@ class App {
                 } else {
                     body = R"({"error":"not a request frame"})";
                 }
-                const std::string head = wire::headers({{"Content-Type", "application/json"}});
+                const std::string head = wire::headers(
+                    {{"Content-Type", status >= 400 ? "application/problem+json" : "application/json"}});
                 frame = wire::answer(std::uint16_t(status), reason(status), head, body);
                 std::string out(4, '\0');
                 const std::uint32_t m = std::uint32_t(frame.size());
@@ -393,6 +451,7 @@ class App {
     }
 
     std::string name_;
+    std::string version_;
     std::vector<Route> routes_;
 };
 
@@ -424,27 +483,26 @@ Run bind(F fn) {
 
 }  // namespace detail
 
-template <class F, class S>
-void get(App& app, std::string path, F fn, S* self) { app.add("GET", std::move(path), detail::bind(fn, self)); }
-template <class F, class S>
-void post(App& app, std::string path, F fn, S* self) { app.add("POST", std::move(path), detail::bind(fn, self)); }
-template <class F, class S>
-void put(App& app, std::string path, F fn, S* self) { app.add("PUT", std::move(path), detail::bind(fn, self)); }
-template <class F, class S>
-void patch(App& app, std::string path, F fn, S* self) { app.add("PATCH", std::move(path), detail::bind(fn, self)); }
-template <class F, class S>
-void remove(App& app, std::string path, F fn, S* self) { app.add("DELETE", std::move(path), detail::bind(fn, self)); }
-
-template <class F>
-void get(App& app, std::string path, F fn) { app.add("GET", std::move(path), detail::bind(fn)); }
-template <class F>
-void post(App& app, std::string path, F fn) { app.add("POST", std::move(path), detail::bind(fn)); }
-template <class F>
-void put(App& app, std::string path, F fn) { app.add("PUT", std::move(path), detail::bind(fn)); }
-template <class F>
-void patch(App& app, std::string path, F fn) { app.add("PATCH", std::move(path), detail::bind(fn)); }
-template <class F>
-void remove(App& app, std::string path, F fn) { app.add("DELETE", std::move(path), detail::bind(fn)); }
+template <class F, class S, class... Opts>
+void get(App& app, std::string path, F fn, S* self, Opts&&... opts) {
+    app.add("GET", std::move(path), detail::bind(fn, self), {std::forward<Opts>(opts)...});
+}
+template <class F, class S, class... Opts>
+void post(App& app, std::string path, F fn, S* self, Opts&&... opts) {
+    app.add("POST", std::move(path), detail::bind(fn, self), {std::forward<Opts>(opts)...});
+}
+template <class F, class S, class... Opts>
+void put(App& app, std::string path, F fn, S* self, Opts&&... opts) {
+    app.add("PUT", std::move(path), detail::bind(fn, self), {std::forward<Opts>(opts)...});
+}
+template <class F, class S, class... Opts>
+void patch(App& app, std::string path, F fn, S* self, Opts&&... opts) {
+    app.add("PATCH", std::move(path), detail::bind(fn, self), {std::forward<Opts>(opts)...});
+}
+template <class F, class S, class... Opts>
+void remove(App& app, std::string path, F fn, S* self, Opts&&... opts) {
+    app.add("DELETE", std::move(path), detail::bind(fn, self), {std::forward<Opts>(opts)...});
+}
 
 }  // namespace zip
 

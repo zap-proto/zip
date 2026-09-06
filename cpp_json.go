@@ -91,14 +91,61 @@ func readCpp(b *strings.Builder, m *manifest.App, s manifest.Struct) {
 		b.WriteString("    (void)v;\n    (void)out;\n")
 	}
 	for _, f := range s.Body {
-		if f.JSON == "-" || f.JSON == "" {
+		// A member is read from every name that can carry it, in the order the
+		// binder fills them: the body's, then the header's, then the URL's — so
+		// the address wins over what the body repeated, which is the rule Go's
+		// binder keeps for the same reason.
+		for _, key := range carriers(f) {
+			fmt.Fprintf(b, "    if (v.has(%q)) {\n", key)
+			readInto(b, m, &f.Type, fmt.Sprintf("out.%s", f.Name), fmt.Sprintf("v.at(%q)", key), 2)
+			b.WriteString("    }\n")
+		}
+	}
+	for _, f := range s.Body {
+		if !f.Required {
 			continue
 		}
-		fmt.Fprintf(b, "    if (v.has(%q)) {\n", f.JSON)
-		readInto(b, m, &f.Type, fmt.Sprintf("out.%s", f.Name), fmt.Sprintf("v.at(%q)", f.JSON), 2)
-		b.WriteString("    }\n")
+		// A value the handler refuses to run without. The document says so, and
+		// a service whose document says so and runs anyway is a service whose
+		// document is wrong. Named the way the CALLER named it.
+		if test := zero(&f.Type, "out."+f.Name); test != "" {
+			fmt.Fprintf(b, "    if (%s) throw zip::Error(400, \"field \\\"%s\\\" is required\");\n",
+				test, called(f))
+		}
 	}
 	b.WriteString("}\n\n")
+}
+
+// called is the name the caller used for a member: the body's, or the header's
+// for a member the body does not carry, or the URL's.
+func called(f manifest.Field) string {
+	if f.JSON != "" && f.JSON != "-" {
+		return f.JSON
+	}
+	if f.Header != "" {
+		return f.Header
+	}
+	if f.URL != "" && f.URL != "-" {
+		return f.URL
+	}
+	return f.Name
+}
+
+// zero is the expression that is true when a value is the zero of its type,
+// which is what "required" is asked about — a member that arrived empty and a
+// member that did not arrive are the same absence.
+func zero(t *manifest.Type, at string) string {
+	switch t.Kind {
+	case manifest.String:
+		return at + ".empty()"
+	case manifest.Bool:
+		return "!" + at
+	case manifest.Int, manifest.Uint, manifest.Float:
+		return at + " == 0"
+	case manifest.List, manifest.Table:
+		return at + ".empty()"
+	}
+	return ""
 }
 
 // readInto writes the statements that fill one place from one value. depth is
@@ -142,6 +189,28 @@ func readInto(b *strings.Builder, m *manifest.App, t *manifest.Type, into, from 
 	default:
 		fmt.Fprintf(b, "%s(void)%s;  // %s names no shape a body can carry\n", pad, from, t.Kind)
 	}
+}
+
+// carriers are the names a request can carry one member under, in binding
+// order. A member the body does not carry may still ride a header or the URL,
+// and a reader that only knew the body's name would leave it empty.
+func carriers(f manifest.Field) []string {
+	var out []string
+	add := func(name string) {
+		if name == "" || name == "-" {
+			return
+		}
+		for _, had := range out {
+			if had == name {
+				return
+			}
+		}
+		out = append(out, name)
+	}
+	add(f.JSON)
+	add(f.Header)
+	add(f.URL)
+	return out
 }
 
 func writeCpp(b *strings.Builder, m *manifest.App, s manifest.Struct) {

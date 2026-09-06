@@ -474,7 +474,11 @@ struct Extract {
         Value o = f;
         if (hidden) o.set("private", Value::boolean(true));
         own->push(std::move(o));
-        if (!hidden && wire != "-") body->push(std::move(f));
+        // A member the BODY does not carry is still a member: it may ride a
+        // header or the URL, and a projection that never saw it would describe
+        // an op that cannot be called. What "-" means is where it goes, not
+        // whether it exists.
+        if (!hidden) body->push(std::move(f));
 
         if (!hidden && wire != "-") {
             if (const std::string doc = comment(c); !doc.empty()) prose[key][record + "." + wire] = doc;
@@ -497,7 +501,35 @@ const char* verb(const std::string& fn) {
 struct Found {
     CXCursor path = clang_getNullCursor();
     CXCursor handler = clang_getNullCursor();
+    // What the registration declared beyond the address: zip::status(201),
+    // zip::id("forget"), zip::tags("items"). Read from the call, which is where
+    // it is written and where Go writes the same thing.
+    std::vector<std::pair<std::string, std::string>> options;
 };
+
+// value is what a literal argument IS, evaluated by the compiler rather than
+// re-parsed: an integer or a string, whichever the option takes.
+std::string value(CXCursor c) {
+    CXEvalResult r = clang_Cursor_Evaluate(c);
+    if (r == nullptr) return "";
+    std::string out;
+    switch (clang_EvalResult_getKind(r)) {
+        case CXEval_Int:
+            out = std::to_string(clang_EvalResult_getAsLongLong(r));
+            break;
+        case CXEval_StrLiteral:
+        case CXEval_CFStr:
+        case CXEval_ObjCStrLiteral: {
+            const char* str = clang_EvalResult_getAsStr(r);
+            if (str) out = str;
+            break;
+        }
+        default:
+            break;
+    }
+    clang_EvalResult_dispose(r);
+    return out;
+}
 
 // arguments walks one registration's arguments for the two facts it states: the
 // address, which must be a literal, and the handler, which carries its own
@@ -519,6 +551,31 @@ void arguments(CXCursor call, Found* out) {
                 kid,
                 [](CXCursor deep, CXCursor, CXClientData dd) {
                     Look* l = static_cast<Look*>(dd);
+                    if (clang_getCursorKind(deep) == CXCursor_CallExpr) {
+                        const CXCursor to = clang_getCursorReferenced(deep);
+                        const CXCursor where = clang_getCursorSemanticParent(to);
+                        const std::string what = str(clang_getCursorSpelling(to));
+                        if (!clang_Cursor_isNull(to) &&
+                            clang_getCursorKind(where) == CXCursor_Namespace &&
+                            str(clang_getCursorSpelling(where)) == "zip" &&
+                            (what == "status" || what == "id" || what == "tags" ||
+                             what == "summary" || what == "answers")) {
+                            struct Arg {
+                                std::string v;
+                            } arg;
+                            clang_visitChildren(
+                                deep,
+                                [](CXCursor a, CXCursor, CXClientData ad) {
+                                    Arg* g = static_cast<Arg*>(ad);
+                                    if (!g->v.empty()) return CXChildVisit_Break;
+                                    g->v = value(a);
+                                    return g->v.empty() ? CXChildVisit_Recurse : CXChildVisit_Break;
+                                },
+                                &arg);
+                            l->out->options.emplace_back(what, arg.v);
+                            return CXChildVisit_Break;
+                        }
+                    }
                     if (clang_getCursorKind(deep) == CXCursor_StringLiteral &&
                         clang_Cursor_isNull(l->out->path)) {
                         l->out->path = deep;
@@ -567,7 +624,7 @@ std::string literal(CXCursor c) {
 struct Pass {
     Extract e;
     Value app = Value::record();
-    std::string name, title, description;
+    std::string name, title, description, version;
 };
 
 CXChildVisitResult walk(CXCursor c, CXCursor, CXClientData d) {
@@ -580,20 +637,23 @@ CXChildVisitResult walk(CXCursor c, CXCursor, CXClientData d) {
     // description: one comment, one place, exactly as an op's is.
     if (clang_getCursorKind(c) == CXCursor_VarDecl &&
         str(clang_getTypeSpelling(clang_getCursorType(c))) == "zip::App") {
+        // The name, then the release: the two literals the constructor takes.
         struct Lit {
-            std::string s;
+            std::vector<std::string> all;
         } lit;
         clang_visitChildren(
             c,
             [](CXCursor kid, CXCursor, CXClientData dd) {
+                Lit* l = static_cast<Lit*>(dd);
                 if (clang_getCursorKind(kid) == CXCursor_StringLiteral) {
-                    static_cast<Lit*>(dd)->s = literal(kid);
-                    return CXChildVisit_Break;
+                    l->all.push_back(literal(kid));
+                    return l->all.size() >= 2 ? CXChildVisit_Break : CXChildVisit_Continue;
                 }
                 return CXChildVisit_Recurse;
             },
             &lit);
-        p->name = lit.s;
+        if (!lit.all.empty()) p->name = lit.all[0];
+        if (lit.all.size() > 1) p->version = lit.all[1];
         const std::string doc = Extract::comment(c);
         const std::size_t nl = doc.find('\n');
         p->title = nl == std::string::npos ? doc : doc.substr(0, nl);
@@ -657,10 +717,10 @@ CXChildVisitResult walk(CXCursor c, CXCursor, CXClientData d) {
     if (out.kind != CXType_Void) op.set("out", p->e.typ(out));
 
     // What an op declares beyond its address: its id, its tags, the statuses it
-    // may answer with, the headers it may set. Go says these with an option on
-    // the registration; here they are notes on the handler, which is the
-    // declaration that owns them.
-    const auto marks = notes(f.handler);
+    // may answer with, the headers it may set — stated at the registration, the
+    // way Go states them, so one line says everything about one op.
+    std::vector<std::string> marks;
+    for (const auto& [what, v] : f.options) marks.push_back(what + ":" + v);
     std::string mark;
     if (note(marks, "id", &mark)) op.set("id", Value::text(mark));
     if (note(marks, "summary", &mark)) op.set("summary", Value::text(mark));
@@ -682,7 +742,7 @@ CXChildVisitResult walk(CXCursor c, CXCursor, CXClientData d) {
         }
         op.set("statuses", std::move(all));
     }
-    if (note(marks, "header", &mark)) {
+    if (note(marks, "answers", &mark)) {
         Value all = Value::list();
         for (std::size_t i = 0, j; i <= mark.size(); i = j + 1) {
             j = mark.find(',', i);
@@ -781,6 +841,9 @@ int main(int argc, char** argv) {
     m.set("name", Value::text(appName.empty() ? pass.name : appName));
     if (!pass.title.empty()) m.set("title", Value::text(pass.title));
     if (!pass.description.empty()) m.set("description", Value::text(pass.description));
+    // The release the source states, or the one this build stamps: a version is
+    // a fact about a release, and either place can be the one that knows it.
+    if (version.empty()) version = pass.version;
     if (!version.empty()) m.set("version", Value::text(version));
     Value ops = Value::list();
     // Sorted by address, which is the order every projection reads them in.

@@ -50,36 +50,41 @@ add_custom_command(
     WORKING_DIRECTORY ${ZIP_ROOT}
     COMMENT "zipgen: the ZAP wire runtime, for C++")
 
-# ---- 2. what the ops declare ------------------------------------------------
+# ---- 2, 3 and 4, per service ------------------------------------------------
 #
-# The stub exists so the FIRST parse has something to include: the pass reads
-# declarations, and the generated definitions are what it is on the way to
-# writing. Every later build overwrites it with the real one.
-add_custom_command(
-    OUTPUT ${GEN}/manifest.json
-    COMMAND ${CMAKE_COMMAND} -E touch ${GEN}/info.zip.hpp
-    COMMAND zipc-cpp ${CMAKE_CURRENT_SOURCE_DIR}/example/info/ops.cpp
-            --version v1.36.178 -o ${GEN}/manifest.json
-            -- -std=c++23 -I${CMAKE_CURRENT_SOURCE_DIR}/include
-               -I${CMAKE_CURRENT_SOURCE_DIR}/example -I${GEN}
-    DEPENDS zipc-cpp ${GEN}/zip/zap.hpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/example/info/ops.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/example/info/ops.hpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/example/info/types.hpp
-    COMMENT "zipc: reading the ops out of the C++ source")
+# The stub in step 2 exists so the FIRST parse has something to include: the
+# pass reads declarations, and the generated definitions are what it is on the
+# way to writing. Every later build overwrites it with the real one.
+function(zip_service name)
+    set(out ${GEN}/${name})
+    file(MAKE_DIRECTORY ${out})
+    add_custom_command(
+        OUTPUT ${out}/manifest.json
+        COMMAND ${CMAKE_COMMAND} -E touch ${out}/${name}.zip.hpp
+        COMMAND zipc-cpp ${CMAKE_CURRENT_SOURCE_DIR}/example/${name}/ops.cpp
+                -o ${out}/manifest.json
+                -- -std=c++23 -I${CMAKE_CURRENT_SOURCE_DIR}/include
+                   -I${CMAKE_CURRENT_SOURCE_DIR}/example -I${out} -I${GEN}
+        DEPENDS zipc-cpp ${GEN}/zip/zap.hpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/example/${name}/ops.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/example/${name}/ops.hpp
+        COMMENT "zipc: reading the ops out of ${name}")
 
-# ---- 3. what the manifest says ----------------------------------------------
-add_custom_command(
-    OUTPUT ${GEN}/info.zip.hpp ${GEN}/openapi.json ${GEN}/mcp.json ${GEN}/cli.json ${GEN}/info.zap
-    COMMAND ${GO} run ./cmd/zipc -o ${GEN} -lang cpp -pkg info ${GEN}/manifest.json
-    WORKING_DIRECTORY ${ZIP_ROOT}
-    DEPENDS ${GEN}/manifest.json
-    COMMENT "zipc: the document, the tools, the CLI, the schema and the bindings")
+    add_custom_command(
+        OUTPUT ${out}/${name}.zip.hpp ${out}/openapi.json ${out}/mcp.json
+               ${out}/cli.json ${out}/${name}.zap
+        COMMAND ${GO} run ./cmd/zipc -o ${out} -lang cpp -pkg ${name} ${out}/manifest.json
+        WORKING_DIRECTORY ${ZIP_ROOT}
+        DEPENDS ${out}/manifest.json
+        COMMENT "zipc: ${name}'s document, tools, CLI, schema and bindings")
 
-# ---- 4. the service ---------------------------------------------------------
-add_executable(info
-    example/info/ops.cpp
-    example/info/main.cpp
-    ${GEN}/info.zip.hpp
-    ${GEN}/zip/zap.hpp)
-target_include_directories(info PRIVATE include example ${GEN})
+    add_executable(${name}
+        example/${name}/ops.cpp
+        example/${name}/main.cpp
+        ${out}/${name}.zip.hpp
+        ${GEN}/zip/zap.hpp)
+    target_include_directories(${name} PRIVATE include example ${out} ${GEN})
+endfunction()
+
+zip_service(info)
+zip_service(store)

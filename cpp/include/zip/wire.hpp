@@ -85,11 +85,41 @@ inline std::string headers(std::initializer_list<std::pair<std::string_view, std
     return out;
 }
 
+// pairs reads a header block back into names and values. A block that runs out
+// mid-pair yields what it had: a header is a fact a request offered, and half a
+// name is not one.
+inline std::vector<std::pair<std::string, std::string>> pairs(std::string_view raw) {
+    std::vector<std::pair<std::string, std::string>> out;
+    auto u32 = [&](std::size_t at) -> std::uint32_t {
+        return std::uint32_t(std::uint8_t(raw[at])) | (std::uint32_t(std::uint8_t(raw[at + 1])) << 8) |
+               (std::uint32_t(std::uint8_t(raw[at + 2])) << 16) |
+               (std::uint32_t(std::uint8_t(raw[at + 3])) << 24);
+    };
+    if (raw.size() < 4) return out;
+    std::uint32_t n = u32(0);
+    std::size_t i = 4;
+    auto field = [&](std::string* into) -> bool {
+        if (i + 4 > raw.size()) return false;
+        const std::uint32_t len = u32(i);
+        i += 4;
+        if (i + len > raw.size()) return false;
+        into->assign(raw.substr(i, len));
+        i += len;
+        return true;
+    };
+    for (; n > 0; --n) {
+        std::string name, value;
+        if (!field(&name) || !field(&value)) break;
+        out.emplace_back(std::move(name), std::move(value));
+    }
+    return out;
+}
+
 // Request is a view onto one request frame: the message must outlive it.
 struct Request {
     std::string_view method;
     std::string_view target;
-    std::string_view headers;  // the block above, as the peer sent it
+    std::vector<std::pair<std::string, std::string>> headers;
     std::span<const std::uint8_t> body;
 };
 
@@ -101,7 +131,7 @@ inline bool read(const zap::Message& msg, Request* out) {
     const zap::Object r = msg.root();
     out->method = r.text(kReqMethod);
     out->target = r.text(kReqTarget);
-    out->headers = r.text(kReqHeaders);
+    out->headers = pairs(r.text(kReqHeaders));
     out->body = r.bytes(kReqBody);
     return true;
 }

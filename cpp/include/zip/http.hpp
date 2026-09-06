@@ -90,9 +90,9 @@ inline std::ptrdiff_t parse(std::string_view buf, Request* out) {
 // the codes an op can answer with; anything else says only its number, which is
 // still a complete response line.
 inline std::string answer(int status, std::string_view reason, std::string_view body,
-                          bool keepalive) {
+                          bool keepalive, std::string_view type = "application/json") {
     std::string out = "HTTP/1.1 " + std::to_string(status) + " " + std::string(reason) + "\r\n";
-    out += "Content-Type: application/json\r\n";
+    out += "Content-Type: " + std::string(type) + "\r\n";
     out += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     out += keepalive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
     out += body;

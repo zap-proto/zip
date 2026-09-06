@@ -115,7 +115,7 @@ GetTxFeeResponse Info::fees(const zip::None&) const {
 /// Lux node info
 ///
 /// What a Lux node tells anyone who asks: what it is running, what network it is on, who it is connected to, and what its chains cost.
-zip::App app("info");
+zip::App app("info", "v1.36.178");
 
 // The registrations. Each states one op: its method, its address, and the
 // handler that answers it — the same three facts zip.Get states in Go, and the
