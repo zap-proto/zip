@@ -117,7 +117,7 @@ handler core they all share, so they cannot diverge in behavior.
 | MCP tools | `mcp.go` | agents | tool name = `operationId` |
 | CLI commands | `cli.go`, `clispec.go` | operators, scripts | `operationId` → `<service> <operation>` |
 | op-call plane | `call.go` | **other services** | `operationId` |
-| GraphQL schema | `graphql.go` | one query over several ops | `operationId` |
+| GraphQL schema | `graphql.go`, `project_graph.go` | one query over several ops | `operationId` |
 | ZAP IDL | `zapschema.go` | peers with no Go types — **and it can REFUSE** | method name |
 | Go SDK source | `sdk.go` | published clients that do not link the service | `operationId` |
 
@@ -168,6 +168,72 @@ which is what the typing migration is for: converting a route to
 cannot register an op; `module.go`'s doc comment states both structural reasons
 and the one thing that would close it (an extension declaring its contract on
 `zip.Module`).
+
+## A front end per language, one back end — `manifest.go`, `project*.go`, `rust/`
+
+The projections above read `*registeredOp`, which holds two `reflect.Type`s and
+three closures. That is why they were Go's alone: a Rust service has no
+reflect.Type to hand them, so the only way it ever reached them was for a Go
+program to declare its ops for it, which is not a Rust service declaring
+anything.
+
+`zip.Manifest` is that registry with the Go taken out — an op is a method, a
+path, an id, its prose and the NAMES of its input and output; a type is a name,
+a kind, and fields with their wire names, their prose and their slots. It is a
+description and never a program: no closure, no address, no way to run
+anything. Three front ends fill one in.
+
+| front end | when | how |
+|---|---|---|
+| Go | run time | `App.Manifest()`, by reflection |
+| Rust | compile time | `#[zip::ops]`, a proc-macro over the impl block |
+| C++ | build time | a libclang walk (branch `feat/cpp-native`) |
+
+`Project{OpenAPI,MCP,CLI,GraphQL,ZAP}` read a Manifest, and **Go's own go
+through them** — `App.OpenAPISpec()` IS `ProjectOpenAPI(a.Manifest())` — so Go
+keeps no private path and the other languages cannot rot. `cmd/zipc` is the
+build-time projector: `zipc -out gen -package info manifest.json` writes
+openapi.json, mcp.json, cli.json, graph.sdl and `<pkg>.zap`.
+
+Watch the oracles. Because Go ships the manifest-derived document, a test that
+compares `App.OpenAPISpec()` with `ProjectOpenAPI(app.Manifest())` is comparing
+one function with itself and passes whatever it does — three such tests were in
+the tree, named as the safety of the design. The real oracle is the derivation
+straight from the Go types, kept unexported and reached through
+`export_test.go`: `OpenAPIByReflection`, `GraphQLByReflection`. The tool list
+and the command tree have no such twin; what holds them is this package's own
+suite plus `conformance_test.go`, where the same fourteen ops declared in Rust
+project to the same bytes.
+
+`rust/` is zip in Rust: `#[zip::ops]` on an impl block, `#[derive(zip::Wire)]`
+on a type, a router, a JSON binder, an HTTP door and a ZAP door. The wire comes
+from `zapgen -lang rust` over `rust/zip/wire.zap` — nothing there spells a byte
+offset by hand — and no Go links into a service built with it. The doc comment
+is read where it is written: the handler's prose above the handler, a field's
+above the field. `rust/examples/info` is the corpus, written a second time.
+
+Two traps, both found by testing against something that was not ourselves:
+
+- **The frame's length prefix is BIG-endian.** It belongs to the transport, not
+  to the message — a ZAP buffer is little-endian all the way through and this
+  number is not in one. The Rust door wrote it little-endian and every test on
+  both sides passed, because the door's own client wrote it the same way; no Go
+  client could reach the service at all. `testdata/zaphttp/` now holds frames
+  from both encoders, and each side reads the other's without running the
+  other's toolchain (`rust/zip/tests/wire.rs`, `zaphttp_wire_test.go`).
+- **A client finds a service at `/.well-known/openapi.json`.** That is what
+  `Remote.Spec` asks for, and it is how a command line, a tool list or a typed
+  client is built for a service the caller does not link. `zip::App::SPEC` and
+  `::TOOLS` are those addresses on the Rust side; `App::documents` publishes
+  there.
+
+What a Rust service gets today: REST routes and the ZAP door (native, at run
+time), and OpenAPI, the MCP tool list, the CLI command tree, the GraphQL schema
+and the ZAP IDL (from `zipc`, at build time). What it does not: the SDK
+generators, `docs_gen.go` and the op-call plane still read `*registeredOp`, so
+they are Go-only until they read a Manifest too. There is no MCP door in Rust —
+the tool list is published, the protocol is not served — and handlers are
+synchronous.
 
 ## PROTOTYPE (branch `proto/one-verb-fold`) — one verb, one walk
 
