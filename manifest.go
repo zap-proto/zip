@@ -216,6 +216,63 @@ func (m *Manifest) Settle() {
 	}
 }
 
+// Check refuses a description a projection would silently mis-read.
+//
+// A field naming a type nobody described is a dangling reference, and it is
+// caught HERE rather than in the document, where it would have become a schema
+// of `{}` that every generated client reads as "any value".
+func (m Manifest) Check() error {
+	if m.Manifest != ManifestVersion {
+		return fmt.Errorf("manifest version %d, this zip reads %d", m.Manifest, ManifestVersion)
+	}
+	if len(m.Ops) == 0 {
+		// An empty registry projects an empty document, which is worse than no
+		// document: it publishes that the service has nothing to offer.
+		return fmt.Errorf("no ops; there is nothing to project")
+	}
+	known := make(map[string]bool, len(m.Types))
+	for _, td := range m.Types {
+		if known[td.ID] {
+			return fmt.Errorf("two types described under %q; a name is how a field refers to a type, so it can only mean one", td.ID)
+		}
+		known[td.ID] = true
+	}
+	for _, td := range m.Types {
+		for _, f := range td.Fields {
+			if err := resolves(known, td.ID+"."+f.Name, f.Type); err != nil {
+				return err
+			}
+		}
+		if td.Elem != nil {
+			if err := resolves(known, td.ID+" element", *td.Elem); err != nil {
+				return err
+			}
+		}
+	}
+	for _, op := range m.Ops {
+		for what, id := range map[string]string{"input": op.In, "output": op.Out} {
+			if id != "" && !known[id] {
+				return fmt.Errorf("op %s names %s %q, which nothing described", op.ID, what, id)
+			}
+		}
+	}
+	return nil
+}
+
+func resolves(known map[string]bool, at string, r TypeRef) error {
+	switch {
+	case r.Ref != "":
+		if !known[r.Ref] {
+			return fmt.Errorf("%s is %q, which nothing described", at, r.Ref)
+		}
+	case r.List != nil:
+		return resolves(known, at, *r.List)
+	case r.Map != nil:
+		return resolves(known, at, *r.Map)
+	}
+	return nil
+}
+
 // Manifest describes this app the way any front end would, so the projections
 // read the same document whichever language declared the ops.
 func (a *App) Manifest() Manifest {

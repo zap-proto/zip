@@ -7,10 +7,10 @@
 pub mod ops;
 pub mod types;
 
-/// The projections, as zipc wrote them from what the compiler read. A service
-/// publishes the document it implements.
-pub const OPENAPI: &str = include_str!("../gen/openapi.json");
-pub const MCP: &str = include_str!("../gen/mcp.json");
+// The projections, as zipc wrote them from what this crate declared. A service
+// publishes the document it implements. Empty on the build that MAKES them,
+// which is the one build where they cannot exist yet.
+include!(concat!(env!("OUT_DIR"), "/documents.rs"));
 
 /// service is this node's info app, with its documents on it.
 pub fn service(release: &str, network: u32) -> zip::App {
@@ -19,7 +19,11 @@ pub fn service(release: &str, network: u32) -> zip::App {
         network,
     }
     .ops();
-    app.serve("/openapi.json", "application/json", OPENAPI);
-    app.serve("/mcp.json", "application/json", MCP);
+    if !OPENAPI.is_empty() {
+        app.serve("/openapi.json", "application/json", OPENAPI);
+    }
+    if !MCP.is_empty() {
+        app.serve("/mcp.json", "application/json", MCP);
+    }
     app
 }

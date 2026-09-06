@@ -50,7 +50,13 @@ pub fn expand(args: TokenStream, mut block: ItemImpl) -> Result<TokenStream, syn
         ));
     }
 
-    frag::write("ops", &holder.to_string(), &fragment(&about, &ops));
+    let stated = fragment(&about, &ops);
+    let reaches: Vec<TokenStream> = ops
+        .iter()
+        .flat_map(|o| [o.input.clone(), o.output.clone()])
+        .flatten()
+        .map(|t| quote!(<#t as ::zip::Wire>::reach(&mut types);))
+        .collect();
 
     let app = about.app;
     let title = about.title;
@@ -61,6 +67,18 @@ pub fn expand(args: TokenStream, mut block: ItemImpl) -> Result<TokenStream, syn
         #block
 
         impl #holder {
+            /// Manifest is what this service declared, said neutrally: the ops
+            /// the impl block carries and every type they reach.
+            ///
+            /// It is built from what the compiler read, so it cannot describe a
+            /// service other than this one. `zipc` projects it into the OpenAPI
+            /// document, the MCP tool list, the CLI and the ZAP schema.
+            pub fn manifest() -> ::std::string::String {
+                let mut types: ::std::vec::Vec<(&'static str, &'static str)> = ::std::vec::Vec::new();
+                #(#reaches)*
+                ::zip::manifest(#stated, &types)
+            }
+
             /// Ops is this service's typed operations: the REST routes, the ZAP
             /// methods, and the document that describes them, from the one
             /// registration each op already carries.
@@ -243,6 +261,8 @@ impl Op {
     }
 }
 
+/// fragment is the ops half of the manifest — the object's MEMBERS, without its
+/// braces, because [zip::manifest] closes it around the types half.
 fn fragment(about: &About, ops: &[Op]) -> String {
     let items: Vec<String> = ops.iter().map(Op::json).collect();
     let mut o = frag::Object::new();
@@ -252,7 +272,8 @@ fn fragment(about: &About, ops: &[Op]) -> String {
         .text("version", &about.version)
         .text("description", &about.describe)
         .raw("ops", &frag::list(&items));
-    o.finish()
+    let whole = o.finish();
+    whole[1..whole.len() - 1].to_string()
 }
 
 /// route reads `#[get("/path")]` and its siblings off a method.

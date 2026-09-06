@@ -49,13 +49,39 @@ pub mod zaphttp;
 // written by hand.
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
-pub use app::{bind, Answer, App, Call, Input, Op, Shared};
+pub use app::{bind, Answer, App, Call, Input, Op};
 pub use desc::{FieldDesc, Scalar, TypeDesc, Wire};
 pub use error::Error;
 pub use json::Json;
 
 /// The two macros. `ops` declares a service; `Wire` makes a type say what it is.
 pub use zip_macros::{ops, Wire};
+
+/// manifest is this service's whole description, as one document.
+///
+/// The ops half comes from the macro that read the impl block; the types half
+/// is every type those ops reach, each stating itself. Nothing here decides
+/// anything — it is a join — so the document a service prints is the
+/// declaration it compiled from and cannot be anything else.
+///
+/// `zipc` reads it and writes the OpenAPI document, the MCP tool list, the CLI
+/// and the ZAP schema. A Go service's manifest is the same document, filled in
+/// the same way by the front end that language has.
+pub fn manifest(ops: &str, types: &[(&str, &str)]) -> String {
+    let mut sorted: Vec<&(&str, &str)> = types.iter().collect();
+    sorted.sort_by_key(|(id, _)| *id);
+    let mut out = String::from("{");
+    out.push_str(ops);
+    out.push_str(",\"types\":[");
+    for (i, (_, stated)) in sorted.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(stated);
+    }
+    out.push_str("]}");
+    out
+}
 
 /// listen serves an app on every address given, and does not return.
 ///

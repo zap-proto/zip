@@ -74,6 +74,20 @@ pub enum Scalar {
 /// another name.
 pub trait Wire: Sized {
     fn describe() -> &'static TypeDesc;
+
+    /// stated is this type's whole description — its fields, their wire names,
+    /// their prose — as one manifest entry.
+    ///
+    /// It is a `&'static str` built by the macro from the declaration, so what
+    /// the service publishes is what the compiler read, and there is no file
+    /// beside the source to fall out of step with it.
+    fn stated() -> &'static str;
+
+    /// reach adds this type and everything it holds to a manifest, once each.
+    /// A macro sees only the item it is on, so the graph is walked by the types
+    /// themselves: each one claims its entry, then asks the types of its fields.
+    fn reach(into: &mut Vec<(&'static str, &'static str)>);
+
     fn write_json(&self, out: &mut String);
     fn read_json(v: &crate::Json) -> Result<Self, crate::Error>;
 }

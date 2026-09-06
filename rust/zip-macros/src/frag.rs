@@ -2,39 +2,17 @@
 // Copyright (C) 2026, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-//! Where the description goes.
+//! Writing the description down.
 //!
-//! A macro runs inside the compiler and writes its fragment of the manifest as
-//! it expands, so the description of an op exists the moment the op does. There
-//! is no second pass over the source, no generated file to check in, and no
-//! staleness to gate: what the compiler read is what the projector reads.
+//! A macro runs inside the compiler, and what it learns has to reach the
+//! projector somehow. It reaches it as a `&'static str` COMPILED INTO the
+//! crate, which the service prints on request — not as a file written during
+//! expansion, which was the first shape and the wrong one: rustc reuses a
+//! cached expansion, so a macro that did not run left its file saying what the
+//! source used to say, and a document that quietly disagrees with the code is
+//! the one failure this whole design exists to prevent.
 //!
-//! The fragments land under `ZIP_MANIFEST_DIR`, or `target/zip` beside the
-//! crate. `zipc` merges them.
-
-use std::fs;
-use std::path::PathBuf;
-
-/// dir is where this crate's fragments go, creating it if it is not there.
-pub fn dir(kind: &str) -> Option<PathBuf> {
-    let base = match std::env::var("ZIP_MANIFEST_DIR") {
-        Ok(v) if !v.is_empty() => PathBuf::from(v),
-        _ => PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").ok()?)
-            .join("target")
-            .join("zip"),
-    };
-    let at = base.join(kind);
-    fs::create_dir_all(&at).ok()?;
-    Some(at)
-}
-
-/// write files one fragment, named so a second expansion of the same item
-/// replaces the first rather than adding to it.
-pub fn write(kind: &str, name: &str, body: &str) {
-    if let Some(at) = dir(kind) {
-        let _ = fs::write(at.join(format!("{name}.json")), body);
-    }
-}
+//! So: JSON, built from tokens, small enough to have no machinery.
 
 /// quote is a JSON string literal.
 pub fn quote(s: &str) -> String {
