@@ -36,20 +36,28 @@ func same(t *testing.T, what string, a, b any) {
 	}
 }
 
+// TestProjectOpenAPIMatchesRegistry compares the shipped document against the
+// one derived straight from the Go types.
+//
+// It has to reach for buildOpenAPIReflect by name. App.OpenAPISpec IS
+// ProjectOpenAPI(a.Manifest()) now — Go publishes the manifest-derived document
+// and keeps no second path to the same file — so a test asking the App and the
+// projector would be asking one function twice and would pass whatever either
+// did. The reflect derivation is kept for exactly this: it is the only
+// independent statement of what the document should say.
 func TestProjectOpenAPIMatchesRegistry(t *testing.T) {
 	app := corpus()
-	same(t, "openapi", app.OpenAPISpec(), zip.ProjectOpenAPI(app.Manifest()))
+	same(t, "openapi", zip.OpenAPIByReflection(app), zip.ProjectOpenAPI(app.Manifest()))
 }
 
-func TestProjectMCPMatchesRegistry(t *testing.T) {
-	app := corpus()
-	same(t, "mcp", app.MCPTools(), zip.ProjectMCP(app.Manifest()))
-}
-
-func TestProjectCLIMatchesRegistry(t *testing.T) {
-	app := corpus()
-	same(t, "cli", app.Commands(), zip.ProjectCLI(app.Manifest()))
-}
+// The tool list and the command tree have no such twin: their reflect
+// derivations were replaced rather than kept, so there is nothing here to
+// compare them against and a test that asked the App for them would be the
+// tautology above. What holds them is this package's own suite, which was
+// written against the reflect derivation and still passes, and
+// conformance_test.go, where the same fourteen ops declared in Rust project to
+// the same bytes. Both of those are real; a comparison of ProjectMCP with
+// itself would not be.
 
 func TestCorpusIsFourteenOps(t *testing.T) {
 	if n := len(corpus().Registry()); n != 14 {

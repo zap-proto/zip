@@ -24,9 +24,16 @@ import (
 // scar to prove it.
 //
 // The manifest-sourced document and the reflect-sourced one are pinned
-// byte-identical over the corpus (TestProjectMatchesRegistry). That equality is
+// byte-identical over the corpus (TestProjectOpenAPIMatchesRegistry, against
+// buildOpenAPIReflect, which is kept for no other purpose). That equality is
 // the whole safety of the design: it says the manifest lost nothing, so a front
 // end that can fill one in has everything Go has.
+//
+// The tool list and the command tree have no such twin — their reflect
+// derivations were replaced by these rather than kept beside them — so what
+// holds those is this package's own suite, written against the derivation that
+// is gone and still passing, and conformance_test.go, where the same ops
+// declared in Rust project to the same bytes.
 
 // ProjectOpenAPI is m as an OpenAPI 3.1 document.
 func ProjectOpenAPI(m Manifest) map[string]any {
