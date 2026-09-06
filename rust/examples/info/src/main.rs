@@ -23,6 +23,12 @@ fn main() {
                 zap = args.get(i + 1).cloned();
                 i += 2;
             }
+            // What this service declared, for zipc to project. It comes from
+            // the binary, so it describes THIS build and cannot be stale.
+            "--manifest" => {
+                println!("{}", info::ops::Info::manifest());
+                return;
+            }
             other => {
                 eprintln!("info: unknown argument {other}");
                 std::process::exit(2);

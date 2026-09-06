@@ -22,8 +22,8 @@
 //
 //	zipc [-out DIR] [-package NAME] MANIFEST
 //
-// MANIFEST is a .json file, or a directory holding ops/*.json and types/*.json
-// fragments.
+// MANIFEST is the document a front end wrote: `App.Manifest()` in Go, what
+// `Service::manifest()` prints in Rust, what the libclang pass emits in C++.
 package main
 
 import (
@@ -55,8 +55,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: zipc [-out DIR] [-package NAME] MANIFEST")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "MANIFEST is a manifest .json file, or a directory of ops/*.json")
-	fmt.Fprintln(os.Stderr, "and types/*.json fragments written by a front end.")
+	fmt.Fprintln(os.Stderr, "MANIFEST is the description a front end wrote of one app.")
 }
 
 func run(in, out, pkg string) error {
@@ -64,15 +63,10 @@ func run(in, out, pkg string) error {
 	if err != nil {
 		return err
 	}
+	if err := m.Check(); err != nil {
+		return fmt.Errorf("%s: %w", in, err)
+	}
 	m.Settle()
-	if m.Manifest != zip.ManifestVersion {
-		return fmt.Errorf("%s: manifest version %d, this zipc reads %d", in, m.Manifest, zip.ManifestVersion)
-	}
-	if len(m.Ops) == 0 {
-		// An empty registry projects an empty document, which is worse than no
-		// document: it publishes that the service has nothing to offer.
-		return fmt.Errorf("%s: no ops; there is nothing to project", in)
-	}
 	if pkg == "" {
 		pkg = m.App
 	}
@@ -106,121 +100,13 @@ func run(in, out, pkg string) error {
 	return nil
 }
 
-// read is one manifest, from a file or from the fragments a compiler wrote.
+// read is one manifest.
 func read(at string) (zip.Manifest, error) {
-	info, err := os.Stat(at)
-	if err != nil {
-		return zip.Manifest{}, err
-	}
-	if !info.IsDir() {
-		return one(at)
-	}
-	return assemble(at)
-}
-
-func one(at string) (zip.Manifest, error) {
-	b, err := os.ReadFile(at)
-	if err != nil {
-		return zip.Manifest{}, err
-	}
 	var m zip.Manifest
-	if err := json.Unmarshal(b, &m); err != nil {
-		return zip.Manifest{}, fmt.Errorf("%s: %w", at, err)
-	}
-	return m, nil
-}
-
-// assemble is one manifest out of the fragments a front end wrote as it
-// compiled: one per impl block, one per described type.
-//
-// It is a merge and not a build. Nothing here decides anything about an op or a
-// type — a fragment is already the finished description — so the order the
-// files arrive in changes nothing, which is what lets a compiler write them as
-// it reaches them.
-func assemble(dir string) (zip.Manifest, error) {
-	m := zip.Manifest{Manifest: zip.ManifestVersion}
-	seen := map[string]bool{}
-
-	ops, err := filepath.Glob(filepath.Join(dir, "ops", "*.json"))
-	if err != nil {
+	if err := load(at, &m); err != nil {
 		return m, err
 	}
-	sort.Strings(ops)
-	for _, at := range ops {
-		var part zip.Manifest
-		if err := load(at, &part); err != nil {
-			return m, err
-		}
-		if part.App != "" {
-			m.App = part.App
-		}
-		if part.Title != "" {
-			m.Title = part.Title
-		}
-		if part.Version != "" {
-			m.Version = part.Version
-		}
-		if part.Description != "" {
-			m.Description = part.Description
-		}
-		m.Ops = append(m.Ops, part.Ops...)
-	}
-
-	types, err := filepath.Glob(filepath.Join(dir, "types", "*.json"))
-	if err != nil {
-		return m, err
-	}
-	sort.Strings(types)
-	for _, at := range types {
-		var td zip.TypeDesc
-		if err := load(at, &td); err != nil {
-			return m, err
-		}
-		if seen[td.ID] {
-			return m, fmt.Errorf("%s: two types described under %q; a name is how a field refers to a type, so it can only mean one", at, td.ID)
-		}
-		seen[td.ID] = true
-		m.Types = append(m.Types, td)
-	}
-	sort.Slice(m.Types, func(i, j int) bool { return m.Types[i].ID < m.Types[j].ID })
-
-	// A field naming a type nobody described is a dangling reference, and it is
-	// found HERE rather than in the document, where it would have become a
-	// schema of `{}` that every generated client reads as "any value".
-	for _, td := range m.Types {
-		for _, f := range td.Fields {
-			if err := resolves(seen, td.ID, f.Name, f.Type); err != nil {
-				return m, err
-			}
-		}
-		if td.Elem != nil {
-			if err := resolves(seen, td.ID, "element", *td.Elem); err != nil {
-				return m, err
-			}
-		}
-	}
-	for _, op := range m.Ops {
-		for what, id := range map[string]string{"input": op.In, "output": op.Out} {
-			if id != "" && !seen[id] {
-				return m, fmt.Errorf("op %s names %s %q, which nothing described", op.ID, what, id)
-			}
-		}
-	}
 	return m, nil
-}
-
-func resolves(seen map[string]bool, in, field string, r zip.TypeRef) error {
-	switch {
-	case r.Ref != "":
-		if !seen[r.Ref] {
-			return fmt.Errorf("%s.%s is %q, which nothing described", in, field, r.Ref)
-		}
-	case r.List != nil:
-		return resolves(seen, in, field, *r.List)
-	case r.Map != nil:
-		return resolves(seen, in, field, *r.Map)
-	}
-	return nil
 }
 
 func load(at string, into any) error {

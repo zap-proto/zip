@@ -10,7 +10,6 @@
 //! spellings of one.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::{Error, FieldDesc, Json, Scalar, TypeDesc, Wire};
 
@@ -381,6 +380,3 @@ fn scalar(text: &str, want: &Scalar) -> Json {
         _ => Json::Text(text.to_string()),
     }
 }
-
-/// Shared is an app several doors serve at once.
-pub type Shared = Arc<App>;
