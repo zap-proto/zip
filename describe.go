@@ -132,14 +132,16 @@ func (d *describer) typ(t reflect.Type) *manifest.Type {
 	case reflect.Array:
 		out.Kind, out.Elem, out.Len = manifest.Fixed, d.typ(t.Elem()), t.Len()
 	case reflect.Map:
-		out.Kind, out.Elem = manifest.Table, d.typ(t.Elem())
+		out.Kind, out.Elem, out.Key = manifest.Table, d.typ(t.Elem()), d.typ(t.Key())
 	case reflect.Struct:
 		out.Kind, out.Ref = manifest.Record, d.record(t)
+	case reflect.Interface:
+		out.Kind = manifest.Any
 	default:
-		// An interface, a channel, a function: nothing a wire carries. It is
-		// described as an object with no fields, which is what the document has
-		// always published for it.
-		out.Kind = manifest.Record
+		// A channel, a function, a complex number: a value Go has and no wire
+		// carries. It is spelled as what it is, and every projection treats a
+		// kind it does not recognise as having no wire form.
+		out.Kind = manifest.Kind(t.Kind().String())
 	}
 	return out
 }
@@ -170,6 +172,8 @@ func (d *describer) record(t reflect.Type) string {
 	d.app.Structs[key] = manifest.Struct{} // claimed, so the walk below terminates
 
 	s := manifest.Struct{Name: name, Pkg: t.PkgPath()}
+	// What the body carries: encoding/json's fields, an embedded struct's
+	// promoted among them.
 	for _, f := range wireFields(t) {
 		s.Body = append(s.Body, manifest.Field{
 			Name:     f.Name,
@@ -178,6 +182,19 @@ func (d *describer) record(t reflect.Type) string {
 			Header:   headerFieldName(f),
 			Required: strings.Contains(f.Tag.Get("validate"), "required"),
 			Type:     *d.typ(f.Type),
+		})
+	}
+	// What a layout slots: this declaration's own fields, promoting nothing. An
+	// unexported one is carried and marked, because a layout has to know the
+	// name it is NOT giving a slot to — that is how a value promoted onto the
+	// JSON wire and absent from this one is reported rather than lost.
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		s.Own = append(s.Own, manifest.Field{
+			Name:    f.Name,
+			Embed:   f.Anonymous,
+			Private: !f.IsExported(),
+			Type:    *d.typ(f.Type),
 		})
 	}
 	d.app.Structs[key] = s

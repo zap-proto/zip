@@ -36,10 +36,11 @@ package zip
 
 import (
 	"fmt"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/zap-proto/zip/manifest"
 )
 
 // ZAPSchema renders the ZAP IDL that apps' typed ops describe, under pkg.
@@ -57,18 +58,33 @@ import (
 // name — the same split the JSON document already makes between an operationId,
 // which belongs to the occurrence, and a schema, which belongs to the type.
 func ZAPSchema(pkg string, apps ...*App) *Schema {
+	ms := make([]*manifest.App, 0, len(apps))
+	for _, a := range apps {
+		ms = append(ms, a.Manifest())
+	}
+	return ZAP(pkg, ms...)
+}
+
+// ZAP is that projection over manifests, which is where it is actually
+// computed. A service that never linked Go reaches it with its own manifest and
+// gets the same file — the offsets are a property of the declarations, not of
+// the language that read them.
+func ZAP(pkg string, apps ...*manifest.App) *Schema {
 	s := &Schema{Package: pkg}
-	e := &emitter{schema: s, named: map[reflect.Type]string{}, taken: map[string]bool{}}
+	e := &emitter{schema: s, named: map[string]string{}, taken: map[string]bool{}}
 	for i, a := range apps {
-		ops := append([]*registeredOp(nil), a.Registry()...)
-		sort.Slice(ops, func(i, j int) bool { return opName(ops[i]) < opName(ops[j]) })
+		e.app = a
+		ops := append([]manifest.Op(nil), a.Ops...)
+		sort.Slice(ops, func(i, j int) bool {
+			return opID(ops[i].ID, ops[i].Method, ops[i].Path) < opID(ops[j].ID, ops[j].Method, ops[j].Path)
+		})
 
 		// The interface is named for the app it projects. A single app carries the
 		// package's name — describing one app, the file and the service it
 		// declares are the same thing, and "app0" is an ordinal standing where a
 		// name belongs. The ordinal survives only where it is the truth: several
 		// unnamed apps in one file, which is a fleet compose and not a subset.
-		name := a.cfg.AppName
+		name := a.Name
 		if name == "" {
 			if len(apps) == 1 {
 				name = pkg
@@ -87,7 +103,7 @@ func ZAPSchema(pkg string, apps ...*App) *Schema {
 		// registry already refuses one layer up.
 		e.methods = map[string]bool{}
 		for _, op := range ops {
-			if id := opName(op); idlName(id) == id {
+			if id := opID(op.ID, op.Method, op.Path); idlName(id) == id {
 				e.methods[id] = true
 			}
 		}
@@ -306,8 +322,9 @@ const (
 
 type emitter struct {
 	schema *Schema
-	named  map[reflect.Type]string // type → the name it is declared under, "" for refused
-	taken  map[string]bool         // every struct name already declared
+	app    *manifest.App
+	named  map[string]string // the manifest's struct key → its declared name, "" for refused
+	taken  map[string]bool   // every struct name already declared
 
 	// iface is the app being described; its methods land there. methods is that
 	// interface's own name set — a method name is unique within its service and a
@@ -325,20 +342,19 @@ type emitter struct {
 // method describes one op. An op whose In or Out cannot be expressed contributes
 // gaps and NO method: a method whose payload is a struct that was never declared
 // is not a schema, it is a dangling reference.
-func (e *emitter) method(op *registeredOp) {
-	e.op = opName(op)
-	req, reqOK := e.payload(op.InType)
-	rep, repOK := e.payload(op.OutType)
+func (e *emitter) method(op manifest.Op) {
+	e.op = opID(op.ID, op.Method, op.Path)
+	req, reqOK := e.payload(op.In)
+	rep, repOK := e.payload(op.Out)
 	if !reqOK || !repOK {
 		return
 	}
-	// The prose comes from the doc registry cmd/zipdoc fills from the handler's
-	// own comment — the same Description the OpenAPI operation and the MCP tool
-	// carry. A method's summary and its schema are then one sentence written
-	// once, and cannot drift apart into two.
+	// The prose is the handler's own comment — the same Description the OpenAPI
+	// operation and the MCP tool carry. A method's summary and its schema are
+	// then one sentence written once, and cannot drift apart into two.
 	var doc string
-	if d, ok := docFor(op.Pkg, op.Method, op.Path); ok {
-		doc = d.Description
+	if op.Doc != nil {
+		doc = op.Doc.Description
 	}
 	e.iface.Methods = append(e.iface.Methods, &Method{
 		Name: e.methodName(e.op), Request: req, Reply: rep, Doc: doc,
@@ -370,12 +386,11 @@ func (e *emitter) methodName(id string) string {
 // payload names the struct one direction of a method carries, or "" for a
 // direction that carries nothing. The bool is whether it could be expressed at
 // all — "" with ok is a void direction, "" without is a refusal.
-func (e *emitter) payload(t reflect.Type) (string, bool) {
-	t = deref(t)
-	if t == nil || t.Kind() != reflect.Struct {
+func (e *emitter) payload(t *manifest.Type) (string, bool) {
+	if t == nil || t.Kind != manifest.Record {
 		return "", true // no input, or no answer: an empty parameter list
 	}
-	if len(exported(t)) == 0 {
+	if len(e.slotted(t)) == 0 {
 		return "", true // a marker struct with nothing in it is the same absence
 	}
 	name := e.define(t)
@@ -385,47 +400,60 @@ func (e *emitter) payload(t reflect.Type) (string, bool) {
 	return name, true
 }
 
+// slotted is the fields a layout takes: the declaration's own, minus what it
+// keeps to itself. An embedded declaration is ONE of them and promotes nothing,
+// which is what makes this list different from the body's.
+func (e *emitter) slotted(t *manifest.Type) []manifest.Field {
+	var out []manifest.Field
+	for _, f := range e.app.Own(t) {
+		if !f.Private {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // define declares t and returns its name, or "" when it cannot be declared.
 //
 // The LAYOUT is [LayoutOf]'s and this function computes none. What it adds is
 // the name, and — when the layout refuses — the diagnosis, because LayoutOf
 // stops at the first field that cannot cross and a work list has to name them
 // all.
-func (e *emitter) define(t reflect.Type) string {
-	if name, ok := e.named[t]; ok {
+func (e *emitter) define(t *manifest.Type) string {
+	if name, ok := e.named[t.Ref]; ok {
 		if name == "" {
-			e.gap(typeName(t), goName(t), CauseReaches) // re-blame for THIS op
+			e.gap(t.Name, spellType(t), CauseReaches) // re-blame for THIS op
 		}
 		return name
 	}
 
-	shape, err := LayoutOf(t)
+	lay, err := layoutOf(e.app, t, map[string]bool{})
 	if err != nil {
-		e.named[t] = ""
+		e.named[t.Ref] = ""
 		e.diagnose(t)
 		return ""
 	}
-	if len(shape.Slots) == 0 {
-		e.named[t] = ""
-		e.gap(typeName(t), goName(t), CauseEmpty)
+	if len(lay.Slots) == 0 {
+		e.named[t.Ref] = ""
+		e.gap(t.Name, spellType(t), CauseEmpty)
 		return ""
 	}
 
 	name := e.name(t)
-	e.named[t] = name
+	e.named[t.Ref] = name
 	e.taken[name] = true
 
-	fields := make([]Field, 0, len(shape.Slots))
-	for _, s := range shape.Slots {
-		fields = append(fields, Field{Name: idlName(s.Name), Type: s.Type, Offset: s.Offset})
-		e.opacity(t, name, s)
-		if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
-			e.schema.Coded = append(e.schema.Coded, Coded{Struct: name, Field: s.Name, Type: s.Type})
+	fields := make([]Field, 0, len(lay.Slots))
+	for _, sl := range lay.Slots {
+		fields = append(fields, Field{Name: idlName(sl.Name), Type: sl.Type, Offset: sl.Offset})
+		e.opacity(name, sl)
+		if strings.HasPrefix(sl.Type, "bytes_fixed[") || strings.HasPrefix(sl.Elem, "bytes_fixed[") {
+			e.schema.Coded = append(e.schema.Coded, Coded{Struct: name, Field: sl.Name, Type: sl.Type})
 		}
 	}
 	e.dropped(t, name)
 	e.schema.Structs = append(e.schema.Structs, &Struct{
-		Name: name, Fields: fields, Size: shape.Size, From: goName(t),
+		Name: name, Fields: fields, Size: lay.Size, From: spellType(t),
 	})
 	return name
 }
@@ -433,46 +461,36 @@ func (e *emitter) define(t reflect.Type) string {
 // opacity records a field whose bytes are exact and whose TYPE NAME is lost. A
 // nested value crosses as `bytes`, so the schema says something is there and not
 // what it is. See [Opacity].
-func (e *emitter) opacity(t reflect.Type, decl string, s Slot) {
-	f, ok := t.FieldByName(s.Name)
-	if !ok {
-		return
-	}
-	ft := deref(f.Type)
-	if ft == nil {
-		return
-	}
+func (e *emitter) opacity(decl string, sl slot) {
+	ft := sl.Field.Type
 	switch {
-	case s.Type == "bytes" && ft.Kind() == reflect.Struct:
-		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: s.Name, Go: goName(ft)})
-	case s.Elem == "bytes" && ft.Kind() == reflect.Slice:
-		if et := deref(ft.Elem()); et != nil && et.Kind() == reflect.Struct {
-			e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: s.Name, Go: goName(et), List: true})
-		}
+	case sl.Type == "bytes" && ft.Kind == manifest.Record:
+		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: sl.Name, Go: spellType(&ft)})
+	case sl.Elem == "bytes" && ft.Kind == manifest.List && ft.Elem != nil && ft.Elem.Kind == manifest.Record:
+		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: sl.Name, Go: spellType(ft.Elem), List: true})
 	}
 }
 
 // dropped names every field of t whose VALUE does not cross, on a type the
 // layout accepted. Nothing fails here and nothing is reported by anything else,
 // which is why it is worth walking the type a second time to find.
-func (e *emitter) dropped(t reflect.Type, decl string) {
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			// An unexported field crosses nowhere and is nobody's contract —
-			// EXCEPT an embedded type, whose field name is its type name and so is
-			// lowercase for an unexported type. encoding/json promotes its fields
-			// to the outer object; the layout skips it. Same value, two wires.
-			if f.Anonymous && len(exported(f.Type)) > 0 {
+func (e *emitter) dropped(t *manifest.Type, decl string) {
+	for _, f := range e.app.Own(t) {
+		if f.Private {
+			// A field the declaration keeps to itself crosses nowhere and is
+			// nobody's contract — EXCEPT an embedded one, whose fields an object
+			// PROMOTES while a layout skips the declaration that holds them. Same
+			// value, two wires.
+			if f.Embed && len(e.slotted(&f.Type)) > 0 {
 				e.schema.Dropped = append(e.schema.Dropped, Loss{
-					Struct: decl, Field: f.Name, Go: goName(deref(f.Type)), Cause: LossPromoted,
+					Struct: decl, Field: f.Name, Go: spellType(&f.Type), Cause: LossPromoted,
 				})
 			}
 			continue
 		}
-		if inner := hollow(f.Type); inner != nil {
+		if inner := e.hollow(&f.Type); inner != nil {
 			e.schema.Dropped = append(e.schema.Dropped, Loss{
-				Struct: decl, Field: f.Name, Go: goName(inner), Cause: LossEmpty,
+				Struct: decl, Field: f.Name, Go: spellType(inner), Cause: LossEmpty,
 			})
 		}
 	}
@@ -481,21 +499,20 @@ func (e *emitter) dropped(t reflect.Type, decl string) {
 // hollow reports the nested type a field carries as an EMPTY message, or nil.
 // A struct whose fields are all unexported lays out with no slots, so it crosses
 // as eight bytes pointing at a message with nothing in it.
-func hollow(t reflect.Type) reflect.Type {
-	t = deref(t)
+func (e *emitter) hollow(t *manifest.Type) *manifest.Type {
 	if t == nil {
 		return nil
 	}
-	if t.Kind() == reflect.Slice {
-		t = deref(t.Elem())
+	if t.Kind == manifest.List {
+		t = t.Elem
 		if t == nil {
 			return nil
 		}
 	}
-	if t.Kind() != reflect.Struct {
+	if t.Kind != manifest.Record {
 		return nil
 	}
-	if shape, err := LayoutOf(t); err == nil && len(shape.Slots) == 0 {
+	if lay, err := layoutOf(e.app, t, map[string]bool{}); err == nil && len(lay.Slots) == 0 {
 		return t
 	}
 	return nil
@@ -513,26 +530,22 @@ func hollow(t reflect.Type) reflect.Type {
 // holding a second opinion about what a slot may be — the causes below are
 // narrower questions asked FIRST, purely so the answer is a reason and not a
 // shrug.
-func (e *emitter) diagnose(t reflect.Type) {
-	for _, f := range exported(t) {
-		if crosses(f.Type) {
+func (e *emitter) diagnose(t *manifest.Type) {
+	for _, f := range e.slotted(t) {
+		if e.crosses(&f.Type) {
 			continue // this field is fine; another one is why the type refused
 		}
-		ft := deref(f.Type)
-		path := typeName(t) + "." + f.Name
-		if ft == nil {
-			e.gap(path, "nil", CauseAny)
-			continue
-		}
-		switch ft.Kind() {
-		case reflect.Map:
-			e.gap(path, goName(ft), CauseMap)
-		case reflect.Interface:
-			e.gap(path, goName(ft), CauseAny)
-		case reflect.Struct:
-			e.gap(path, goName(ft), CauseReaches)
+		ft := f.Type
+		path := t.Name + "." + f.Name
+		switch ft.Kind {
+		case manifest.Table:
+			e.gap(path, spellType(&ft), CauseMap)
+		case manifest.Any:
+			e.gap(path, spellType(&ft), CauseAny)
+		case manifest.Record:
+			e.gap(path, spellType(&ft), CauseReaches)
 		default:
-			e.gap(path, goName(ft), CauseUnwirable)
+			e.gap(path, spellType(&ft), CauseUnwirable)
 		}
 	}
 }
@@ -542,9 +555,8 @@ func (e *emitter) diagnose(t reflect.Type) {
 // second classification — which is the point: a diagnosis with its own opinion
 // about what crosses would eventually contradict the encoder, and a work list
 // that disagrees with the wire sends people to fix things that are not broken.
-func crosses(t reflect.Type) bool {
-	probe := reflect.StructOf([]reflect.StructField{{Name: "X", Type: t}})
-	_, err := LayoutOf(probe)
+func (e *emitter) crosses(t *manifest.Type) bool {
+	_, err := slotOf(e.app, t, map[string]bool{})
 	return err == nil
 }
 
@@ -557,19 +569,6 @@ func crosses(t reflect.Type) bool {
 // carries: the layout gives an embedded struct ONE slot of its own. Describing
 // the promoted shape would publish a struct whose fields sit at offsets nothing
 // writes.
-func exported(t reflect.Type) []reflect.StructField {
-	t = deref(t)
-	if t == nil || t.Kind() != reflect.Struct {
-		return nil
-	}
-	var out []reflect.StructField
-	for i := 0; i < t.NumField(); i++ {
-		if f := t.Field(i); f.IsExported() {
-			out = append(out, f)
-		}
-	}
-	return out
-}
 
 func (e *emitter) gap(field, goType, cause string) {
 	e.schema.Gaps = append(e.schema.Gaps, Gap{Op: e.op, Field: field, Go: goType, Cause: cause})
@@ -582,15 +581,15 @@ func (e *emitter) gap(field, goType, cause string) {
 // collides. It is the JSON registry's rule in the IDL's character set — one
 // naming idea, not two — and it is deterministic because the ops are walked in
 // sorted order, so the first claimant is the same on every run.
-func (e *emitter) name(t reflect.Type) string {
-	base := idlName(typeName(t))
+func (e *emitter) name(t *manifest.Type) string {
+	base := idlName(t.Name)
 	if base == "" || base == "_" {
 		base = idlName(e.op) + "_anon"
 	}
 	if !e.taken[base] {
 		return base
 	}
-	if p := t.PkgPath(); p != "" {
+	if p := t.Pkg; p != "" {
 		base = idlName(p[strings.LastIndexByte(p, '/')+1:]) + "_" + base
 	}
 	for name, n := base, 2; ; n++ {
@@ -651,19 +650,6 @@ func ident(s string) string {
 
 // goName is the Go type as a person would grep for it. It is for the gap list,
 // which is read by someone about to go and change that declaration.
-func goName(t reflect.Type) string {
-	if t == nil {
-		return "nil"
-	}
-	n := typeName(t)
-	if n == "" {
-		return t.String()
-	}
-	if p := t.PkgPath(); p != "" {
-		return p[strings.LastIndexByte(p, '/')+1:] + "." + n
-	}
-	return n
-}
 
 // ---- rendering --------------------------------------------------------------
 

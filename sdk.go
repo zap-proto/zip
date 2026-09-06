@@ -756,3 +756,21 @@ var goReserved = map[string]bool{
 	// replace the thing every method hangs off.
 	"Client": true, "Dial": true, "Open": true, "Conn": true, "Close": true,
 }
+
+// goName is the Go type as a person would grep for it, for the SDK writers that
+// still read Go types. [spellType] is the same idea over a manifest, which is
+// what the document and the schema read; when the SDKs are re-sourced too, this
+// goes with them.
+func goName(t reflect.Type) string {
+	if t == nil {
+		return "nil"
+	}
+	n := typeName(t)
+	if n == "" {
+		return t.String()
+	}
+	if p := t.PkgPath(); p != "" {
+		return p[strings.LastIndexByte(p, '/')+1:] + "." + n
+	}
+	return n
+}

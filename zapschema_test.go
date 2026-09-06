@@ -318,11 +318,12 @@ func TestZAPSchema_CollidingNamesAreQualified(t *testing.T) {
 		t.Fatalf("two shapes collapsed onto one name %q", s.Structs[0].Name)
 	}
 	e := &emitter{schema: &Schema{}, taken: map[string]bool{}}
-	if got := e.name(reflect.TypeOf(schHeight{})); got != "schHeight" {
+	_, height := describeType(reflect.TypeOf(schHeight{}))
+	if got := e.name(height); got != "schHeight" {
 		t.Fatalf("free name = %q", got)
 	}
 	e.taken["schHeight"] = true
-	if got := e.name(reflect.TypeOf(schHeight{})); !strings.Contains(got, "zip") {
+	if got := e.name(height); !strings.Contains(got, "zip") {
 		t.Fatalf("taken name = %q, want it qualified by its package", got)
 	}
 }

@@ -1243,7 +1243,7 @@ const swaggerHTML = `<!doctype html>
 // actually registers, in a build step rather than from a running server. A spec
 // generated any other way is a second source of truth, and the whole point of
 // deriving it here is that there is only one.
-func (a *App) OpenAPISpec() map[string]any { return a.buildOpenAPI() }
+func (a *App) OpenAPISpec() map[string]any { return Document(a.Manifest()) }
 
 // primaryStatus is the code an op answers with when its output states nothing —
 // the first it declared. The document keys the success response on it, and every

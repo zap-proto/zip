@@ -106,7 +106,16 @@ const (
 	List   Kind = "slice"
 	Fixed  Kind = "array"
 	Table  Kind = "map"
+	// Any is a slot that names no type at all — a Go interface, a C++ std::any.
+	// A document can describe it (an object, unconstrained) and a fixed layout
+	// cannot, which is the whole difference between the two projections.
+	Any Kind = "any"
 )
+
+// A kind outside this vocabulary is a value some language has and no wire
+// carries — a channel, a function. It is spelled however the front end spells
+// it, and every projection treats what it does not recognise as having no wire
+// form, which is the fail-closed direction.
 
 // Type is what a value IS, at the resolution every projection needs and no
 // finer. A struct is named by Ref rather than carried inline, so a type that
@@ -124,8 +133,12 @@ type Type struct {
 	Format string `json:"format,omitempty"`
 	// Ref is the key into [App.Structs], for a struct and only a struct.
 	Ref string `json:"ref,omitempty"`
-	// Elem is what a list, an array or a map carries.
+	// Elem is what a list, an array or a map carries; Key is what a map is
+	// looked up by. A document says nothing about a key — a JSON object's keys
+	// are text — but a reader of the ledger is about to go and change the
+	// declaration, and "map" is not enough to find it by.
 	Elem *Type `json:"elem,omitempty"`
+	Key  *Type `json:"key,omitempty"`
 	// Len is an array's length. A slice has none.
 	Len int `json:"len,omitempty"`
 	// Text says the value reads and writes itself as ONE WORD: an id, a
@@ -138,11 +151,22 @@ type Type struct {
 	Schema map[string]any `json:"schema,omitempty"`
 }
 
-// Struct is a declared struct's fields, in the order the wire carries them.
+// Struct is a declaration, read two ways because two wires read it two ways.
+//
+// Body is what an OBJECT carries: the declaration's own fields plus the ones an
+// embedded declaration promotes into it, under the names the body uses. Own is
+// what a FIXED LAYOUT slots: the declaration's own fields, in declaration order,
+// where an embedded declaration is ONE slot and promotes nothing.
+//
+// They are two lists because they are two facts, not two spellings of one — a
+// promoted field is in Body and is not a slot; an embedded declaration is a slot
+// and is not in Body. Each front end fills both, because how a declaration
+// flattens is a property of the language that declared it.
 type Struct struct {
 	Name string  `json:"name,omitempty"`
 	Pkg  string  `json:"pkg,omitempty"`
 	Body []Field `json:"body"`
+	Own  []Field `json:"own,omitempty"`
 }
 
 // Field is one member of a struct, with the two names a request can carry it
@@ -161,7 +185,13 @@ type Field struct {
 	Header string `json:"header,omitempty"`
 	// Required says the handler refuses the request without it.
 	Required bool `json:"required,omitempty"`
-	Type     Type `json:"type"`
+	// Embed says the field IS a declaration this one absorbs — a Go embedded
+	// struct, a C++ base. Private says the declaration keeps it to itself, so no
+	// wire reads or writes it; such a field appears in Own, because a layout has
+	// to know a name it must NOT give a slot to, and never in Body.
+	Embed   bool `json:"embed,omitempty"`
+	Private bool `json:"private,omitempty"`
+	Type    Type `json:"type"`
 }
 
 // Ref is the key a struct is filed under: its declaration, qualified by where it
@@ -175,6 +205,14 @@ func Ref(pkg, name string) string {
 		return name
 	}
 	return pkg + "." + name
+}
+
+// Own is the declaration's own fields — what a fixed layout slots. See [Struct].
+func (a *App) Own(t *Type) []Field {
+	if t == nil || t.Kind != Record || t.Ref == "" {
+		return nil
+	}
+	return a.Structs[t.Ref].Own
 }
 
 // Fields is the body of the struct t refers to, and nil for anything else. It is

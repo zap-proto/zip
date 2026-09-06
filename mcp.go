@@ -613,16 +613,13 @@ func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
 // Sorted by name, because this list is SERIALIZED — a host embeds it as a
 // build-time catalogue — and an artifact ordered by registration churns on an
 // edit that changed nothing a client can see.
-func (a *App) mcpTools() []map[string]any {
-	m := a.Manifest()
-	tools := make([]map[string]any, 0, len(m.Ops))
-	for _, op := range m.Ops {
-		tools = append(tools, mcpToolOf(m, op))
-	}
+func (a *App) mcpTools() []map[string]any { return Tools(a.Manifest()) }
+
+// sortTools puts the list in name order, which is the order it is published in.
+func sortTools(tools []map[string]any) {
 	sort.Slice(tools, func(i, j int) bool {
 		return tools[i]["name"].(string) < tools[j]["name"].(string)
 	})
-	return tools
 }
 
 // mcpToolOf is the ONE op→tool descriptor. Both the in-process projection
