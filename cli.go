@@ -109,16 +109,17 @@ type Flag struct {
 // Commands projects every registered typed op into a command. This is the whole
 // derivation: no registration, no list of commands, no per-endpoint code.
 func (a *App) Commands() []Command {
-	ops := a.Registry()
-	cmds := make([]Command, 0, len(ops))
-	for _, op := range ops {
-		doc, has := docFor(op.Pkg, op.Method, op.Path)
-		c := newCommand(op.Method, op.Path, opName(op), op.Summary, doc, has)
-		c.op = op
-		c.Args, c.Flags = bindIn(op.InType, pathParams(op.Path), docFields(has, doc), hasBody(op.Method))
-		cmds = append(cmds, c)
+	cmds := ProjectCLI(a.Manifest())
+	// What a description cannot carry: the handler. A command spelled
+	// here runs in this process, so the op it projects is attached by the id
+	// both halves already address it by.
+	ops := make(map[string]*registeredOp, len(cmds))
+	for _, op := range a.Registry() {
+		ops[opName(op)] = op
 	}
-	sortCommands(cmds)
+	for i := range cmds {
+		cmds[i].op = ops[cmds[i].OperationID]
+	}
 	return cmds
 }
 

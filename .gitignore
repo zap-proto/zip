@@ -1,0 +1,5 @@
+# What a build leaves behind. The projections zipc writes are checked in beside
+# the source (rust/examples/info/gen), because they are the contract; the
+# compiler's scratch is not.
+rust/target/
+rust/examples/*/target/
