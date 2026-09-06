@@ -32,3 +32,10 @@ test:
     # deliberately separate declarations of the batch shapes still describe one
     # thing. See contract/doc.go.
     run: cd contract && go test -count=1 -timeout 5m ./...
+  - name: py-test
+    # The Python front end declares ops from `typing` at run time and writes the
+    # .zap the Go suite above reads back. The two halves meet at
+    # py/example/orders.zap and each proves its own end of it, so a change to
+    # either that moves the file fails here. Standard library only — nothing to
+    # install.
+    run: cd py && python3 -m unittest discover -s test -t .

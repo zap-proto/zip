@@ -157,6 +157,46 @@ the IDL's own offset assignment packs and this layout aligns, so a hand-written
 schema with an `i32` before a wider field describes a wire this process does not
 speak.
 
+A schema does not have to be written by Go, and `py/` is the first front end
+that is not. A Python service declares its operations from `typing` — the
+annotations ARE the types, `Annotated[int, "…"]` IS the field's prose, `__doc__`
+IS the operation's, and all three are there at run time, so Python needs no pass
+over its own source and has no second file to keep in step. It writes a .zap and
+stops:
+
+    python3 -m zip example.orders:app -o example/orders.zap
+    zipgen openapi -schema example/orders.zap
+    zipgen mcp -schema example/orders.zap -lang go
+    zipgen cli -schema example/orders.zap -lang go
+    zipgen sdk -schema example/orders.zap -lang rust
+
+**A front end writes the schema and nothing else.** No language gets its own
+OpenAPI emitter, MCP emitter or CLI emitter — those exist once, here, and read
+the file. Five of them would be five dialects of one document, which is the
+failure the pivot exists to prevent.
+
+`python_test.go` is the other end of that file, and it holds two properties.
+The OFFSETS agree, which `ReadZAP` checks by deriving them again and refusing
+any disagreement — so a front end that packed its fields is refused rather than
+discovered by a peer reading the wrong eight bytes. And the DECLARATIONS are
+IDENTICAL: the same service written in Python and in Go produces the same
+structs, names, order and interface, because every name is one rule and not one
+per language. That identity is why `ZAPSchema` now spells a field by the name it
+CROSSES under (`json:"unit_cents"`, not `UnitCents` — see `wireField`): `ReadZAP`
+hands the schema's spelling back as the field's json name, so a schema naming Go
+identifiers generates clients that send names the decoder does not know.
+
+What the file does NOT carry yet is worth knowing before relying on it. The
+released `idl` parser skips a `#` comment as whitespace, so the prose Python
+writes above a struct, a field and a method reaches the file and stops there —
+every projection of a schema-read app has empty summaries and empty flag help.
+The AST already has `Doc` on File, Struct, Field, Interface and Method on
+`zap-proto/go`'s `zap/schema-is-source` branch; releasing that and reading it
+into `zip.Describe` from `ReadZAP` is what turns prose on for every language at
+once. Optionality is the same shape of loss: `Optional[str]` and a Go pointer
+both say a value may be absent, and the IDL has no word for it, so `required` is
+absent from a document generated through the pivot.
+
 An **untyped** `app.Get(path, func(c *zip.Ctx) error)` registers no op, so it
 appears in none of them. That is the single biggest source of surface that
 "exists" but cannot be documented, called by an agent, driven from a script, or

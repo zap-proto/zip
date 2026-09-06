@@ -27,10 +27,10 @@ func crossApp() *zip.App {
 	zip.Describe("POST /v1/account", zip.Doc{
 		Description: "GetAccount retrieves account details by ID.\n\nReturns the balance and active status.",
 		Fields: map[string]string{
-			"AccountIn.id":        "Unique account identifier",
-			"AccountOut.id":       "Account identifier",
-			"AccountOut.balance":  "Current balance in cents",
-			"AccountOut.active":   "Whether account is currently active",
+			"AccountIn.id":       "Unique account identifier",
+			"AccountOut.id":      "Account identifier",
+			"AccountOut.balance": "Current balance in cents",
+			"AccountOut.active":  "Whether account is currently active",
 		},
 		Example:  []byte(`{"id": "acc_1"}`),
 		Response: []byte(`{"id": "acc_1", "balance": 1000, "active": true}`),
@@ -205,4 +205,3 @@ func TestCppCLI_GeneratesCppCLIBindings(t *testing.T) {
 		t.Errorf("C++ CLI missing run_cli dispatcher")
 	}
 }
-

@@ -31,33 +31,33 @@ type Sealed struct {
 
 // Trunk carries one field of every form the emitter writes.
 type Trunk struct {
-	B    bool
-	I8   int8
-	I16  int16
-	I32  int32
-	I64  int64
-	U8   uint8
-	U16  uint16
-	U32  uint32
-	U64  uint64
-	F32  float32
-	F64  float64
-	C    Count
-	Text string
-	Raw  []byte
-	Leaf Leaf
-	PtrU *uint64
-	PtrS *string
-	PtrB *bool
-	PtrL *Leaf
-	Nums []uint32
-	Sigs []int32
-	Bigs []float64
-	Strs []string
-	Bufs [][]byte
-	Bits []bool
-	Kids []Leaf
-	Ptrs []*Leaf
+	B     bool
+	I8    int8
+	I16   int16
+	I32   int32
+	I64   int64
+	U8    uint8
+	U16   uint16
+	U32   uint32
+	U64   uint64
+	F32   float32
+	F64   float64
+	C     Count
+	Text  string
+	Raw   []byte
+	Leaf  Leaf
+	PtrU  *uint64
+	PtrS  *string
+	PtrB  *bool
+	PtrL  *Leaf
+	Nums  []uint32
+	Sigs  []int32
+	Bigs  []float64
+	Strs  []string
+	Bufs  [][]byte
+	Bits  []bool
+	Kids  []Leaf
+	Ptrs  []*Leaf
 	Seal  Sealed
 	Seals []Sealed
 	PKids *[]Leaf

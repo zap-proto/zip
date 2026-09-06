@@ -37,6 +37,8 @@ func main() {
 		runDocs(args)
 	case "zap":
 		runZap(args)
+	case "openapi":
+		runOpenAPI(args)
 	default:
 		usage()
 		os.Exit(1)
@@ -51,6 +53,7 @@ Commands:
   mcp    Generate native Go, Rust, or C++ MCP server and tools
   cli    Generate native Go, Rust, or C++ CLI commands and runners
   docs   Generate @hanzo/docs compatible MDX documentation pages
+  openapi Generate the OpenAPI 3.1 document
   zap    Generate the ZAP wire runtime (reader + builder) for a target language
 
 Run 'zipgen <command> -h' for command options.
@@ -140,8 +143,13 @@ func runMCP(args []string) {
 			os.Exit(1)
 		}
 		writeOutput(*out, "mcp.hpp", res.Header)
+	case "go":
+		// Go serves MCP from the app itself, so what a Go target needs
+		// generated is the tool list, not a server around it — the same
+		// split -lang go makes for the CLI.
+		writeOutput(*out, "mcp.json", marshal(app.MCPTools()))
 	default:
-		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust or cpp)\n", *lang)
+		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust, cpp, or go)\n", *lang)
 		os.Exit(1)
 	}
 }
@@ -172,9 +180,7 @@ func runCLI(args []string) {
 		}
 		writeOutput(*out, "cli.hpp", res.Header)
 	case "go":
-		cmds := app.Commands()
-		data, _ := json.MarshalIndent(cmds, "", "  ")
-		writeOutput(*out, "cli.json", data)
+		writeOutput(*out, "cli.json", marshal(app.Commands()))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust, cpp, or go)\n", *lang)
 		os.Exit(1)
@@ -205,6 +211,33 @@ func runDocs(args []string) {
 		_ = os.WriteFile(filepath.Join(*out, fname), []byte(content), 0644)
 	}
 	fmt.Printf("Generated %d documentation pages in %s\n", len(bundle.Pages)+1, *out)
+}
+
+// runOpenAPI writes the OpenAPI document the schema's ops describe.
+//
+// It is the same projection an app serves at /openapi.json, computed from the
+// same registry, so a service that is not this process and a service that is
+// publish one document and not two spellings of one.
+func runOpenAPI(args []string) {
+	fs := flag.NewFlagSet("openapi", flag.ExitOnError)
+	schema := fs.String("schema", "", "path to the .zap schema declaring the ops to project")
+	iface := fs.String("interface", "", "which interface of the schema to project (required when it declares more than one)")
+	out := fs.String("o", "", "output directory or file")
+	fs.Parse(args)
+
+	app := source(*schema, *iface, "an OpenAPI document")
+	writeOutput(*out, "openapi.json", marshal(app.OpenAPISpec()))
+}
+
+// marshal is the JSON every projection that answers with data writes: indented,
+// so a document in a repository diffs by the line that changed.
+func marshal(v any) []byte {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
+		os.Exit(1)
+	}
+	return append(data, '\n')
 }
 
 // source is the app whose registry the projections are computed from, read

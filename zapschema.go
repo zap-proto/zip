@@ -417,7 +417,7 @@ func (e *emitter) define(t reflect.Type) string {
 
 	fields := make([]Field, 0, len(shape.Slots))
 	for _, s := range shape.Slots {
-		fields = append(fields, Field{Name: idlName(s.Name), Type: s.Type, Offset: s.Offset})
+		fields = append(fields, Field{Name: idlName(wireField(t, s.Name)), Type: s.Type, Offset: s.Offset})
 		e.opacity(t, name, s)
 		if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
 			e.schema.Coded = append(e.schema.Coded, Coded{Struct: name, Field: s.Name, Type: s.Type})
@@ -428,6 +428,31 @@ func (e *emitter) define(t reflect.Type) string {
 		Name: name, Fields: fields, Size: shape.Size, From: goName(t),
 	})
 	return name
+}
+
+// wireField is the name a field crosses under: the one the decoder reads and
+// the one [ReadZAP] hands back as this field's json name when the schema is read
+// again. It is NOT the Go identifier.
+//
+// The difference is the whole point of a schema. A declaration spelled UnitCents
+// in Go and unit_cents on the wire crosses as unit_cents, so a schema stating
+// UnitCents describes a service that does not exist: every client generated from
+// it sends a name the decoder does not know, and nothing fails until a peer
+// tries it. The name in the file is therefore the wire's, which is also what
+// makes the file language-neutral — a Python service declaring the same fields
+// writes the same bytes here, because neither language's identifier is in them.
+//
+// A field that opts out of the JSON edge with `json:"-"` still crosses this wire
+// and has no wire name to take, so it keeps its own.
+func wireField(t reflect.Type, goName string) string {
+	f, ok := t.FieldByName(goName)
+	if !ok {
+		return goName
+	}
+	if n := jsonFieldName(f); n != "-" {
+		return n
+	}
+	return goName
 }
 
 // opacity records a field whose bytes are exact and whose TYPE NAME is lost. A

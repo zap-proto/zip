@@ -600,3 +600,39 @@ func structNamed(t *testing.T, s *Schema, name string) *Struct {
 	t.Fatalf("no struct %q in:\n%s", name, s.String())
 	return nil
 }
+
+// A field is spelled by the name it crosses under, not by its Go identifier.
+//
+// The schema is read back as a contract: ReadZAP hands each field the schema's
+// spelling as its json name, so a schema saying UnitCents produces a client
+// sending UnitCents to a decoder that only knows unit_cents. Nothing fails until
+// a peer tries it, which is the failure a schema exists to prevent.
+func TestZAPSchema_FieldsAreSpelledAsTheyCross(t *testing.T) {
+	type priced struct {
+		UnitCents uint64 `json:"unit_cents"`
+		Note      string // no tag: the field's own name IS its wire name
+		Internal  bool   `json:"-"` // no wire name to take; it keeps its own
+	}
+	a := New(Config{AppName: "priced"})
+	Post(a, "/v1/priced", nop[priced, priced])
+
+	st := ZAPSchema("priced", a).Structs[0]
+	var got []string
+	for _, f := range st.Fields {
+		got = append(got, f.Name)
+	}
+	if want := []string{"unit_cents", "Note", "Internal"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("fields are %v, want %v", got, want)
+	}
+
+	// And the loop closes on the wire name: read back, each field's json name is
+	// the one the decoder reads.
+	apps, err := ReadZAP("priced.zap", []byte(ZAPSchema("priced", a).String()))
+	if err != nil {
+		t.Fatalf("ReadZAP: %v", err)
+	}
+	in := apps[0].Registry()[0].InType
+	if tag := in.Field(0).Tag.Get("json"); tag != "unit_cents" {
+		t.Errorf("the read-back field is json %q, want unit_cents", tag)
+	}
+}

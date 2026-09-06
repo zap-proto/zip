@@ -1,0 +1,13 @@
+[project]
+name = "zip"
+version = "0.1.0"
+description = "Declare a service in Python; answer with the .zap schema every projection is computed from."
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["zip"]
