@@ -774,3 +774,12 @@ func goName(t reflect.Type) string {
 	}
 	return n
 }
+
+// deref is the value behind a pointer, for the projections that still read Go
+// types rather than a manifest.
+func deref(t reflect.Type) reflect.Type {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
+}

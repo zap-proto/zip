@@ -462,7 +462,7 @@ func (e *graph) object(n map[string]any, t reflect.Type, sel []*gqlSel, path []a
 		if s.name == "__typename" {
 			out[key] = "JSON"
 			if t != nil {
-				out[key] = gqlType(t, "")
+				out[key] = gqlTypeOf(t)
 			}
 			continue
 		}
@@ -608,4 +608,14 @@ func sub(path []any, k any) []any {
 	copy(out, path)
 	out[len(path)] = k
 	return out
+}
+
+// gqlTypeOf is __typename for the value in hand: the executor walks Go values,
+// so it names one from its Go type. The schema names the same type from a
+// manifest; both go through gqlName and title, so the two spellings agree.
+func gqlTypeOf(t reflect.Type) string {
+	if n := typeName(t); n != "" {
+		return title(gqlName(n))
+	}
+	return "JSON"
 }

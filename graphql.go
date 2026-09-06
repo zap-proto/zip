@@ -30,9 +30,10 @@ package zip
 // file and invisible to it.
 
 import (
-	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/zap-proto/zip/manifest"
 )
 
 // GraphQLSDL renders the schema this app's ops describe, in GraphQL's schema
@@ -41,14 +42,18 @@ import (
 // SDL and not a Go type graph, because SDL is what every GraphQL client, code
 // generator and editor already reads. The document is the artifact; publishing
 // it is what makes the projection usable by anything that is not this process.
-func (a *App) GraphQLSDL() string {
-	ops := a.Registry()
-	sort.Slice(ops, func(i, j int) bool { return ops[i].OperationID < ops[j].OperationID })
+func (a *App) GraphQLSDL() string { return GraphQL(a.Manifest()) }
 
-	g := &sdl{types: map[string]string{}, building: map[string]bool{}}
+// GraphQL is that schema over a manifest, which is where it is computed. A
+// service that never linked Go reaches it with its own manifest.
+func GraphQL(m *manifest.App) string {
+	ops := append([]manifest.Op(nil), m.Ops...)
+	sort.Slice(ops, func(i, j int) bool { return ops[i].ID < ops[j].ID })
+
+	g := &sdl{app: m, types: map[string]string{}, building: map[string]bool{}}
 	var query, mutation []string
 	for _, op := range ops {
-		if op.OperationID == "" {
+		if op.ID == "" {
 			// An op with no id has no name to be called by. It is reachable over
 			// REST by its path, which GraphQL has no equivalent of, so it is
 			// absent here rather than given an invented name that would change
@@ -99,20 +104,21 @@ func writeBlock(b *strings.Builder, name string, fields []string) {
 // self-referential struct is reached again while its own definition is still
 // being written, so membership in `types` is not yet true and cannot be the test.
 type sdl struct {
+	app      *manifest.App
 	types    map[string]string
 	building map[string]bool
 }
 
-func (g *sdl) field(op *registeredOp) string {
+func (g *sdl) field(op manifest.Op) string {
 	var b strings.Builder
 	if op.Summary != "" {
 		b.WriteString(`"""` + op.Summary + `""" `)
 	}
-	b.WriteString(gqlName(op.OperationID))
-	if args := g.args(op.InType); args != "" {
+	b.WriteString(gqlName(op.ID))
+	if args := g.args(op.In); args != "" {
 		b.WriteString("(" + args + ")")
 	}
-	b.WriteString(": " + g.typeRef(op.OutType, "Out"))
+	b.WriteString(": " + g.typeRef(op.Out, "Out"))
 	return b.String()
 }
 
@@ -121,77 +127,78 @@ func (g *sdl) field(op *registeredOp) string {
 // FLATTENED rather than a single `input:` object, because an op's In IS its
 // argument list — wrapping it would add a level no other projection has and make
 // the GraphQL call read differently from the same call over REST or the CLI.
-func (g *sdl) args(t reflect.Type) string {
+func (g *sdl) args(t *manifest.Type) string {
 	var out []string
-	for _, f := range wireFields(t) {
-		if headerFieldName(f) != "" {
+	for _, f := range g.app.Fields(t) {
+		if f.Header != "" {
 			// A header is AMBIENT, not an argument. Over REST its value comes from
 			// the request — set by whatever runs in front of the handler — so
 			// publishing it as an argument would invite a client to supply its own
 			// instead. The executor refuses it by the same rule.
 			continue
 		}
-		name := jsonFieldName(f)
-		if name == "-" {
+		if f.JSON == "-" {
 			continue
 		}
-		ref := g.typeRef(f.Type, f.Name)
-		if strings.Contains(f.Tag.Get("validate"), "required") {
+		ref := g.typeRef(&f.Type, f.Name)
+		if f.Required {
 			ref += "!"
 		}
-		out = append(out, gqlName(name)+": "+ref)
+		out = append(out, gqlName(f.JSON)+": "+ref)
 	}
 	return strings.Join(out, ", ")
 }
 
 // typeRef names t in GraphQL, defining it first when it is a struct.
-func (g *sdl) typeRef(t reflect.Type, hint string) string {
-	t = deref(t)
+func (g *sdl) typeRef(t *manifest.Type, hint string) string {
 	if t == nil {
 		// An op with no Out still answers — it answers nothing. GraphQL has no
 		// void, so it is Boolean: the call either happened or it errored.
 		return "Boolean"
 	}
-	if t == timeType {
-		// time.Time writes itself as an RFC 3339 string, so a string is what a
-		// caller sees. Describing it by its fields would describe something that
-		// never crosses the wire.
-		return "String"
-	}
-	if isMarshaler(t) {
-		// The type writes its own JSON, so its Go fields say nothing about the
-		// shape that arrives. JSON is the honest name for a value only the type
-		// itself can describe.
+	if t.States {
+		// The type writes its own JSON, so what it is made of says nothing about
+		// the shape that arrives. What it STATES, if it states one, is the
+		// honest name — a timestamp states a string, and describing it by its
+		// fields would describe something that never crosses the wire. A type
+		// that states nothing is JSON, which is what an opaque value is.
+		switch t.Schema["type"] {
+		case "string":
+			return "String"
+		case "integer":
+			return "Int"
+		case "number":
+			return "Float"
+		case "boolean":
+			return "Boolean"
+		}
 		return "JSON"
 	}
-	switch t.Kind() {
-	case reflect.Bool:
+	switch t.Kind {
+	case manifest.Bool:
 		return "Boolean"
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case manifest.Int, manifest.Uint:
 		return "Int"
-	case reflect.Float32, reflect.Float64:
+	case manifest.Float:
 		return "Float"
-	case reflect.String:
+	case manifest.String:
 		return "String"
-	case reflect.Slice, reflect.Array:
-		if t.Elem().Kind() == reflect.Uint8 {
+	case manifest.List, manifest.Fixed:
+		if t.Elem != nil && t.Elem.Kind == manifest.Uint && t.Elem.Format == "uint8" {
 			return "String" // []byte crosses as text, as it does in the JSON document
 		}
-		return "[" + g.typeRef(t.Elem(), hint) + "]"
-	case reflect.Struct:
+		return "[" + g.typeRef(t.Elem, hint) + "]"
+	case manifest.Record:
 		return g.define(t, hint)
-	case reflect.Map, reflect.Interface:
-		// GraphQL has no untyped node. Naming this JSON is honest about what it
-		// is — an opaque blob the schema cannot describe — rather than inventing
-		// a shape a client would then rely on.
-		return "JSON"
 	}
+	// GraphQL has no untyped node. Naming a map or a value that names no type
+	// JSON is honest about what it is — an opaque blob the schema cannot
+	// describe — rather than inventing a shape a client would then rely on.
 	return "JSON"
 }
 
 // define writes a named object type once and returns its name.
-func (g *sdl) define(t reflect.Type, hint string) string {
+func (g *sdl) define(t *manifest.Type, hint string) string {
 	name := gqlType(t, hint)
 	if g.building[name] {
 		return name // reached while still being written: the cycle guard
@@ -205,29 +212,21 @@ func (g *sdl) define(t reflect.Type, hint string) string {
 	var b strings.Builder
 	b.WriteString("type " + name + " {\n")
 	n := 0
-	for _, f := range wireFields(t) {
-		fname := jsonFieldName(f)
-		if fname == "-" {
+	for _, f := range g.app.Fields(t) {
+		if f.JSON == "-" {
 			continue
 		}
-		b.WriteString("  " + gqlName(fname) + ": " + g.typeRef(f.Type, f.Name) + "\n")
+		b.WriteString("  " + gqlName(f.JSON) + ": " + g.typeRef(&f.Type, f.Name) + "\n")
 		n++
 	}
 	if n == 0 {
-		// A type with no exported fields is not expressible: `type X {}` is
-		// invalid SDL. It becomes JSON rather than an empty type nobody can query.
+		// A type with no members is not expressible: `type X {}` is invalid SDL.
+		// It becomes JSON rather than an empty type nobody can query.
 		return "JSON"
 	}
 	b.WriteString("}\n\n")
 	g.types[name] = b.String()
 	return name
-}
-
-func deref(t reflect.Type) reflect.Type {
-	for t != nil && t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	return t
 }
 
 // gqlType names a struct. The Go type name is used when it has one; an anonymous
@@ -237,9 +236,9 @@ func deref(t reflect.Type) reflect.Type {
 // as though somebody wrote it is the point of generating one. openapi's sanitize
 // is not reused here: it lower-cases, which is right for a component key and
 // wrong for a type.
-func gqlType(t reflect.Type, hint string) string {
-	if n := typeName(t); n != "" {
-		return title(gqlName(n))
+func gqlType(t *manifest.Type, hint string) string {
+	if t != nil && t.Name != "" {
+		return title(gqlName(t.Name))
 	}
 	if hint == "" {
 		return "JSON"
