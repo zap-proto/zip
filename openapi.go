@@ -60,6 +60,10 @@ func (a *App) installOpenAPIRoutes() {
 // buildOpenAPI walks the registered typed ops and builds an OpenAPI 3.1
 // spec as a plain map (json.Marshal serializes anything map-shaped).
 func (a *App) buildOpenAPI() map[string]any {
+	return ProjectOpenAPI(a.Manifest())
+}
+
+func (a *App) buildOpenAPIReflect() map[string]any {
 	cfg := a.cfg.OpenAPI
 	if cfg.Title == "" {
 		cfg.Title = a.cfg.AppName
@@ -711,6 +715,11 @@ type schemaRegistry struct {
 	defs   map[string]any          // name → definition
 	names  map[reflect.Type]string // type → the name it is defined under
 	refs   map[string]int          // name → how many $refs point at it
+	// byID is the same map for a type that arrived as a description rather than
+	// as a reflect.Type — a manifest's type id → the name it is defined under.
+	// Two keys, one registry, because a document is assembled the same way
+	// whichever front end described the ops.
+	byID map[string]string
 
 	// origin is the app that DECLARED the op currently being described, when
 	// that op arrived through composition — empty for the host's own. It
@@ -728,6 +737,7 @@ func newSchemaRegistry(prefix string) *schemaRegistry {
 		defs:   map[string]any{},
 		names:  map[reflect.Type]string{},
 		refs:   map[string]int{},
+		byID:   map[string]string{},
 	}
 }
 

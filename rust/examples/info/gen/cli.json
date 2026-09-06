@@ -1,0 +1,200 @@
+[
+  {
+    "Service": "chain",
+    "Name": "bootstrapped-get",
+    "OperationID": "get_chain_bootstrapped",
+    "Summary": "Bootstrapped reports whether a chain has finished bootstrapping on this node.",
+    "Description": "Bootstrapped reports whether a chain has finished bootstrapping on this node.",
+    "Method": "GET",
+    "Path": "/chain/bootstrapped",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "chain",
+        "Field": "chain",
+        "Type": "string",
+        "Help": "Chain is the alias or id of the chain to ask about.",
+        "Required": true
+      }
+    ],
+    "Example": {
+      "chain": "X"
+    }
+  },
+  {
+    "Service": "chain",
+    "Name": "id-get",
+    "OperationID": "get_chain_id",
+    "Summary": "ChainID resolves a chain's alias to the id it names.",
+    "Description": "ChainID resolves a chain's alias to the id it names.",
+    "Method": "GET",
+    "Path": "/chain/id",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "alias",
+        "Field": "alias",
+        "Type": "string",
+        "Help": "Alias is the name the chain answers to, such as \"X\".",
+        "Required": true
+      }
+    ],
+    "Example": {
+      "alias": "X"
+    }
+  },
+  {
+    "Service": "chains",
+    "Name": "list",
+    "OperationID": "get_chains",
+    "Summary": "Chains are the chains this node is running, which is a subset of the chains the P-Chain knows about.",
+    "Description": "Chains are the chains this node is running, which is a subset of the chains\nthe P-Chain knows about.",
+    "Method": "GET",
+    "Path": "/chains",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "fees",
+    "Name": "list",
+    "OperationID": "get_fees",
+    "Summary": "Fees are the transaction fees this node charges, in nLUX.",
+    "Description": "Fees are the transaction fees this node charges, in nLUX.",
+    "Method": "GET",
+    "Path": "/fees",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "lps",
+    "Name": "list",
+    "OperationID": "get_lps",
+    "Summary": "LPs is where the network's stake stands on every current Lux Proposal.",
+    "Description": "LPs is where the network's stake stands on every current Lux Proposal.",
+    "Method": "GET",
+    "Path": "/lps",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "network",
+    "Name": "id-get",
+    "OperationID": "get_network_id",
+    "Summary": "NetworkID is the number of the network this node is on.",
+    "Description": "NetworkID is the number of the network this node is on.",
+    "Method": "GET",
+    "Path": "/network/id",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "network",
+    "Name": "name-get",
+    "OperationID": "get_network_name",
+    "Summary": "NetworkName is the name of the network this node is on.",
+    "Description": "NetworkName is the name of the network this node is on.",
+    "Method": "GET",
+    "Path": "/network/name",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "node",
+    "Name": "id-get",
+    "OperationID": "get_node_id",
+    "Summary": "Identity is this node's id, with the proof it holds the staking key that id is derived from.",
+    "Description": "Identity is this node's id, with the proof it holds the staking key that id is\nderived from.",
+    "Method": "GET",
+    "Path": "/node/id",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "node",
+    "Name": "ip-get",
+    "OperationID": "get_node_ip",
+    "Summary": "Address is where this node tells its peers to reach it.",
+    "Description": "Address is where this node tells its peers to reach it.",
+    "Method": "GET",
+    "Path": "/node/ip",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "node",
+    "Name": "version-get",
+    "OperationID": "get_node_version",
+    "Summary": "NodeVersion is what this node is running: its own release, the database format it reads, and the VM protocol it speaks.",
+    "Description": "NodeVersion is what this node is running: its own release, the database format\nit reads, and the VM protocol it speaks.",
+    "Method": "GET",
+    "Path": "/node/version",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "peers",
+    "Name": "list",
+    "OperationID": "get_peers",
+    "Summary": "Peers are the nodes this one is connected to.",
+    "Description": "Peers are the nodes this one is connected to. A list of node ids narrows the\nanswer to those, and no list asks for all of them.",
+    "Method": "GET",
+    "Path": "/peers",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "node-i-ds",
+        "Field": "nodeIDs",
+        "Type": "json",
+        "Help": "NodeIDs are the peers to answer for; none asks for all of them.",
+        "Required": false
+      }
+    ],
+    "Example": {
+      "nodeIDs": []
+    }
+  },
+  {
+    "Service": "upgrades",
+    "Name": "list",
+    "OperationID": "get_upgrades",
+    "Summary": "Upgrades is the upgrade schedule this node runs.",
+    "Description": "Upgrades is the upgrade schedule this node runs.",
+    "Method": "GET",
+    "Path": "/upgrades",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "uptime",
+    "Name": "list",
+    "OperationID": "get_uptime",
+    "Summary": "Uptime is how much of the network, by stake, reports having seen this node up.",
+    "Description": "Uptime is how much of the network, by stake, reports having seen this node up.",
+    "Method": "GET",
+    "Path": "/uptime",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  },
+  {
+    "Service": "vms",
+    "Name": "list",
+    "OperationID": "get_vms",
+    "Summary": "VMs are the virtual machines installed on this node, and the feature extensions its UTXO chains understand.",
+    "Description": "VMs are the virtual machines installed on this node, and the feature\nextensions its UTXO chains understand.",
+    "Method": "GET",
+    "Path": "/vms",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  }
+]
