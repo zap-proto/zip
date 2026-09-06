@@ -33,6 +33,8 @@ func main() {
 		runMCP(args)
 	case "cli":
 		runCLI(args)
+	case "openapi":
+		runOpenAPI(args)
 	case "docs":
 		runDocs(args)
 	case "zap":
@@ -47,11 +49,12 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: zipgen <command> [options]
 
 Commands:
-  sdk    Generate native Go, Rust, or C++ client SDK with full doc comments
-  mcp    Generate native Go, Rust, or C++ MCP server and tools
-  cli    Generate native Go, Rust, or C++ CLI commands and runners
-  docs   Generate @hanzo/docs compatible MDX documentation pages
-  zap    Generate the ZAP wire runtime (reader + builder) for a target language
+  sdk      Generate native Go, Rust, or C++ client SDK with full doc comments
+  mcp      Generate native Go, Rust, or C++ MCP server and tools
+  cli      Generate native Go, Rust, or C++ CLI commands and runners
+  openapi  Write the OpenAPI 3.1 document the ops describe
+  docs     Generate @hanzo/docs compatible MDX documentation pages
+  zap      Generate the ZAP wire runtime (reader + builder) for a target language
 
 Run 'zipgen <command> -h' for command options.
 `)
@@ -179,6 +182,26 @@ func runCLI(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown language: %s (choose rust, cpp, or go)\n", *lang)
 		os.Exit(1)
 	}
+}
+
+// runOpenAPI writes the document, which is the projection every HTTP client
+// reads and the one this command could not produce until the registry could be
+// read from a schema. It takes no -lang: an OpenAPI document is the artifact,
+// and a language reads it rather than being generated as it.
+func runOpenAPI(args []string) {
+	fs := flag.NewFlagSet("openapi", flag.ExitOnError)
+	schema := fs.String("schema", "", "path to the .zap schema declaring the ops to project")
+	iface := fs.String("interface", "", "which interface of the schema to project (required when it declares more than one)")
+	out := fs.String("o", "", "output file or directory")
+	fs.Parse(args)
+
+	app := source(*schema, *iface, "an OpenAPI document")
+	data, err := json.MarshalIndent(app.OpenAPISpec(), "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
+		os.Exit(1)
+	}
+	writeOutput(*out, "openapi.json", append(data, '\n'))
 }
 
 func runDocs(args []string) {

@@ -118,7 +118,7 @@ handler core they all share, so they cannot diverge in behavior.
 | CLI commands | `cli.go`, `clispec.go` | operators, scripts | `operationId` → `<service> <operation>` |
 | op-call plane | `call.go` | **other services** | `operationId` |
 | GraphQL schema | `graphql.go` | one query over several ops | `operationId` |
-| ZAP IDL | `zapschema.go` | peers with no Go types — **and it can REFUSE** | method name |
+| ZAP IDL | `zapschema.go`, `zapread.go` | peers with no Go types — **and it can REFUSE** | method name |
 | Go SDK source | `sdk.go` | published clients that do not link the service | `operationId` |
 
 `opName(op)` is the one place the id rule lives; they all agree on the token.
@@ -156,6 +156,65 @@ where they differ, naming every disagreement. That refusal is not theoretical �
 the IDL's own offset assignment packs and this layout aligns, so a hand-written
 schema with an `i32` before a wider field describes a wire this process does not
 speak.
+
+## A service declared in C++ — `cpp/`
+
+`ReadZAP` made the .zap file the registry a projection reduces over, which
+means a service does not have to be written in Go to have one. `cpp/zipcpp` is
+the C++ front end: it reads a C++ service with Clang's own libTooling and writes
+the .zap the declarations describe. From there nothing is language-specific —
+`cmd/zipgen` reads that file exactly as it reads one written from Go ops, and
+the OpenAPI document, the MCP tool list, the CLI, the SDKs and the docs come out
+of the same code.
+
+    class ZIP_SERVICE accounts {      cpp/zip.hpp is the whole surface: one attribute
+     public:
+      /// Read one account by id.
+      account read(lookup req);       one struct in, one struct out
+    };
+
+    zipcpp -package accounts -o accounts.zap accounts.hpp -- -std=c++20
+    zipgen openapi -schema accounts.zap -o openapi.json
+    zipgen mcp     -schema accounts.zap -lang cpp -o mcp.hpp
+    zipgen cli     -schema accounts.zap -lang go  -o cli.json
+
+A language's front end therefore ENDS at a correct .zap. It writes no OpenAPI
+emitter and no MCP emitter of its own; those exist once, downstream, and a
+second one per language is the divergence this arrangement exists to prevent.
+
+**Why the AST.** C++ has no proc-macro and no reflection at run time, so a
+declaration's structure and its prose both have to be read where both still
+exist: the compiler's parse. Clang attaches a `///` comment to the declaration
+it precedes, so a member's sentence is read from the member. That is the same
+rule `cmd/zipdoc` follows for Go, for the same reason, and it is why neither
+needs a block in the function's comment restating what the members are.
+
+**The wire rule is stated twice and checked once.** `internal/zapenc.LayoutOf`
+derives the layout the encoder speaks; `cpp/zipcpp/schema.hpp` derives it again
+to write the offsets. Nothing keeps two statements of one rule together except a
+gate, and this one is already built: `ReadZAP` derives the layout AGAIN from the
+schema and refuses any field whose stated offset is not the derived one, naming
+every disagreement. `cpp_test.go` reads the committed schema through it, so a
+C++ emitter that drifted by one byte fails a Go test. `cmake --build build
+--target check` is the other half — `zipcpp -check` is to a C++ service what
+`zipdoc -check` is to a Go one.
+
+**What does not cross, and is said so.** An optional (the schema states a type,
+never its absence), a map, a pointer, a list of lists, a fixed run of anything
+wider than a byte, a struct that contains itself, a struct with a base class,
+and a method taking two payloads. Each costs its own operation and nothing else,
+and each is named in the file's ledger under the same registers `ZAPSchema`
+writes — blocked, opaque, coded, renamed.
+
+**What the pivot loses today.** The prose. zipcpp writes every `///` into the
+schema above the declaration it is about, and `idl.Parse` skips a `#` comment as
+whitespace, so no node carries it: the registry `ReadZAP` builds has no
+descriptions and every projection of it is silent. This is not a C++ problem —
+`ZAPSchema` writes a Go handler's doc comment into the same comments and loses
+it the same way. It closes in one place, `github.com/zap-proto/go/idl`: a `Doc`
+on `Interface`, `Method`, `Struct` and `Field`, filled from the comment block
+above each, and `ReadZAP` calling `Describe`. `TestCppSchemaCarriesNoProse`
+holds the gap so that closing it is a deliberate change and not a surprise.
 
 An **untyped** `app.Get(path, func(c *zip.Ctx) error)` registers no op, so it
 appears in none of them. That is the single biggest source of surface that

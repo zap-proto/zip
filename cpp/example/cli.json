@@ -1,0 +1,97 @@
+[
+  {
+    "Service": "list",
+    "Name": "list",
+    "OperationID": "list_",
+    "Summary": "",
+    "Description": "",
+    "Method": "POST",
+    "Path": "/list_",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "offset",
+        "Field": "offset",
+        "Type": "integer",
+        "Help": "",
+        "Required": false
+      },
+      {
+        "Name": "limit",
+        "Field": "limit",
+        "Type": "integer",
+        "Help": "",
+        "Required": false
+      },
+      {
+        "Name": "descending",
+        "Field": "descending",
+        "Type": "boolean",
+        "Help": "",
+        "Required": false
+      }
+    ],
+    "Example": null
+  },
+  {
+    "Service": "post",
+    "Name": "post",
+    "OperationID": "post",
+    "Summary": "",
+    "Description": "",
+    "Method": "POST",
+    "Path": "/post",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "account",
+        "Field": "account",
+        "Type": "string",
+        "Help": "",
+        "Required": false
+      },
+      {
+        "Name": "cents",
+        "Field": "cents",
+        "Type": "integer",
+        "Help": "",
+        "Required": false
+      },
+      {
+        "Name": "memo",
+        "Field": "memo",
+        "Type": "string",
+        "Help": "",
+        "Required": false
+      },
+      {
+        "Name": "reference",
+        "Field": "reference",
+        "Type": "string",
+        "Help": "",
+        "Required": false
+      }
+    ],
+    "Example": null
+  },
+  {
+    "Service": "read",
+    "Name": "read",
+    "OperationID": "read",
+    "Summary": "",
+    "Description": "",
+    "Method": "POST",
+    "Path": "/read",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "id",
+        "Field": "id",
+        "Type": "string",
+        "Help": "",
+        "Required": false
+      }
+    ],
+    "Example": null
+  }
+]
