@@ -1,4 +1,9 @@
 // Command zipgen generates native Go, Rust, and C++ SDKs, MCP servers, and @hanzo/docs.
+//
+// Every projection here is computed from an app's typed-op registry, which
+// is the source: the ops decide the routes, the OpenAPI document, the MCP
+// tool list, the CLI and the docs pages, and nothing downstream is written
+// by hand. An app with no ops therefore has no projection — see [source].
 package main
 
 import (
@@ -59,7 +64,7 @@ func runSDK(args []string) {
 	out := fs.String("o", "", "output directory or file")
 	fs.Parse(args)
 
-	app := zip.New(zip.Config{AppName: *pkg})
+	app := source(zip.New(zip.Config{AppName: *pkg}), "an SDK")
 	switch strings.ToLower(*lang) {
 	case "rust", "rs":
 		res, err := app.RustSDK(*pkg)
@@ -115,7 +120,7 @@ func runMCP(args []string) {
 	out := fs.String("o", "", "output directory or file")
 	fs.Parse(args)
 
-	app := zip.New(zip.Config{AppName: *pkg})
+	app := source(zip.New(zip.Config{AppName: *pkg}), "an MCP server")
 	switch strings.ToLower(*lang) {
 	case "rust", "rs":
 		res, err := app.RustMCP(*pkg)
@@ -144,7 +149,7 @@ func runCLI(args []string) {
 	out := fs.String("o", "", "output directory or file")
 	fs.Parse(args)
 
-	app := zip.New(zip.Config{AppName: *pkg})
+	app := source(zip.New(zip.Config{AppName: *pkg}), "a CLI")
 	switch strings.ToLower(*lang) {
 	case "rust", "rs":
 		res, err := app.RustCLI(*pkg)
@@ -176,7 +181,7 @@ func runDocs(args []string) {
 	out := fs.String("o", "./docs", "output directory for MDX pages")
 	fs.Parse(args)
 
-	app := zip.New(zip.Config{AppName: *title})
+	app := source(zip.New(zip.Config{AppName: *title}), "documentation")
 	bundle, err := app.DocsMarkdown(*title)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "zipgen: %v\n", err)
@@ -192,6 +197,46 @@ func runDocs(args []string) {
 		_ = os.WriteFile(filepath.Join(*out, fname), []byte(content), 0644)
 	}
 	fmt.Printf("Generated %d documentation pages in %s\n", len(bundle.Pages)+1, *out)
+}
+
+// source returns the app whose registry the projections are computed from,
+// or refuses.
+//
+// zipgen builds its app from flags alone, so the registry is empty and every
+// projection of it is empty too: an SDK with no methods, an MCP server with
+// no tools, a docs page whose operations table has no rows, a CLI spec that
+// is the two bytes "[]". Writing those out is worse than writing nothing —
+// each one is a plausible-looking file that a reader takes for the API, and
+// the emptiness is only visible to someone who counts. So the command says
+// what it is missing and stops.
+//
+// What it is missing is a way to be pointed at a schema. The ops that fill a
+// registry are Go declarations today, which is why this command cannot read
+// one: a .zap schema is parsed by github.com/zap-proto/go/idl, and turning a
+// parsed schema into a registry is the wire that does not exist yet. Until
+// it does, the honest answer to "generate the SDK for this service" is that
+// zipgen cannot see the service.
+func source(a *zip.App, what string) *zip.App {
+	if err := projectable(a, what); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return a
+}
+
+// projectable reports why a is not a source, or nil if it is.
+func projectable(a *zip.App, what string) error {
+	if len(a.Registry()) > 0 {
+		return nil
+	}
+	return fmt.Errorf(`zipgen: cannot generate %s — no operations to project.
+
+zipgen builds its app from flags, so its typed-op registry is empty, and
+every projection of an empty registry is empty. Emitting one would publish
+a file that looks like an API and describes nothing.
+
+An op registry comes from Go declarations today. Reading it from a .zap
+schema (parsed by github.com/zap-proto/go/idl) is the missing wire.`, what)
 }
 
 func writeOutput(outPath, defaultName string, data []byte) {
