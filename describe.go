@@ -192,6 +192,7 @@ func (d *describer) record(t reflect.Type) string {
 		f := t.Field(i)
 		s.Own = append(s.Own, manifest.Field{
 			Name:    f.Name,
+			JSON:    jsonFieldName(f),
 			Embed:   f.Anonymous,
 			Private: !f.IsExported(),
 			Type:    *d.typ(f.Type),

@@ -194,6 +194,21 @@ type Field struct {
 	Type    Type `json:"type"`
 }
 
+// Wire is what a field is CALLED on the wire: the name the body carries it
+// under, and the declaration's own name when the body does not carry it at all.
+//
+// A schema states this rather than the declared name, because a declaration is
+// a fact about one language and the wire is the contract between them. C++
+// cannot even spell some Go declarations — a member may not share its record's
+// name, so Go's ProofOfPossession.ProofOfPossession has no C++ twin — and two
+// implementations of one service must publish one schema.
+func (f Field) Wire() string {
+	if f.JSON != "" && f.JSON != "-" {
+		return f.JSON
+	}
+	return f.Name
+}
+
 // Ref is the key a struct is filed under: its declaration, qualified by where it
 // was declared, because two packages may both call a type Config. An anonymous
 // struct has no such key and is filed under one made for it.

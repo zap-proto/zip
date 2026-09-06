@@ -491,8 +491,10 @@ func TestSDK_AnIdCrossesOnTheCodecTheSDKWrites(t *testing.T) {
 	}
 	// The ZAP schema still reports the field, and still should: [Schema.Coded]
 	// is what the REFLECTIVE encoder will not carry, which has not changed. It
-	// is the list of fields that need a codec, and now the SDK writes one.
-	if coded := zip.ZAPSchema("p", app).Coded; len(coded) != 1 || coded[0].Field != "TxID" {
+	// is the list of fields that need a codec, and now the SDK writes one. It is
+	// named there the way the schema names it — by the wire, not by the Go
+	// declaration, because the schema is what a peer in another language reads.
+	if coded := zip.ZAPSchema("p", app).Coded; len(coded) != 1 || coded[0].Field != "txID" {
 		t.Errorf("the schema stopped reporting the field reflection refuses: %+v", coded)
 	}
 }

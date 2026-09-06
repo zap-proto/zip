@@ -445,10 +445,10 @@ func (e *emitter) define(t *manifest.Type) string {
 
 	fields := make([]Field, 0, len(lay.Slots))
 	for _, sl := range lay.Slots {
-		fields = append(fields, Field{Name: idlName(sl.Name), Type: sl.Type, Offset: sl.Offset})
+		fields = append(fields, Field{Name: idlName(sl.Field.Wire()), Type: sl.Type, Offset: sl.Offset})
 		e.opacity(name, sl)
 		if strings.HasPrefix(sl.Type, "bytes_fixed[") || strings.HasPrefix(sl.Elem, "bytes_fixed[") {
-			e.schema.Coded = append(e.schema.Coded, Coded{Struct: name, Field: sl.Name, Type: sl.Type})
+			e.schema.Coded = append(e.schema.Coded, Coded{Struct: name, Field: sl.Field.Wire(), Type: sl.Type})
 		}
 	}
 	e.dropped(t, name)
@@ -465,9 +465,9 @@ func (e *emitter) opacity(decl string, sl slot) {
 	ft := sl.Field.Type
 	switch {
 	case sl.Type == "bytes" && ft.Kind == manifest.Record:
-		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: sl.Name, Go: spellType(&ft)})
+		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: sl.Field.Wire(), Go: spellType(&ft)})
 	case sl.Elem == "bytes" && ft.Kind == manifest.List && ft.Elem != nil && ft.Elem.Kind == manifest.Record:
-		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: sl.Name, Go: spellType(ft.Elem), List: true})
+		e.schema.Opaque = append(e.schema.Opaque, Opacity{Struct: decl, Field: sl.Field.Wire(), Go: spellType(ft.Elem), List: true})
 	}
 }
 
@@ -483,14 +483,14 @@ func (e *emitter) dropped(t *manifest.Type, decl string) {
 			// value, two wires.
 			if f.Embed && len(e.slotted(&f.Type)) > 0 {
 				e.schema.Dropped = append(e.schema.Dropped, Loss{
-					Struct: decl, Field: f.Name, Go: spellType(&f.Type), Cause: LossPromoted,
+					Struct: decl, Field: f.Wire(), Go: spellType(&f.Type), Cause: LossPromoted,
 				})
 			}
 			continue
 		}
 		if inner := e.hollow(&f.Type); inner != nil {
 			e.schema.Dropped = append(e.schema.Dropped, Loss{
-				Struct: decl, Field: f.Name, Go: spellType(inner), Cause: LossEmpty,
+				Struct: decl, Field: f.Wire(), Go: spellType(inner), Cause: LossEmpty,
 			})
 		}
 	}
@@ -536,7 +536,7 @@ func (e *emitter) diagnose(t *manifest.Type) {
 			continue // this field is fine; another one is why the type refused
 		}
 		ft := f.Type
-		path := t.Name + "." + f.Name
+		path := t.Name + "." + f.Wire()
 		switch ft.Kind {
 		case manifest.Table:
 			e.gap(path, spellType(&ft), CauseMap)

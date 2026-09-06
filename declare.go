@@ -200,6 +200,13 @@ const (
 
 	// Declare is the routing declaration a host discovers (see [Declaration]).
 	Declare Projection = "declare"
+
+	// Manifest is what the app declares, said without Go — the value every
+	// other projection is computed from (see [App.Manifest]). A build writes it
+	// so that zipc, which links no service, can write the rest: the document,
+	// the tool list, the CLI and the schema come from the manifest whether the
+	// service that wrote it was Go, Rust or C++.
+	Manifest Projection = "manifest"
 )
 
 // Described writes the projection this process was asked for on the command
@@ -207,6 +214,7 @@ const (
 //
 //	<binary> openapi <file>     the app's OpenAPI subset
 //	<binary> declare <file>     the app's routing declaration
+//	<binary> manifest <file>    what the app declares, for zipc to project
 //
 // A main calls it once, after registering every op and BEFORE opening a store
 // or dialing a peer — a projection is a function of the code, so a describe run
@@ -235,6 +243,8 @@ func (a *App) Described() (bool, error) {
 		mode = OpenAPI
 	case Declare:
 		mode = Declare
+	case Manifest:
+		mode = Manifest
 	default:
 		return false, nil
 	}
@@ -260,6 +270,8 @@ func (a *App) project(mode Projection, dest string) error {
 		v = a.OpenAPISpec()
 	case Declare:
 		v = a.Declaration()
+	case Manifest:
+		v = a.Manifest()
 	default:
 		return fmt.Errorf("zip: unknown projection %q", mode)
 	}
