@@ -1,0 +1,680 @@
+{
+  "components": {
+    "schemas": {
+      "Bootstrapped": {
+        "properties": {
+          "isBootstrapped": {
+            "description": "IsBootstrapped is true once the chain has caught up.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "Chain": {
+        "properties": {
+          "bootstrapped": {
+            "description": "Bootstrapped is whether this node has caught the chain up.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "ID is the chain's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Name is the chain's name.",
+            "type": "string"
+          },
+          "vmID": {
+            "description": "VMID is the id of the virtual machine the chain runs.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ChainID": {
+        "properties": {
+          "blockchainID": {
+            "description": "BlockchainID is the chain's id.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Chains": {
+        "properties": {
+          "chains": {
+            "description": "Chains are the chains this node is running.",
+            "items": {
+              "$ref": "#/components/schemas/Chain"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Fees": {
+        "properties": {
+          "createAssetTxFee": {
+            "description": "CreateAssetTxFee is the fee to create an asset.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "createChainTxFee": {
+            "description": "CreateChainTxFee is the fee to create a chain.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "txFee": {
+            "description": "TxFee is the fee for an ordinary transaction.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LP": {
+        "properties": {
+          "abstainWeight": {
+            "description": "AbstainWeight is the stake that has not said.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "objectWeight": {
+            "description": "ObjectWeight is the stake against.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "supportWeight": {
+            "description": "SupportWeight is the stake in favour.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LPs": {
+        "properties": {
+          "lps": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/LP"
+            },
+            "description": "LPs are the proposals, by number.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "NetworkID": {
+        "properties": {
+          "networkID": {
+            "description": "NetworkID is the network's number.",
+            "format": "uint32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "NetworkName": {
+        "properties": {
+          "networkName": {
+            "description": "NetworkName is the network's name.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NodeID": {
+        "properties": {
+          "nodeID": {
+            "description": "NodeID is the id peers know this node by.",
+            "type": "string"
+          },
+          "nodePOP": {
+            "$ref": "#/components/schemas/ProofOfPossession",
+            "description": "NodePOP is the proof this node holds the key its id is derived from."
+          }
+        },
+        "type": "object"
+      },
+      "NodeIP": {
+        "properties": {
+          "ip": {
+            "description": "IP is the address and port peers dial.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NodeVersion": {
+        "properties": {
+          "databaseVersion": {
+            "description": "DatabaseVersion is the database format this node reads.",
+            "type": "string"
+          },
+          "gitCommit": {
+            "description": "GitCommit is the commit this node was built from.",
+            "type": "string"
+          },
+          "rpcProtocolVersion": {
+            "description": "RPCProtocolVersion is the VM protocol this node speaks.",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "version": {
+            "description": "Version is the node's own release.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Peer": {
+        "properties": {
+          "ip": {
+            "description": "IP is the address this node reaches the peer at.",
+            "type": "string"
+          },
+          "nodeID": {
+            "description": "NodeID is the peer's id.",
+            "type": "string"
+          },
+          "observedUptime": {
+            "description": "ObservedUptime is the share of time this node has seen the peer up.",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "publicIP": {
+            "description": "PublicIP is the address the peer tells others to use.",
+            "type": "string"
+          },
+          "trackedChains": {
+            "description": "TrackedChains are the chains the peer is following.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "Version is the release the peer is running.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Peers": {
+        "properties": {
+          "numPeers": {
+            "description": "NumPeers is how many connections this node holds.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "peers": {
+            "description": "Peers are the connections themselves.",
+            "items": {
+              "$ref": "#/components/schemas/Peer"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ProofOfPossession": {
+        "properties": {
+          "proofOfPossession": {
+            "description": "ProofOfPossession is the signature over that key, hex encoded.",
+            "type": "string"
+          },
+          "publicKey": {
+            "description": "PublicKey is the BLS public key, hex encoded.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Upgrades": {
+        "properties": {
+          "epochDuration": {
+            "description": "EpochDuration is how long one epoch lasts, in nanoseconds.",
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "stopVertexID": {
+            "description": "StopVertexID is the vertex the linearisation stopped at.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Uptime": {
+        "properties": {
+          "rewardingStakePercentage": {
+            "description": "RewardingStakePercentage is the share of stake that would reward this node.",
+            "type": "string"
+          },
+          "weightedAveragePercentage": {
+            "description": "WeightedAveragePercentage is the stake-weighted average uptime.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "VMs": {
+        "properties": {
+          "fxs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Fxs are the feature extensions the UTXO chains understand, by id.",
+            "type": "object"
+          },
+          "vms": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "VMs are the installed machines, by id, each with the names it answers to.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "What a Lux node tells anyone who asks: what it is running, what network it is on, who it is connected to, and what its chains cost.",
+    "title": "Lux node info",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/chain/bootstrapped": {
+      "get": {
+        "description": "Bootstrapped reports whether a chain has finished bootstrapping on this node.",
+        "operationId": "get_chain_bootstrapped",
+        "parameters": [
+          {
+            "description": "Chain is the alias or id of the chain to ask about.",
+            "example": "X",
+            "in": "query",
+            "name": "chain",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "isBootstrapped": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Bootstrapped"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Bootstrapped reports whether a chain has finished bootstrapping on this node."
+      }
+    },
+    "/chain/id": {
+      "get": {
+        "description": "ChainID resolves a chain's alias to the id it names.",
+        "operationId": "get_chain_id",
+        "parameters": [
+          {
+            "description": "Alias is the name the chain answers to, such as \"X\".",
+            "example": "X",
+            "in": "query",
+            "name": "alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "blockchainID": "2oYMBNV4eNHyqk2fjjV5nVQLDbtmNJzq5s3qs3Lo6ftnC6FByM"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ChainID"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "ChainID resolves a chain's alias to the id it names."
+      }
+    },
+    "/chains": {
+      "get": {
+        "description": "Chains are the chains this node is running, which is a subset of the chains\nthe P-Chain knows about.",
+        "operationId": "get_chains",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "chains": [
+                    {
+                      "id": "11111111111111111111111111111111LpoYY",
+                      "name": "P-Chain",
+                      "vmID": "11111111111111111111111111111111LpoYY",
+                      "bootstrapped": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Chains"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Chains are the chains this node is running, which is a subset of the chains the P-Chain knows about."
+      }
+    },
+    "/fees": {
+      "get": {
+        "description": "Fees are the transaction fees this node charges, in nLUX.",
+        "operationId": "get_fees",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "txFee": "1000000",
+                  "createAssetTxFee": "10000000",
+                  "createChainTxFee": "1000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Fees"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Fees are the transaction fees this node charges, in nLUX."
+      }
+    },
+    "/lps": {
+      "get": {
+        "description": "LPs is where the network's stake stands on every current Lux Proposal.",
+        "operationId": "get_lps",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "lps": {
+                    "23": {
+                      "supportWeight": "0",
+                      "objectWeight": "0",
+                      "abstainWeight": "1000000000000"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LPs"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "LPs is where the network's stake stands on every current Lux Proposal."
+      }
+    },
+    "/network/id": {
+      "get": {
+        "description": "NetworkID is the number of the network this node is on.",
+        "operationId": "get_network_id",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "networkID": 96369
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkID"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "NetworkID is the number of the network this node is on."
+      }
+    },
+    "/network/name": {
+      "get": {
+        "description": "NetworkName is the name of the network this node is on.",
+        "operationId": "get_network_name",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "networkName": "mainnet"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkName"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "NetworkName is the name of the network this node is on."
+      }
+    },
+    "/node/id": {
+      "get": {
+        "description": "Identity is this node's id, with the proof it holds the staking key that id is\nderived from.",
+        "operationId": "get_node_id",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "nodeID": "NodeID-7Xhw2mDxuDS44j42TCB6U5579esbSt3Lg",
+                  "nodePOP": {
+                    "publicKey": "0x8f95",
+                    "proofOfPossession": "0x86a3"
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/NodeID"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Identity is this node's id, with the proof it holds the staking key that id is derived from."
+      }
+    },
+    "/node/ip": {
+      "get": {
+        "description": "Address is where this node tells its peers to reach it.",
+        "operationId": "get_node_ip",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ip": "203.0.113.9:9651"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/NodeIP"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Address is where this node tells its peers to reach it."
+      }
+    },
+    "/node/version": {
+      "get": {
+        "description": "NodeVersion is what this node is running: its own release, the database format\nit reads, and the VM protocol it speaks.",
+        "operationId": "get_node_version",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "version": "luxd/1.36.178",
+                  "databaseVersion": "v1.4.5",
+                  "rpcProtocolVersion": 39,
+                  "gitCommit": ""
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/NodeVersion"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "NodeVersion is what this node is running: its own release, the database format it reads, and the VM protocol it speaks."
+      }
+    },
+    "/peers": {
+      "get": {
+        "description": "Peers are the nodes this one is connected to. A list of node ids narrows the\nanswer to those, and no list asks for all of them.",
+        "operationId": "get_peers",
+        "parameters": [
+          {
+            "description": "NodeIDs are the peers to answer for; none asks for all of them.",
+            "example": [],
+            "in": "query",
+            "name": "nodeIDs",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "numPeers": "1",
+                  "peers": [
+                    {
+                      "ip": "203.0.113.9:9651",
+                      "publicIP": "203.0.113.9:9651",
+                      "nodeID": "NodeID-7Xhw2mDxuDS44j42TCB6U5579esbSt3Lg",
+                      "version": "luxd/1.36.178",
+                      "observedUptime": 99,
+                      "trackedChains": []
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Peers"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Peers are the nodes this one is connected to."
+      }
+    },
+    "/upgrades": {
+      "get": {
+        "description": "Upgrades is the upgrade schedule this node runs.",
+        "operationId": "get_upgrades",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "stopVertexID": "jrGWDh5Po9FMj54depyunNixpia5PN4aAYxfmNzU8n752Rjga",
+                  "epochDuration": "300000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Upgrades"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Upgrades is the upgrade schedule this node runs."
+      }
+    },
+    "/uptime": {
+      "get": {
+        "description": "Uptime is how much of the network, by stake, reports having seen this node up.",
+        "operationId": "get_uptime",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "rewardingStakePercentage": "100.0000",
+                  "weightedAveragePercentage": "99.9999"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Uptime"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Uptime is how much of the network, by stake, reports having seen this node up."
+      }
+    },
+    "/vms": {
+      "get": {
+        "description": "VMs are the virtual machines installed on this node, and the feature\nextensions its UTXO chains understand.",
+        "operationId": "get_vms",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "vms": {
+                    "mgj786NP7uDwBCcq6YwThhaN8FLyybkCa4zBWTQbNgmK6k9A6": [
+                      "platformvm"
+                    ]
+                  },
+                  "fxs": {
+                    "spqBHsy2UBGpjaQJezEywUy1AB98eVjJ3WQ38x1vpjsx4xPkY": "secp256k1fx"
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/VMs"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "VMs are the virtual machines installed on this node, and the feature extensions its UTXO chains understand."
+      }
+    }
+  }
+}

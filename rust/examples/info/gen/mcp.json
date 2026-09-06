@@ -1,0 +1,180 @@
+[
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Bootstrapped reports whether a chain has finished bootstrapping on this node.",
+    "inputSchema": {
+      "properties": {
+        "chain": {
+          "description": "Chain is the alias or id of the chain to ask about.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chain"
+      ],
+      "type": "object"
+    },
+    "name": "get_chain_bootstrapped"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "ChainID resolves a chain's alias to the id it names.",
+    "inputSchema": {
+      "properties": {
+        "alias": {
+          "description": "Alias is the name the chain answers to, such as \"X\".",
+          "type": "string"
+        }
+      },
+      "required": [
+        "alias"
+      ],
+      "type": "object"
+    },
+    "name": "get_chain_id"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Chains are the chains this node is running, which is a subset of the chains\nthe P-Chain knows about.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_chains"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Fees are the transaction fees this node charges, in nLUX.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_fees"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "LPs is where the network's stake stands on every current Lux Proposal.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_lps"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "NetworkID is the number of the network this node is on.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_network_id"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "NetworkName is the name of the network this node is on.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_network_name"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Identity is this node's id, with the proof it holds the staking key that id is\nderived from.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_node_id"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Address is where this node tells its peers to reach it.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_node_ip"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "NodeVersion is what this node is running: its own release, the database format\nit reads, and the VM protocol it speaks.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_node_version"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Peers are the nodes this one is connected to. A list of node ids narrows the\nanswer to those, and no list asks for all of them.",
+    "inputSchema": {
+      "properties": {
+        "nodeIDs": {
+          "description": "NodeIDs are the peers to answer for; none asks for all of them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_peers"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Upgrades is the upgrade schedule this node runs.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_upgrades"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Uptime is how much of the network, by stake, reports having seen this node up.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_uptime"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "VMs are the virtual machines installed on this node, and the feature\nextensions its UTXO chains understand.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_vms"
+  }
+]

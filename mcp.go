@@ -612,6 +612,10 @@ func (a *App) MCPTools() []map[string]any { return a.mcpTools() }
 // build-time catalogue — and an artifact ordered by registration churns on an
 // edit that changed nothing a client can see.
 func (a *App) mcpTools() []map[string]any {
+	return ProjectMCP(a.Manifest())
+}
+
+func (a *App) mcpToolsReflect() []map[string]any {
 	reg := a.Registry()
 	tools := make([]map[string]any, 0, len(reg))
 	for _, op := range reg {
