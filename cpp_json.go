@@ -49,7 +49,9 @@ func CppJSON(m *manifest.App) []byte {
 		if s.Name == "" {
 			continue // an anonymous declaration has no name to define a reader for
 		}
-		byHome[s.Pkg] = append(byHome[s.Pkg], key)
+		// The last segment of where the type was declared, because that is what
+		// C++ can spell: a namespace holds no slashes and no dots.
+		byHome[base(s.Pkg)] = append(byHome[base(s.Pkg)], key)
 	}
 	homes := make([]string, 0, len(byHome))
 	for home := range byHome {

@@ -102,6 +102,97 @@ Mint that merely delegated would register a typed money-mint op with NO GATE —
 its entire purpose, silently skipped. The shape is: embed the wrapped Router,
 override `OpScope`, and fold your middleware into `s.Middleware`.
 
+## The manifest is what a projection reads (branch `feat/cpp-native`)
+
+`manifest/`, `describe.go`, `project.go`, `cmd/zipc`, `cpp/`.
+
+A projection used to reduce over `*registeredOp`, which holds `reflect.Type` and
+closures — so the document, the tool list, the CLI and the schema were Go code
+about Go values, and a service in another language could have none of them.
+
+`manifest.App` is what they read now: the ops, their prose, and the types they
+name, spelled as kinds and fields. **`App.Manifest()` is Go's front end** — one
+of three, and reflect stops there. `<binary> manifest <file>` writes it, beside
+`openapi` and `declare`.
+
+| front end | how it reads its own source | where |
+|---|---|---|
+| Go | `reflect` at run time, prose from `cmd/zipdoc` | `describe.go` |
+| C++ | a libclang pass over the source, prose from `///` | `cpp/zipc` |
+| Rust | a proc-macro (not in this branch) | — |
+
+**`cmd/zipc` is the projector.** It reads a manifest, whatever wrote it, and
+writes `openapi.json`, `mcp.json`, `cli.json`, `graphql.sdl`, `<pkg>.zap`, the
+native JSON binding and the C++/Rust clients. `zip.Document`, `zip.Tools`,
+`zip.Commands`, `zip.GraphQL`, `zip.ZAP`, `zip.Docs`, `zip.CppJSON`,
+`zip.CppClient` and `zip.RustClient` all take a manifest and nothing else; the
+`App` methods are one-line calls to them.
+
+Manifest-sourced: OpenAPI · MCP · CLI · GraphQL · ZAP IDL · docs · C++ client ·
+Rust client · the C++ JSON binding. Still `reflect`: the **Go SDK** (`sdk.go`)
+and the codec emitter it shares with `Codecs` (`codec.go`) — those write GO
+source stating a Go layout against Go field names, and `tagOf` copies the
+service's struct tag verbatim. Porting them means rebuilding the tag from the
+wire facts (`json` + `omitempty`, which the manifest carries) and re-sourcing
+`codec.go`'s emitter; ~800 lines, and nothing else is blocked on it.
+
+Two things the manifest carries that no single projection asked for:
+
+- **`Struct.Body` and `Struct.Own`.** A declaration is read two ways because two
+  wires read it two ways: Body is what an object carries, with an embedded
+  declaration's members promoted; Own is what a fixed layout slots, where an
+  embedded declaration is ONE slot and promotes nothing. Each front end fills
+  both, because how a declaration flattens is a property of its language.
+- **`Type.Maybe`, `Field.Omit`, `Type.Text`, `Type.States`.** May be absent, may
+  be left out, reads itself as one word, states its own wire form. Every one is
+  a fact about the WIRE that a language spells its own way — `*T`, `,omitempty`,
+  a `TextUnmarshaler`, a `MarshalJSON` — and the projections read the fact.
+
+**The gate** is `agree_test.go`: `examples/info` and `cpp/example/info` are the
+Lux node's info service written twice, `examples/store` and `cpp/example/store`
+are a store that uses the half a read-only service never reaches (a body, a path
+parameter, a header, a required value, a declared status, a declared id). Seven
+artifacts are compared byte for byte, and the C++ services are run and asked the
+same questions as the Go ones over HTTP and over ZAP. `-short` skips it; so does
+a machine with no clang++.
+
+**One rule changed for this.** The `.zap` named its struct fields by the
+DECLARATION, which is a fact about one language — C++ cannot even spell some Go
+declarations, since a member may not share its record's name — so it states the
+WIRE's name now (`manifest.Field.Wire`).
+
+### zip in C++ — `cpp/`
+
+    cpp/include/zip/   the runtime: json.hpp, http.hpp, wire.hpp, zip.hpp, mark.hpp
+    cpp/zipc/          the pass: C++ source → manifest
+    cpp/example/       info and store, the corpus
+    cpp/CMakeLists.txt zipgen → zipc-cpp → zipc → the compiler, on every build
+
+What a C++ developer writes:
+
+```cpp
+/// Bootstrapped reports whether a chain has finished bootstrapping on this node.
+///
+/// Example: {"chain": "X"}
+/// Response: {"isBootstrapped": true}
+IsBootstrappedResponse bootstrapped(const IsBootstrappedArgs& in) const;
+
+zip::get(app, "/chain/bootstrapped", &Info::bootstrapped, &info);
+zip::post(app, "/v1/items", &Store::add, &store, zip::status(201), zip::tags("items"));
+```
+
+`ZIP_JSON` and its siblings (`mark.hpp`) are `__attribute__((annotate))` behind a
+macro, because a standard `[[attribute]]` comes back from libclang with no
+recoverable text. Only clang carries them; every other compiler is told nothing,
+which is the truth — the note is for the pass. A **non-literal path is a hard
+error**: an op with a computed address has no identity to be documented under.
+
+The one build-order wrinkle: `ops.cpp` includes the generated bindings, which do
+not exist the first time. CMake touches an empty one before the pass runs — the
+pass reads declarations, and `zip.hpp` declares `read_json`/`write_json` as
+templates without definitions, so the source PARSES without them and only fails
+to link.
+
 ## One registry, eight projections
 
 `typed.go`. Every `zip.Get/Post[In,Out]` appends one `*registeredOp` to
@@ -121,7 +212,12 @@ handler core they all share, so they cannot diverge in behavior.
 | ZAP IDL | `zapschema.go` | peers with no Go types — **and it can REFUSE** | method name |
 | Go SDK source | `sdk.go` | published clients that do not link the service | `operationId` |
 
-`opName(op)` is the one place the id rule lives; they all agree on the token.
+Since `feat/cpp-native` every one of these except the Go SDK reads a
+[manifest](#the-manifest-is-what-a-projection-reads) rather than the registry
+directly, so the table is what a service in ANY language projects to.
+
+`opID(id, method, path)` is the one place the id rule lives; they all agree on
+the token, and `opName(op)` is that rule asked of the registry.
 Since v1.17.8 `Command.OperationID` carries it too, and `WithOperationID`
 renames the command as well as the document, the tool and the call target —
 before that the CLI spelled its own name from the route and one op had two

@@ -35,7 +35,13 @@ func TestTwoFrontEndsOneDocument(t *testing.T) {
 	for _, corpus := range []string{"info", "store"} {
 		t.Run(corpus, func(t *testing.T) {
 			dir := both(t, corpus)
-			for _, name := range []string{"openapi.json", "mcp.json", "cli.json", corpus + ".zap"} {
+			// The four the CTO's gate names, the schema language, and the two
+			// clients: a C++ service hands out a Rust client, and it is the same
+			// Rust client the Go service hands out.
+			for _, name := range []string{
+				"openapi.json", "mcp.json", "cli.json", "graphql.sdl",
+				corpus + ".zap", corpus + ".client.hpp", corpus + ".rs",
+			} {
 				want, err := os.ReadFile(filepath.Join(dir, "go", name))
 				if err != nil {
 					t.Fatal(err)
@@ -85,7 +91,8 @@ func both(t *testing.T, corpus string) string {
 
 	// Go's side: the app describes itself, and zipc projects it.
 	run("go", "run", "./examples/"+corpus+"/main", "manifest", filepath.Join(dir, "go.json"))
-	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "go"), "-pkg", corpus, filepath.Join(dir, "go.json"))
+	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "go"), "-lang", "cpp", "-pkg", corpus, filepath.Join(dir, "go.json"))
+	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "go"), "-lang", "rust", "-pkg", corpus, filepath.Join(dir, "go.json"))
 
 	// C++'s side: the pass reads the source, and the SAME zipc projects it.
 	pass := filepath.Join(dir, "zipc-cpp")
@@ -108,6 +115,7 @@ func both(t *testing.T, corpus string) string {
 		t.Fatalf("the pass could not read the C++ ops: %v\n%s", err, out)
 	}
 	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "cpp"), "-lang", "cpp", "-pkg", corpus, filepath.Join(dir, "cpp.json"))
+	run("go", "run", "./cmd/zipc", "-o", filepath.Join(dir, "cpp"), "-lang", "rust", "-pkg", corpus, filepath.Join(dir, "cpp.json"))
 
 	// And the service itself, against the bindings that were just written.
 	if err := os.Rename(filepath.Join(dir, "cpp", corpus+".zip.hpp"), filepath.Join(dir, corpus+".zip.hpp")); err != nil {

@@ -316,7 +316,13 @@ struct Extract {
                 v.set("elem", typ(arg(t, 1)));
                 return v;
             }
-            if (s == "optional") return typ(arg(t, 0));
+            if (s == "optional") {
+                // An optional is how C++ says a value may be absent, which is a
+                // fact about the wire; what it holds is the value itself.
+                Value inner = typ(arg(t, 0));
+                inner.put("maybe", Value::boolean(true));
+                return inner;
+            }
             return record(t);
         }
         v.set("kind", Value::text("any"));
@@ -469,6 +475,7 @@ struct Extract {
         if (note(all, "header", &v)) f.set("header", Value::text(v));
         std::string ignored;
         if (note(all, "required", &ignored)) f.set("required", Value::boolean(true));
+        if (note(all, "omit", &ignored)) f.set("omit", Value::boolean(true));
         f.set("type", t);
 
         Value o = f;

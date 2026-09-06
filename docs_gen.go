@@ -2,9 +2,10 @@ package zip
 
 import (
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/zap-proto/zip/manifest"
 )
 
 // DocsBundle represents generated documentation pages formatted for @hanzo/docs.
@@ -15,9 +16,12 @@ type DocsBundle struct {
 
 // DocsMarkdown generates @hanzo/docs compatible MDX documentation pages for all operations.
 // It shares the core prose extracted from doc comments across Go, Rust, and C++ SDKs.
-func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
+func (a *App) DocsMarkdown(title string) (*DocsBundle, error) { return Docs(a.Manifest(), title) }
+
+// Docs is those pages over a manifest, which is where they are written.
+func Docs(m *manifest.App, title string) (*DocsBundle, error) {
 	if title == "" {
-		title = a.cfg.AppName
+		title = m.Name
 		if title == "" {
 			title = "API Reference"
 		}
@@ -27,8 +31,10 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		Pages: make(map[string]string),
 	}
 
-	ops := append([]*registeredOp(nil), a.Registry()...)
-	sort.Slice(ops, func(i, j int) bool { return opName(ops[i]) < opName(ops[j]) })
+	ops := append([]manifest.Op(nil), m.Ops...)
+	sort.Slice(ops, func(i, j int) bool {
+		return opID(ops[i].ID, ops[i].Method, ops[i].Path) < opID(ops[j].ID, ops[j].Method, ops[j].Path)
+	})
 
 	var index strings.Builder
 	index.WriteString("---\n")
@@ -42,10 +48,10 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 	index.WriteString("| :--- | :--- | :--- | :--- |\n")
 
 	for _, op := range ops {
-		id := opName(op)
-		doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
+		id := opID(op.ID, op.Method, op.Path)
+		doc := op.Doc
 		summary := id
-		if hasDoc && doc.Description != "" {
+		if doc != nil && doc.Description != "" {
 			summary = strings.Split(strings.TrimSpace(doc.Description), "\n")[0]
 		}
 		slug := strings.ReplaceAll(snakeCase(id), "_", "-")
@@ -63,14 +69,14 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		fmt.Fprintf(&p, "# %s\n\n", id)
 		fmt.Fprintf(&p, "<div className=\"endpoint-badge\"><code>%s</code> <code>%s</code></div>\n\n", op.Method, op.Path)
 
-		if hasDoc && doc.Description != "" {
+		if doc != nil && doc.Description != "" {
 			p.WriteString("## Overview\n\n")
 			p.WriteString(strings.TrimSpace(doc.Description))
 			p.WriteString("\n\n")
 		}
 
 		// Parameters table
-		inFields := inspectFields(op.InType, docFields(hasDoc, doc))
+		inFields := members(m, op.In, doc.Prose())
 		if len(inFields) > 0 {
 			p.WriteString("## Request Parameters\n\n")
 			p.WriteString("| Field | Type | Required | Description |\n")
@@ -90,7 +96,7 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		}
 
 		// Response fields table
-		outFields := inspectFields(op.OutType, docFields(hasDoc, doc))
+		outFields := members(m, op.Out, doc.Prose())
 		if len(outFields) > 0 {
 			p.WriteString("## Response Fields\n\n")
 			p.WriteString("| Field | Type | Description |\n")
@@ -106,7 +112,7 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		}
 
 		// Examples
-		if hasDoc && (len(doc.Example) > 0 || len(doc.Response) > 0) {
+		if doc != nil && (len(doc.Example) > 0 || len(doc.Response) > 0) {
 			p.WriteString("## Examples\n\n")
 			if len(doc.Example) > 0 {
 				p.WriteString("### Request Body\n\n```json\n")
@@ -132,8 +138,8 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		p.WriteString("  <Tab value=\"Go\">\n```go\n")
 		fmt.Fprintf(&p, "client, err := sdk.Dial(\"127.0.0.1:9630\")\n")
 		fmt.Fprintf(&p, "if err != nil {\n\tlog.Fatal(err)\n}\n")
-		if op.InType != nil && deref(op.InType).NumField() > 0 {
-			fmt.Fprintf(&p, "res, err := client.%s(ctx, &sdk.%s{\n\t// ...\n})\n", goMethod, exportIdent(typeName(op.InType)))
+		if len(m.Fields(op.In)) > 0 {
+			fmt.Fprintf(&p, "res, err := client.%s(ctx, &sdk.%s{\n\t// ...\n})\n", goMethod, exportIdent(op.In.Name))
 		} else {
 			fmt.Fprintf(&p, "res, err := client.%s(ctx)\n", goMethod)
 		}
@@ -142,8 +148,8 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		// Rust Tab
 		p.WriteString("  <Tab value=\"Rust\">\n```rust\n")
 		fmt.Fprintf(&p, "let client = sdk::Client::new(\"127.0.0.1:9630\");\n")
-		if op.InType != nil && deref(op.InType).NumField() > 0 {
-			fmt.Fprintf(&p, "let res = client.%s(&%s { ..Default::default() }).await?;\n", rustMethod, exportIdent(typeName(op.InType)))
+		if len(m.Fields(op.In)) > 0 {
+			fmt.Fprintf(&p, "let res = client.%s(&%s { ..Default::default() }).await?;\n", rustMethod, exportIdent(op.In.Name))
 		} else {
 			fmt.Fprintf(&p, "let res = client.%s().await?;\n", rustMethod)
 		}
@@ -152,8 +158,8 @@ func (a *App) DocsMarkdown(title string) (*DocsBundle, error) {
 		// C++ Tab
 		p.WriteString("  <Tab value=\"C++\">\n```cpp\n")
 		fmt.Fprintf(&p, "auto client = sdk::create_client(\"127.0.0.1:9630\");\n")
-		if op.InType != nil && deref(op.InType).NumField() > 0 {
-			fmt.Fprintf(&p, "%s req{};\nauto res = client->%s(req);\n", exportIdent(typeName(op.InType)), cppMethod)
+		if len(m.Fields(op.In)) > 0 {
+			fmt.Fprintf(&p, "%s req{};\nauto res = client->%s(req);\n", exportIdent(op.In.Name), cppMethod)
 		} else {
 			fmt.Fprintf(&p, "auto res = client->%s();\n", cppMethod)
 		}
@@ -176,26 +182,17 @@ type fieldInfo struct {
 	Doc      string
 }
 
-func inspectFields(t reflect.Type, docs map[string]string) []fieldInfo {
-	t = deref(t)
-	if t == nil || t.Kind() != reflect.Struct {
-		return nil
-	}
+// members is one type's fields as a page lists them: the name the wire uses,
+// what it is, whether it is required, and the words its author wrote.
+func members(m *manifest.App, t *manifest.Type, docs map[string]string) []fieldInfo {
 	var res []fieldInfo
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		wire := jsonFieldName(f)
-		doc := docs[typeName(t)+"."+wire]
-		required := strings.Contains(f.Tag.Get("validate"), "required")
+	for _, f := range m.Fields(t) {
 		res = append(res, fieldInfo{
 			Name:     f.Name,
-			WireName: wire,
-			Type:     f.Type.String(),
-			Required: required,
-			Doc:      doc,
+			WireName: f.Wire(),
+			Type:     spellType(&f.Type),
+			Required: f.Required,
+			Doc:      docs[t.Name+"."+f.Wire()],
 		})
 	}
 	return res

@@ -95,13 +95,18 @@ func (d *describer) typ(t reflect.Type) *manifest.Type {
 	if t == nil {
 		return nil
 	}
+	maybe := false
 	for t.Kind() == reflect.Pointer {
+		// A pointer is how Go says a value may be absent, which is a fact about
+		// the wire; what it is a pointer TO is the value itself.
+		maybe = true
 		t = t.Elem()
 	}
 	out := &manifest.Type{
-		Name: typeName(t),
-		Pkg:  t.PkgPath(),
-		Text: readsText(t),
+		Name:  typeName(t),
+		Pkg:   t.PkgPath(),
+		Text:  readsText(t),
+		Maybe: maybe,
 	}
 	// A type that writes its own JSON is not described by what it is made of.
 	// That is read first, because the rule is about the marshaler and not about
@@ -181,6 +186,7 @@ func (d *describer) record(t reflect.Type) string {
 			URL:      urlFieldName(f),
 			Header:   headerFieldName(f),
 			Required: strings.Contains(f.Tag.Get("validate"), "required"),
+			Omit:     strings.Contains(f.Tag.Get("json"), ",omitempty"),
 			Type:     *d.typ(f.Type),
 		})
 	}
@@ -191,11 +197,15 @@ func (d *describer) record(t reflect.Type) string {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		s.Own = append(s.Own, manifest.Field{
-			Name:    f.Name,
-			JSON:    jsonFieldName(f),
-			Embed:   f.Anonymous,
-			Private: !f.IsExported(),
-			Type:    *d.typ(f.Type),
+			Name:     f.Name,
+			JSON:     jsonFieldName(f),
+			URL:      urlFieldName(f),
+			Header:   headerFieldName(f),
+			Required: strings.Contains(f.Tag.Get("validate"), "required"),
+			Omit:     strings.Contains(f.Tag.Get("json"), ",omitempty"),
+			Embed:    f.Anonymous,
+			Private:  !f.IsExported(),
+			Type:     *d.typ(f.Type),
 		})
 	}
 	d.app.Structs[key] = s

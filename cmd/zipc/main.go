@@ -28,7 +28,7 @@ import (
 
 func main() {
 	out := flag.String("o", ".", "where to write the projections")
-	lang := flag.String("lang", "", "also write this language's reader and writer: cpp")
+	lang := flag.String("lang", "", "also write this language's bindings and client: cpp, rust, go")
 	pkg := flag.String("pkg", "", "the ZAP schema's package name (default: the app's name)")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -59,9 +59,29 @@ func main() {
 	write(*out, "openapi.json", pretty(zip.Document(&m)))
 	write(*out, "mcp.json", pretty(zip.Tools(&m)))
 	write(*out, "cli.json", pretty(zip.Commands(&m)))
+	write(*out, "graphql.sdl", []byte(zip.GraphQL(&m)))
 	write(*out, *pkg+".zap", []byte(zip.ZAP(*pkg, &m).String()))
-	if *lang == "cpp" {
+
+	// And the language's own half: what reads a value off the wire, and a client
+	// that calls the service. Both are projections of the same manifest, so a
+	// C++ service hands out a Rust client without a line of Rust being written.
+	switch *lang {
+	case "":
+	case "cpp":
 		write(*out, m.Name+".zip.hpp", zip.CppJSON(&m))
+		sdk, err := zip.CppClient(&m, m.Name)
+		if err != nil {
+			die(err)
+		}
+		write(*out, m.Name+".client.hpp", sdk.Header)
+	case "rust":
+		sdk, err := zip.RustClient(&m, m.Name)
+		if err != nil {
+			die(err)
+		}
+		write(*out, m.Name+".rs", sdk.Source)
+	default:
+		die(fmt.Errorf("no bindings for %q: cpp or rust", *lang))
 	}
 }
 

@@ -30,6 +30,8 @@
 #define ZIP_URL(name) ZIP_NOTE("url:" name)
 #define ZIP_HEADER(name) ZIP_NOTE("header:" name)
 #define ZIP_REQUIRED ZIP_NOTE("required")
+// On a member the body leaves out when it is empty, rather than writing a zero.
+#define ZIP_OMIT ZIP_NOTE("omit")
 
 // On a member whose type states its own wire form — a number carried as a
 // quoted decimal, an id carried as text. The argument is the JSON Schema it

@@ -24,7 +24,10 @@
 // process, or the same language.
 package manifest
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // App is one service: what it is called, what it says about itself, the
 // operations it answers, and the structs those operations name.
@@ -91,6 +94,37 @@ type Doc struct {
 	Response json.RawMessage   `json:"response,omitempty"`
 }
 
+// UnmarshalJSON reads a doc and COMPACTS the examples.
+//
+// An example is a value, and how a file spelled it is not part of it: a manifest
+// written for a person to read indents what it holds, including the raw JSON an
+// example is, and a projection that prints an example verbatim — an SDK's doc
+// comment — would then carry the file's line breaks into the source it writes.
+// Normalising here means every reader of a manifest sees the same bytes,
+// whatever the file looked like.
+func (d *Doc) UnmarshalJSON(b []byte) error {
+	type plain Doc // no method set, so this does not recurse
+	var v plain
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	v.Example = compact(v.Example)
+	v.Response = compact(v.Response)
+	*d = Doc(v)
+	return nil
+}
+
+func compact(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var out bytes.Buffer
+	if json.Compact(&out, raw) != nil {
+		return raw
+	}
+	return out.Bytes()
+}
+
 // Kind is what a value is made of. It is the vocabulary every language can
 // answer in: Go reads it off reflect.Kind, C++ off the canonical type spelling,
 // Rust off the type path.
@@ -144,6 +178,11 @@ type Type struct {
 	// Text says the value reads and writes itself as ONE WORD: an id, a
 	// timestamp, an address. Such a value rides a URL, whatever it is made of.
 	Text bool `json:"text,omitempty"`
+	// Maybe says the value MAY BE ABSENT — a Go pointer, a Rust Option, a C++
+	// optional. It is a fact about the wire and not about how a language holds
+	// the value: a client that must distinguish "zero" from "not sent" needs to
+	// know, and a client generated without it cannot.
+	Maybe bool `json:"maybe,omitempty"`
 	// States says the value writes its own JSON, so its fields are not its wire
 	// form. Schema is the shape it states, when it states one; without a schema
 	// the honest description is the empty one, which is what `{}` means.
@@ -183,8 +222,10 @@ type Field struct {
 	JSON   string `json:"json,omitempty"`
 	URL    string `json:"url,omitempty"`
 	Header string `json:"header,omitempty"`
-	// Required says the handler refuses the request without it.
+	// Required says the handler refuses the request without it; Omit says the
+	// body leaves it out when it is empty rather than writing a zero.
 	Required bool `json:"required,omitempty"`
+	Omit     bool `json:"omit,omitempty"`
 	// Embed says the field IS a declaration this one absorbs — a Go embedded
 	// struct, a C++ base. Private says the declaration keeps it to itself, so no
 	// wire reads or writes it; such a field appears in Own, because a layout has
