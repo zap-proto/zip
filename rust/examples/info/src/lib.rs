@@ -19,11 +19,6 @@ pub fn service(release: &str, network: u32) -> zip::App {
         network,
     }
     .ops();
-    if !OPENAPI.is_empty() {
-        app.serve("/openapi.json", "application/json", OPENAPI);
-    }
-    if !MCP.is_empty() {
-        app.serve("/mcp.json", "application/json", MCP);
-    }
+    app.documents(OPENAPI, MCP);
     app
 }

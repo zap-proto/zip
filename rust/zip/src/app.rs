@@ -107,6 +107,32 @@ impl App {
         self
     }
 
+    /// SPEC is where a zip service publishes its OpenAPI document.
+    ///
+    /// It is a convention and not a preference: a client that has an address
+    /// and nothing else asks here, and gets back the registry in wire form —
+    /// which is enough to build a command line, a tool list or a typed client
+    /// for a service it does not link. zip's Go client asks exactly this
+    /// address, so a Rust service that published its document somewhere else
+    /// was a service no zip client could discover.
+    pub const SPEC: &'static str = "/.well-known/openapi.json";
+
+    /// TOOLS is where it publishes the MCP tool list.
+    pub const TOOLS: &'static str = "/.well-known/mcp.json";
+
+    /// documents publishes what zipc projected, at the addresses zip names for
+    /// them. An empty one is not published: a service that has not been
+    /// projected yet says so by 404 rather than by serving an empty document.
+    pub fn documents(&mut self, openapi: &'static str, tools: &'static str) -> &mut Self {
+        if !openapi.is_empty() {
+            self.serve(Self::SPEC, "application/json", openapi);
+        }
+        if !tools.is_empty() {
+            self.serve(Self::TOOLS, "application/json", tools);
+        }
+        self
+    }
+
     pub fn ops_len(&self) -> usize {
         self.ops.len()
     }

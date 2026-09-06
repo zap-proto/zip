@@ -32,7 +32,12 @@ fn main() {
             for (name, file) in [("zap", "zap.rs"), ("wire", "wire_zap.rs")] {
                 let body = std::fs::read_to_string(out.join(file))
                     .unwrap_or_else(|e| panic!("zapgen wrote no {file}: {e}"));
-                all.push_str(&format!("pub mod {name} {{\n{body}\n}}\n"));
+                // The style of generated code is the generator's business: a
+                // lint answered here would be answered again in every crate
+                // zapgen writes for, and the fix belongs in zapgen or nowhere.
+                all.push_str(&format!(
+                    "pub mod {name} {{\n#![allow(clippy::derivable_impls)]\n{body}\n}}\n"
+                ));
             }
             std::fs::write(out.join("generated.rs"), all).expect("write generated.rs");
         }

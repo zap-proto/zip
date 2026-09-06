@@ -139,13 +139,13 @@ fn a_list_rides_one_value() {
 #[test]
 fn the_document_is_served() {
     let (http, _) = doors();
-    let (status, body) = over_http(&http, "/openapi.json");
+    let (status, body) = over_http(&http, zip::App::SPEC);
     assert_eq!(status, 200);
     assert!(
         body.contains(r#""operationId": "get_chain_bootstrapped""#),
         "{body}"
     );
-    let (status, tools) = over_http(&http, "/mcp.json");
+    let (status, tools) = over_http(&http, zip::App::TOOLS);
     assert_eq!(status, 200);
     assert!(tools.contains(r#""name": "get_fees""#), "{tools}");
 }

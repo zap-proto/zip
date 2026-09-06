@@ -68,7 +68,10 @@ fn the_frames_this_door_writes_are_pinned() {
     // What this side writes is checked in beside what the reference writes, so
     // a change to either shows up as a diff rather than as a service nobody
     // can reach.
-    pin("rust.request", &zip::zaphttp::ask("GET", "/node/version", &[]));
+    pin(
+        "rust.request",
+        &zip::zaphttp::ask("GET", "/node/version", &[]),
+    );
     pin(
         "rust.response",
         &zip::zaphttp::reply(200, "application/json", br#"{"ok":true}"#),
@@ -84,7 +87,11 @@ fn the_prefix_is_the_transports_and_is_big_endian() {
 #[test]
 fn the_door_answers_the_reference_frame() {
     let mut app = zip::App::new("probe", "", "", "");
-    app.serve("/node/version", "application/json", r#"{"version":"probe"}"#);
+    app.serve(
+        "/node/version",
+        "application/json",
+        r#"{"version":"probe"}"#,
+    );
     let app = Arc::new(app);
 
     let door = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
