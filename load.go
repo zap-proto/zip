@@ -655,11 +655,16 @@ func start(spec Plugin) (*instance, error) {
 	if err != nil {
 		return nil, err
 	}
-	bin := spec.Path
+	// Every source lands as a path, and then the SAME check runs over all of
+	// them. A binary on disk is not more trustworthy than a downloaded one; it
+	// is the same bytes with somebody else having done the download, so
+	// verifying only the network source checks the case that happens to look
+	// dangerous rather than the case that is.
+	path := spec.Path
 	switch {
 	case len(spec.Bin) > 0:
-		bin = filepath.Join(dir, spec.Name)
-		if err := os.WriteFile(bin, spec.Bin, 0o700); err != nil {
+		path = filepath.Join(dir, spec.Name)
+		if err := os.WriteFile(path, spec.Bin, 0o700); err != nil {
 			_ = os.RemoveAll(dir)
 			return nil, fmt.Errorf("write binary: %w", err)
 		}
@@ -667,12 +672,19 @@ func start(spec Plugin) (*instance, error) {
 		// Cached beside dir rather than inside it, so the download survives
 		// this instance and a reload or restart reuses it.
 		var err error
-		bin, err = fetch(spec)
+		path, err = fetch(spec)
 		if err != nil {
 			_ = os.RemoveAll(dir)
 			return nil, err
 		}
 	}
+
+	bin, err := openVerified(path, dir, spec.Name, spec.Sum)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	defer bin.Close() // the child keeps its own copy of the descriptor
 
 	sock := socketIn(dir, spec.Name)
 	// The child opens sock+".http" for the upgrade listener too, so that is the
@@ -683,7 +695,7 @@ func start(spec Plugin) (*instance, error) {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	cmd := exec.Command(bin, spec.Args...)
+	cmd := bin.exec(spec.Args)
 	cmd.Env = append(append(os.Environ(), spec.Env...), AddrEnv+"="+sock)
 	// The child's output is the operator's only window into it, so it goes where
 	// the host's own does rather than being swallowed — but tagged, because an
