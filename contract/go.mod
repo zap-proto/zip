@@ -3,7 +3,7 @@
 // See doc.go.
 module github.com/zap-proto/zip/contract
 
-go 1.26.5
+go 1.26.8
 
 require (
 	github.com/hanzoai/o11y v1.5.58

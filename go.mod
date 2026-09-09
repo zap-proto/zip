@@ -1,6 +1,6 @@
 module github.com/zap-proto/zip
 
-go 1.26.5
+go 1.26.8
 
 // v1.36.21 does not compile: mcp.go calls networkOf, which was staged in a
 // file the commit left behind. It built locally because the working tree held
