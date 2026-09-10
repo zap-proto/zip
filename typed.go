@@ -72,6 +72,10 @@ type registeredOp struct {
 	// document asks it once — so "is this op governed" has one answer, and a
 	// gated op cannot publish a contract its seam does not keep.
 	rule   func() Authorizer
+	// result is the [App.OnResult] hook in force over this op, asked the same way
+	// and for the same reason as rule: composition settles it at build, and the
+	// op was registered before that.
+	result func() func(context.Context, Op, error)
 	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error)
 	// direct is invoke with the decoding removed: the In arrives as the *In the
 	// caller already holds. It exists for the one transport that is not a
@@ -618,6 +622,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	}
 	op.readsHeaders = len(headerFields(op.InType)) > 0
 	op.rule = app.rule
+	op.result = app.result
 
 	// The op's stable identity, resolved once (after opts) and handed to the
 	// authorizer on every invoke — REST and MCP alike.
@@ -627,7 +632,26 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// fn, return Out (or a literal nil for a void result). Both seams below end
 	// here, so no way of reaching this op can skip a check another way makes. A
 	// nil *Out becomes a nil `any`.
-	run := func(ctx context.Context, in *In) (any, error) {
+	run := func(ctx context.Context, in *In) (out any, err error) {
+		// TOLD ONCE, ON EVERY WAY OUT. This is the one contract every projection
+		// funnels through — REST, an MCP tools/call, the call plane, the graph and
+		// an in-process invoke — so a hook here is told about all of them, and a
+		// refusal is told about as surely as a success: [Deny] returns through the
+		// same named err this reads.
+		//
+		// It is told the OPERATION and the OUTCOME and nothing else. Not the
+		// output: a hook that could see the value would be a way for a response
+		// body to reach a log or a trail, and the one thing every recorder in this
+		// estate promises is that it never reads bodies. Not the input either, for
+		// the same reason — [Authorizer] already sees that, before the handler, in
+		// the one place a decision belongs.
+		//
+		// A held op reports a nil error. It did not fail; it did not run either,
+		// and which of those happened is carried by the [Approval] the caller
+		// receives rather than by this.
+		if told := op.result(); told != nil {
+			defer func() { told(ctx, meta, err) }()
+		}
 		if err := validate(in); err != nil {
 			return nil, ErrBadRequest(err.Error())
 		}
@@ -653,14 +677,19 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 				return d.approval(), nil
 			}
 		}
-		out, err := fn(ctx, in)
-		if err != nil {
-			return nil, err
+		// The handler's result stays TYPED here. Binding it to the `any` return
+		// instead would wrap a nil *Out in a non-nil interface, and the nil test
+		// below — which is what a void op's 204 and a declared status both rest on
+		// — would stop being true. Caught by opstatus_test.go, which is the only
+		// reason the named returns above are safe to have.
+		res, ferr := fn(ctx, in)
+		if ferr != nil {
+			return nil, ferr
 		}
-		if out == nil {
+		if res == nil {
 			return nil, nil
 		}
-		return out, nil
+		return res, nil
 	}
 
 	// The in-process seam: the caller already holds the *In, so there is nothing

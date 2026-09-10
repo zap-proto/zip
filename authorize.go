@@ -159,6 +159,37 @@ type Authorizer func(ctx context.Context, op Op, in any) (Decision, error)
 // honest way to serve it under both. See [adopt].
 func (a *App) Authorize(fn Authorizer) { a.authorizer = fn }
 
+// OnResult installs fn as the rule for what to do with the OUTCOME of every
+// typed op this app serves. It is [App.Authorize]'s counterpart: Authorize is
+// ASKED before the handler and may refuse, OnResult is TOLD after it and may
+// not. Both run at the one invoke seam, so both cover every projection — the
+// REST route, tools/call at /mcp, the by-name call plane, the graph, and the
+// in-process CLI, which is the only one no transport middleware can wrap.
+//
+// That last one is why this exists. Anything a middleware records — a trail, a
+// metric, a span — is recorded about a REQUEST, and an in-process invoke is not
+// one. A recorder installed here is told about it under the same operation name
+// as every other door.
+//
+// fn is told the operation and the error, and nothing else. The output is
+// deliberately absent: a hook that could read it would be a way for a response
+// body to reach whatever the hook writes to. Call once while mounting, before
+// Listen — the field is read on serve goroutines. A nil fn declares no hook.
+func (a *App) OnResult(fn func(ctx context.Context, op Op, err error)) { a.onResult = fn }
+
+// result is the [App.OnResult] hook in force over this App's ops: its own if it
+// declared one, else the one it was composed under — the same resolution
+// [App.rule] uses, for the same reason.
+func (a *App) result() func(context.Context, Op, error) {
+	if a.onResult != nil {
+		return a.onResult
+	}
+	if over := a.over.Load(); over != nil {
+		return over.onResult
+	}
+	return nil
+}
+
 // rule is the Authorizer in force over this App's ops: its own if it declared
 // one, else the one it was composed under.
 //

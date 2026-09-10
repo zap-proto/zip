@@ -261,6 +261,11 @@ type App struct {
 	// every decoded request unauthorized. See [App.rule].
 	authorizer Authorizer
 
+	// onResult, when set via OnResult, is told the outcome of every typed op this
+	// app serves, however it was reached. nil defers to [App.over]. See
+	// [App.result].
+	onResult func(context.Context, Op, error)
+
 	// over is the App whose rule this one answers to: the nearest definition
 	// ABOVE it in the composition that declared an Authorizer. Settled at build
 	// by [adopt], which is the only place that knows — a definition is written
