@@ -191,7 +191,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	req.URI().SetPath(zip.CallPath + "flags_bool")
 	// The body is ZAP, because this plane carries nothing else — a JSON body
 	// here is a caller that has not been updated, and is refused rather than
-	// read under the wrong codec.
+	// read under the wrong layout.
 	inBody, err := zapenc.Marshal(&boolIn{Flag: "beta"})
 	if err != nil {
 		t.Fatalf("marshal ZAP body: %v", err)

@@ -21,7 +21,7 @@ import (
 // The fixture these tests share.
 //
 // Declared at package scope, because reflect gives a type declared inside a
-// function no package path — and [zip.Codecs] groups by the package that owns
+// function no package path — and [zip.Layouts] groups by the package that owns
 // the type, which is the question here: the SDK restates these types in a
 // package of its own, and the codec it writes beside them has to be the codec
 // zip writes here.
@@ -63,7 +63,7 @@ type Ided struct {
 	Name string `json:"name"`
 }
 
-// TestSDK_TheCodecIsTheOneZipEmits is the wire claim stated as source. A Go
+// TestSDK_TheLayoutIsTheOneZipEmits is the wire claim stated as source. A Go
 // client and the Rust and C++ clients speak to the same service, so what the
 // SDK writes for an id has to be what zip writes for it — not something that
 // also happens to work.
@@ -72,7 +72,7 @@ type Ided struct {
 // codec" is literal: the section is byte-identical, because it is the same
 // emitter reading the same [LayoutOf] offsets. Anything less than identical
 // here is a second wire.
-func TestSDK_TheCodecIsTheOneZipEmits(t *testing.T) {
+func TestSDK_TheLayoutIsTheOneZipEmits(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
 	zip.Post(app, "/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil },
 		zip.WithOperationID("get_tx"))
@@ -81,9 +81,9 @@ func TestSDK_TheCodecIsTheOneZipEmits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SDK: %v", err)
 	}
-	native, err := zip.Codecs(reflect.TypeOf(Tx{}))
+	native, err := zip.Layouts(reflect.TypeOf(Tx{}))
 	if err != nil {
-		t.Fatalf("Codecs: %v", err)
+		t.Fatalf("Layouts: %v", err)
 	}
 	if len(native) != 1 {
 		t.Fatalf("got %d packages, want 1", len(native))
@@ -197,9 +197,9 @@ func TestSDK_TheTwoCodecsWriteTheSameBytes(t *testing.T) {
 	if len(sdk.Gaps) != 0 {
 		t.Fatalf("gaps: %+v", sdk.Gaps)
 	}
-	native, err := zip.Codecs(reflect.TypeOf(Tx{}), reflect.TypeOf(Ided{}))
+	native, err := zip.Layouts(reflect.TypeOf(Tx{}), reflect.TypeOf(Ided{}))
 	if err != nil {
-		t.Fatalf("Codecs: %v", err)
+		t.Fatalf("Layouts: %v", err)
 	}
 	// The emitter names the package the TYPES live in, and in the probe they
 	// live in svc. That one line is the only edit; the codec below it is the
@@ -481,7 +481,7 @@ func fail(format string, a ...any) {
 // "reached by its method". A type whose fields are all unexported — a time.Time,
 // a netip.AddrPort — has no slots, so it crosses as a complete and EMPTY object
 // that its parent writes inline. There is nothing to state and no method to
-// reach for, and [Codecs] answers the same way. A codec here that called
+// reach for, and [Layouts] answers the same way. A codec here that called
 // MarshalZAP on it would be a method that does not exist.
 func TestSDK_AValueWithNoSlotsIsStillWrittenInline(t *testing.T) {
 	type stamped struct {

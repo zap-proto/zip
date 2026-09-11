@@ -39,7 +39,7 @@ import (
 // bytes_fixed[32] of a .zap schema — crosses the plane on a codec or not at all.
 // A type implementing Wire writes it inline (zap.ObjectBuilder.SetBytesFixed) and
 // reads it back as a slice of the buffer that arrived (zap.Object.BytesFixed).
-// [Codecs] writes that pair for a service's own types, and [App.SDK] writes it
+// [Layouts] writes that pair for a service's own types, and [App.SDK] writes it
 // for the restatement a generated client holds.
 //
 // The compatibility rule does not change: the layout is still the type, so
@@ -77,7 +77,7 @@ type Shape = zapenc.Shape
 // relative offset. Packing, or giving a nested value four bytes, moves every
 // field after it.
 //
-// bytes_fixed[N] is laid out here and is NOT carried by the reflective codec. The
+// bytes_fixed[N] is laid out here and is NOT carried by the reflective layout. The
 // layout is what a schema and a generator need; refusing to encode it is what
 // makes an id — an ids.ID is [32]byte — force a type to declare its own wire
 // rather than quietly acquiring a reflective one.

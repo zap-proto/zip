@@ -68,7 +68,7 @@ const CallPath = "/.well-known/zip/op/"
 
 // CallContentType marks a body on the op-call plane. It names ZAP explicitly so
 // a request that arrives with anything else is a caller that has not been
-// updated, rather than a body silently read under the wrong codec.
+// updated, rather than a body silently read under the wrong layout.
 const CallContentType = "application/zap"
 
 // callFault is how a refusal crosses the plane: the status the op chose, its
