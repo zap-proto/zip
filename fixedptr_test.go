@@ -7,7 +7,7 @@ import (
 )
 
 // An OPTIONAL id is a pointer to a fixed array, and the two directions of the
-// generated codec disagreed about it: the writer guarded the nil and the reader
+// generated layout disagreed about it: the writer guarded the nil and the reader
 // did not, so `copy(x.F[:], …)` dereferenced a nil pointer on a value that had
 // just been allocated. Every read of a type carrying one panicked at the far
 // end of the plane — measured on the P-Chain's L1 validator, whose validationID

@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/zap-proto/zip/internal/sock"
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
@@ -80,7 +80,7 @@ type callFault struct {
 	Msg    string
 }
 
-// sendCallError writes a refusal in the plane's own encoding, preserving the
+// sendCallError writes a refusal in the plane's own wire, preserving the
 // status the op chose — 402 vs 403 vs 404 vs 503 is the whole answer, and a
 // plane that collapsed them would make every failure look alike.
 func sendCallError(fc fiber.Ctx, err error) error {
@@ -88,7 +88,7 @@ func sendCallError(fc fiber.Ctx, err error) error {
 	if he, ok := asHTTPError(err); ok {
 		f.Status, f.Code, f.Msg = int32(he.Status), he.Code, he.Msg
 	}
-	body, merr := zapenc.Marshal(&f)
+	body, merr := zapwire.Build(&f)
 	if merr != nil {
 		return err // fall back to the app's own handler rather than lose the error
 	}
@@ -155,7 +155,12 @@ func (a *App) installCallPlane() {
 		// through a text format on the way. JSON is the BOUNDARY encoding — it
 		// belongs on the REST routes a browser reaches and in the MCP envelope an
 		// agent reads, and has no place inside the binary protocol.
-		out, err := op.invoke(callerContext(fc), zapenc.Unmarshal, fc.Body(), nil, nil, func(k string) string { return fc.Get(k) })
+		//
+		// In points into this body, and fasthttp reuses the request once the
+		// handler returns, so the body is taken out of the request first. A
+		// handler may keep its input — cache it, queue it, hand it to a goroutine.
+		in := owned(fc.Body(), fc.Request().SwapBody)
+		out, err := op.invoke(callerContext(fc), zapwire.Wrap, in, nil, nil, func(k string) string { return fc.Get(k) })
 		if err != nil {
 			return sendCallError(fc, err)
 		}
@@ -164,12 +169,12 @@ func (a *App) installCallPlane() {
 		}
 		// A held op answers 202 here exactly as it does over REST, and the STATUS
 		// is what carries it: sending the [Approval] as the op's ordinary reply
-		// would put it under a 200, and the far side would decode those bytes into
+		// would put it under a 200, and the far side would read those bytes as
 		// Out and report a value the handler never produced.
 		if a, ok := out.(*Approval); ok {
-			body, merr := zapenc.Marshal(a)
+			body, merr := zapwire.Build(a)
 			if merr != nil {
-				return sendCallError(fc, ErrInternal("zip: encode approval: "+merr.Error()))
+				return sendCallError(fc, ErrInternal("zip: build approval: "+merr.Error()))
 			}
 			fc.Set(fiber.HeaderContentType, CallContentType)
 			fc.Status(fiber.StatusAccepted)
@@ -184,9 +189,9 @@ func (a *App) installCallPlane() {
 		for name, v := range hdrs {
 			fc.Set(name, v)
 		}
-		body, merr := zapenc.Marshal(out)
+		body, merr := zapwire.Build(out)
 		if merr != nil {
-			return sendCallError(fc, ErrInternal("zip: encode reply: "+merr.Error()))
+			return sendCallError(fc, ErrInternal("zip: build reply: "+merr.Error()))
 		}
 		fc.Set(fiber.HeaderContentType, CallContentType)
 		return fc.Send(body)
@@ -249,10 +254,11 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-// Call invokes op on the app behind c and decodes its reply into Out. It is
-// the typed round trip: In is marshalled to the op's JSON body, the callee
-// decodes it into the very same type it declared, and its Out comes back
-// decoded here.
+// Call invokes op on the app behind c and reads its reply as Out. It is the
+// typed round trip: In is built as a ZAP message at the layout of its own type,
+// the callee reads it as the very same type it declared, and its Out comes back
+// read in place. The reply's strings point into the body it arrived in, which
+// Call hands to the *Out, so the value stays good for as long as it is held.
 //
 // A void op (one whose handler returns a nil *Out) yields a nil *Out and a nil
 // error, matching what the handler returned.
@@ -284,9 +290,9 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 
 	var body []byte
 	if in != nil {
-		b, err := zapenc.Marshal(in)
+		b, err := zapwire.Build(in)
 		if err != nil {
-			return nil, ErrBadRequest("zip: encode " + op + ": " + err.Error())
+			return nil, ErrBadRequest("zip: build " + op + ": " + err.Error())
 		}
 		body = b
 	}
@@ -309,38 +315,44 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 		return nil, Errorf(502, "zip: call %s at %s: %v", op, c.addr, err)
 	}
 
+	// Whatever comes back points into this body — the reply, a held op's
+	// Approval, a refusal's message — and resp goes back to fasthttp's pool when
+	// Call returns, where the next call writes over it. So the body is taken out
+	// of resp first and handed to the value, which keeps it as long as it lives.
+	reply := owned(resp.Body(), resp.SwapBody)
+
 	switch code := resp.StatusCode(); {
 	case code == fasthttp.StatusNoContent:
 		return nil, nil
 	case code == fasthttp.StatusAccepted:
 		// The callee held the op, so these bytes are an [Approval] and not an Out.
-		// Decoding them into Out is precisely how a held op becomes a fabricated
+		// Reading them as Out is precisely how a held op becomes a fabricated
 		// success, so it comes back as the Approval itself, which [HeldOf] reads.
 		var a Approval
-		if err := zapenc.Unmarshal(resp.Body(), &a); err != nil {
-			return nil, Errorf(502, "zip: decode %s approval: %v", op, err)
+		if err := zapwire.Wrap(reply, &a); err != nil {
+			return nil, Errorf(502, "zip: read %s approval: %v", op, err)
 		}
 		return nil, &a
 	case code < 200 || code > 299:
-		return nil, remoteError(code, op, resp.Body())
+		return nil, remoteError(code, op, reply)
 	}
-	if len(resp.Body()) == 0 {
+	if len(reply) == 0 {
 		return nil, nil
 	}
 	var out Out
-	if err := zapenc.Unmarshal(resp.Body(), &out); err != nil {
-		return nil, Errorf(502, "zip: decode %s reply: %v", op, err)
+	if err := zapwire.Wrap(reply, &out); err != nil {
+		return nil, Errorf(502, "zip: read %s reply: %v", op, err)
 	}
 	return &out, nil
 }
 
 // remoteError rebuilds the refusal the callee chose, so errors.As on this side
 // sees the *HTTPError the other side returned with its status intact. The body
-// is ZAP like everything else on this plane; a body that does not decode leaves
+// is ZAP like everything else on this plane; a body that does not read leaves
 // the transport's own status, which is still an honest answer.
 func remoteError(code int, op string, body []byte) error {
 	var f callFault
-	if err := zapenc.Unmarshal(body, &f); err != nil || f.Msg == "" {
+	if err := zapwire.Wrap(body, &f); err != nil || f.Msg == "" {
 		return Errorf(code, "zip: call %s: %s", op, body)
 	}
 	status := int(f.Status)
@@ -348,6 +360,25 @@ func remoteError(code int, op string, body []byte) error {
 		status = code
 	}
 	return &HTTPError{Status: status, Code: f.Code, Msg: f.Msg}
+}
+
+// owned hands over b, the body a message arrived in, as bytes nobody else will
+// write to. A value read from a ZAP message points into its body, so the body
+// has to live as long as the value, and a fasthttp body does not: it goes back
+// to a pool when its request or response is released.
+//
+// swap is that message's SwapBody, which takes the buffer out of the pool
+// without copying it. When b is not that buffer — a transport that set the body
+// raw, or a decoded Content-Encoding — the pool never held it, and b is copied
+// once instead.
+func owned(b []byte, swap func([]byte) []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	if own := swap(nil); len(own) == len(b) && &own[0] == &b[0] {
+		return own
+	}
+	return append([]byte(nil), b...)
 }
 
 // validOpName rejects a name that would address something other than an op.

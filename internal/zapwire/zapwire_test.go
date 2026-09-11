@@ -1,11 +1,11 @@
-package zapenc_test
+package zapwire_test
 
 import (
 	"reflect"
 	"testing"
 
 	zap "github.com/zap-proto/go"
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 )
 
 type inner struct {
@@ -35,7 +35,7 @@ type wide struct {
 	OptGone *string
 }
 
-// The whole value crosses and comes back identical. A codec that drops a field
+// The whole value crosses and comes back identical. A layout that drops a field
 // is worse than one that fails: the call succeeds and the callee decides on a
 // value nobody sent.
 func TestRoundTripCarriesEveryField(t *testing.T) {
@@ -56,16 +56,16 @@ func TestRoundTripCarriesEveryField(t *testing.T) {
 		Opt:     &opt,
 	}
 
-	b, err := zapenc.Marshal(&want)
+	b, err := zapwire.Build(&want)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if len(b) == 0 {
-		t.Fatal("marshal produced no bytes")
+		t.Fatal("build produced no bytes")
 	}
 	var got wide
-	if err := zapenc.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := zapwire.Wrap(b, &got); err != nil {
+		t.Fatalf("wrap: %v", err)
 	}
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("value did not survive the crossing:\n got %+v\nwant %+v", got, want)
@@ -79,7 +79,7 @@ func TestRoundTripCarriesEveryField(t *testing.T) {
 // halves. The canonical parser has to read the message, and the first field has
 // to be at the offset the layout says it is.
 func TestBytesAreAZAPMessage(t *testing.T) {
-	b, err := zapenc.Marshal(&inner{Slug: "board", Listed: true})
+	b, err := zapwire.Build(&inner{Slug: "board", Listed: true})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestBytesAreAZAPMessage(t *testing.T) {
 // JSON's own punctuation must not produce a payload that parses as JSON, and
 // the field names must not appear on the wire at all — the offset IS the name.
 func TestNothingIsJSON(t *testing.T) {
-	b, err := zapenc.Marshal(&inner{Slug: `{"slug":"x"}`, Listed: true})
+	b, err := zapwire.Build(&inner{Slug: `{"slug":"x"}`, Listed: true})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -121,8 +121,8 @@ func TestNothingIsJSON(t *testing.T) {
 // answer.
 func TestEmptyIsAbsence(t *testing.T) {
 	got := inner{Slug: "untouched", Listed: true}
-	if err := zapenc.Unmarshal(nil, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := zapwire.Wrap(nil, &got); err != nil {
+		t.Fatalf("wrap: %v", err)
 	}
 	if got.Slug != "untouched" || !got.Listed {
 		t.Fatalf("an empty message overwrote the value: %+v", got)
@@ -133,7 +133,7 @@ func TestEmptyIsAbsence(t *testing.T) {
 // callee ends up deciding on a field the caller believes it sent.
 func TestUnencodableIsRefused(t *testing.T) {
 	type bad struct{ M map[string]string }
-	if _, err := zapenc.Marshal(&bad{M: map[string]string{"a": "b"}}); err == nil {
+	if _, err := zapwire.Build(&bad{M: map[string]string{"a": "b"}}); err == nil {
 		t.Fatal("a map encoded silently; it must be refused")
 	}
 }
@@ -141,13 +141,13 @@ func TestUnencodableIsRefused(t *testing.T) {
 // Empty and nil slices are both an absent list, and both read back as nil —
 // which is what a caller ranges over identically.
 func TestEmptySliceIsAbsent(t *testing.T) {
-	b, err := zapenc.Marshal(&wide{Rows: nil, Names: []string{}})
+	b, err := zapwire.Build(&wide{Rows: nil, Names: []string{}})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	var got wide
-	if err := zapenc.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := zapwire.Wrap(b, &got); err != nil {
+		t.Fatalf("wrap: %v", err)
 	}
 	if len(got.Rows) != 0 || len(got.Names) != 0 {
 		t.Fatalf("an empty list came back with elements: %+v", got)

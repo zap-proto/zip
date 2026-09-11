@@ -158,7 +158,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 // symmetry: that plane is ZAP end to end, and ZAP encodes STRUCTS. This side
 // has no struct — the remote owns the type, which is the entire reason this is
 // a mount and not a link — so the only value available here is a free-form map,
-// and `zapenc: map[string]interface {} is not a struct` is what asking for the
+// and `zapwire: map[string]interface {} is not a struct` is what asking for the
 // symmetry actually gets you.
 //
 // The declaration already carries the method and the pattern, so the REST route

@@ -3,7 +3,7 @@ package zip
 // Layouts — the source that STATES a type's ZAP wire instead of deriving one at
 // every call. Nothing here runs on the served path; this is a generator.
 //
-// [LayoutOf] names three readers of the one derivation: the plane encodes
+// [LayoutOf] names three readers of the one derivation: the plane builds
 // against it, a .zap schema states it as `Name type @Offset`, and a generator
 // emits it as constants. This is that generator. What it writes is a [Wire]
 // implementation: two methods per type, offsets as constants, no reflection on
@@ -17,9 +17,9 @@ package zip
 //
 // It is also the only way to carry an id. bytes_fixed[N] has an offset and a
 // width, so the layout knows its shape and a schema states it correctly, and the
-// reflective encoder refuses it outright — deliberately, because an id is
+// reflective builder refuses it outright — deliberately, because an id is
 // exactly the case that should force a type to declare its own wire. An ids.ID
-// is [32]byte, so a reply carrying one crosses on a codec or not at all.
+// is [32]byte, so a reply carrying one crosses on a stated wire or not at all.
 //
 // The Go SDK writes its own with this emitter rather than a second one, through
 // the [naming] seam: it restates the fleet's types under its own names, so the
@@ -28,11 +28,11 @@ package zip
 //
 // # The wire does not move
 //
-// The emitted code writes the SAME BYTES the reflective encoder writes, field
-// for field and in the same order, for every field the reflective encoder can
+// The emitted code writes the SAME BYTES the reflective builder writes, field
+// for field and in the same order, for every field the reflective builder can
 // write at all. That is not a promise about intent — it falls out of reading the
 // offsets from [LayoutOf] rather than deriving them a second time, and
-// TestTheLayoutKeepsTheWire holds it against the reflective encoder directly.
+// TestTheLayoutKeepsTheWire holds it against the reflective builder directly.
 //
 // The sequence it reproduces: every list is written FIRST, because SetList takes
 // an offset that must already exist; then the object is started at the declared
@@ -43,10 +43,10 @@ package zip
 // # What the emitted package depends on
 //
 // The ZAP builder, and nothing else. [Wire] is restated in the emitted file, the
-// way internal/zapenc restates it, so a leaf module — an id package, a shared
+// way internal/zapwire restates it, so a leaf module — an id package, a shared
 // types package — can state its wire without taking on this one's dependencies.
 // The restatement is a compile-time assertion per type, which is what makes a
-// deleted codec a build failure rather than a silent return to reflection.
+// deleted layout a build failure rather than a silent return to reflection.
 
 import (
 	"bytes"
@@ -84,7 +84,7 @@ type Layout struct {
 //
 // A type the derivation refuses — one holding a map, an interface, or a fixed
 // array of anything but bytes — comes back as an error naming it, because there
-// is no layout to state and a codec that guessed one would speak a wire nobody
+// is no layout to state and a layout that guessed one would speak a wire nobody
 // reads. Answering that is a change to the TYPE, which is not a generator's to
 // make.
 func Layouts(roots ...reflect.Type) ([]Layout, error) {
@@ -155,7 +155,7 @@ func reach(t reflect.Type, want map[reflect.Type]bool) error {
 // time.Time or a netip.AddrPort is from here. It crosses as a complete and EMPTY
 // ZAP object and carries nothing, so a parent writes those bytes inline rather
 // than reaching for a method, and there is nothing to declare a wire for. The
-// value is lost either way; that is the reflective encoder's answer too, and
+// value is lost either way; that is the reflective builder's answer too, and
 // changing it would be a different wire.
 func empty(t reflect.Type) bool {
 	sh, err := LayoutOf(t)
@@ -226,7 +226,7 @@ type pkg struct {
 	taken map[string]bool
 	plain map[string]bool // imports whose alias is their own name
 	// as is how a file that did NOT declare these types spells them. The Go SDK
-	// restates the fleet's types under its own names and emits their codec
+	// restates the fleet's types under its own names and emits their layout
 	// beside them, so the offsets come from the declared type and every
 	// identifier comes from here. nil is the ordinary case — a generator
 	// writing into the package that declared the types, where every name is the
@@ -363,19 +363,19 @@ func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Layout, er
 // interface would be a package-level identifier the emitter cannot know is free.
 // github.com/luxfi/utxo imports a package called wire.
 //
-// Both halves are required together: a type carrying one would encode from these
-// constants and decode by reflection, which is two answers to where its layout
+// Both halves are required together: a type carrying one would build from these
+// constants and read by reflection, which is two answers to where its layout
 // lives.
 const stated = `var _ interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
+	BuildZAP() ([]byte, error)
+	WrapZAP([]byte) error
 } = (*%s)(nil)
 
 `
 
 // emptying is the ZAP message a value with no slots crosses as. A type whose
 // fields are all unexported — a time.Time, a netip.AddrPort — states nothing, so
-// what crosses is a complete and empty object. It is what the reflective encoder
+// what crosses is a complete and empty object. It is what the reflective builder
 // writes for one, byte for byte.
 const emptying = `// empty is the ZAP message a value with no slots crosses as.
 func empty() []byte {
@@ -402,10 +402,10 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 	fmt.Fprintf(w, "\t%sSize = %d\n)\n\n", lo, shape.Size)
 	fmt.Fprintf(w, stated, name)
 
-	fmt.Fprintf(w, "// MarshalZAP writes %s from constant offsets.\n", name)
-	fmt.Fprintf(w, "func (x *%s) MarshalZAP() ([]byte, error) {\n", name)
+	fmt.Fprintf(w, "// BuildZAP writes %s from constant offsets.\n", name)
+	fmt.Fprintf(w, "func (x *%s) BuildZAP() ([]byte, error) {\n", name)
 	// A nil receiver is an absent body, not an empty object — the answer the
-	// reflective encoder gives, and a handler returning a nil *Out reaches here
+	// reflective builder gives, and a handler returning a nil *Out reaches here
 	// as a non-nil interface holding one.
 	fmt.Fprint(w, "\tif x == nil {\n\t\treturn nil, nil\n\t}\n")
 	fmt.Fprintf(w, "\tb := zap.NewBuilder(%sSize + 256)\n", lo)
@@ -444,8 +444,8 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 	}
 	fmt.Fprint(w, "\tob.FinishAsRoot()\n\treturn b.Finish(), nil\n}\n\n")
 
-	fmt.Fprintf(w, "// UnmarshalZAP reads %s out of the buffer that arrived.\n", name)
-	fmt.Fprintf(w, "func (x *%s) UnmarshalZAP(data []byte) error {\n", name)
+	fmt.Fprintf(w, "// WrapZAP reads %s out of the buffer that arrived.\n", name)
+	fmt.Fprintf(w, "func (x *%s) WrapZAP(data []byte) error {\n", name)
 	// An empty message leaves the value untouched: a void reply is an absence,
 	// not a zero somebody might mistake for an answer.
 	fmt.Fprint(w, "\tif x == nil || len(data) == 0 {\n\t\treturn nil\n\t}\n")
@@ -538,7 +538,7 @@ func writeField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p
 		}
 		// x.F reaches the pointer method on its own: a field of a pointer
 		// receiver is addressable, and a pointer field already is one.
-		fmt.Fprintf(w, "%sinner%s, err := x.%s.MarshalZAP()\n%sif err != nil {\n%s\treturn nil, err\n%s}\n",
+		fmt.Fprintf(w, "%sinner%s, err := x.%s.BuildZAP()\n%sif err != nil {\n%s\treturn nil, err\n%s}\n",
 			tab, fn, fn, tab, tab, tab)
 		fmt.Fprintf(w, "%sob.SetBytes(%s, inner%s)\n", tab, at, fn)
 	default:
@@ -583,9 +583,9 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 		}
 		fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n", at)
 		if s.Ptr {
-			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", p.spell(ft), fn)
+			fmt.Fprintf(w, "\t\tvar v %s\n\t\tif err := v.WrapZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tx.%s = &v\n", p.spell(ft), fn)
 		} else {
-			fmt.Fprintf(w, "\t\tif err := x.%s.UnmarshalZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n", fn)
+			fmt.Fprintf(w, "\t\tif err := x.%s.WrapZAP(raw); err != nil {\n\t\t\treturn err\n\t\t}\n", fn)
 		}
 		fmt.Fprint(w, "\t}\n")
 		return nil
@@ -600,21 +600,17 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 	read := fmt.Sprintf("%s(o.%s(%s))", spell, c[1], at)
 	switch s.Type {
 	case "bytes":
-		// A slice is not comparable, so an absent one is told by its length —
-		// which is the same thing the reflective decoder asks when it decides
-		// whether to allocate.
+		// A read points into the bytes that arrived, as o.Text does for text: the
+		// plane hands those bytes to the value, so there is nothing to copy. The
+		// slice ends at its own length, so an append cannot reach the next field,
+		// and an absent one is told by its length, as the reflective reader does.
 		if s.Ptr {
-			fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n\t\tv := %s(append([]byte(nil), raw...))\n\t\tx.%s = &v\n\t}\n",
+			fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n\t\tv := %s(raw[:len(raw):len(raw)])\n\t\tx.%s = &v\n\t}\n",
 				at, spell, fn)
 			return nil
 		}
-		read = fmt.Sprintf("%s(append([]byte(nil), o.Bytes(%s)...))", spell, at)
-	case "text":
-		// ZAP decodes a string zero-copy, over the frame that arrived, and the
-		// next call on that connection reuses the frame. A reply that outlives
-		// its call would mutate under its owner, so the codec copies here.
-		read = fmt.Sprintf("%s(strings.Clone(o.Text(%s)))", spell, at)
-		p.std("strings")
+		fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n\t\tx.%s = %s(raw[:len(raw):len(raw)])\n\t}\n", at, fn, spell)
+		return nil
 	}
 	if s.Ptr {
 		fmt.Fprintf(w, "\tif v := %s; %s {\n\t\tx.%s = &v\n\t}\n", read, present(s, spell), fn)
@@ -625,7 +621,7 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 }
 
 // present is when an absent pointer field is actually there, mirroring the
-// reflective decoder: it allocates only once something is, so a pointer to a
+// reflective reader: it allocates only once something is, so a pointer to a
 // zero value comes back nil rather than as a pointer to nothing.
 func present(s Slot, spell string) string {
 	switch s.Type {
@@ -653,13 +649,13 @@ func writeList(w *bytes.Buffer, fn string, s Slot, f reflect.StructField, p *pkg
 	case el.Kind() == reflect.Struct && empty(el):
 		fmt.Fprint(w, "\t\t\teb := zap.NewBuilder(zap.HeaderSize)\n\t\t\teb.StartObject(0).FinishAsRoot()\n\t\t\tenc := eb.Finish()\n")
 	case el.Kind() == reflect.Struct:
-		// A nil element encodes as the zero value, which is what the reflective
-		// encoder writes for one: a list has no hole to leave.
+		// A nil element is written as the zero value, which is what the reflective
+		// builder writes for one: a list has no hole to leave.
 		if ptr {
 			fmt.Fprintf(w, "\t\t\telem := %s[i]\n\t\t\tif elem == nil {\n\t\t\t\telem = new(%s)\n\t\t\t}\n", ref, p.spell(el))
-			fmt.Fprint(w, "\t\t\tenc, err := elem.MarshalZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n")
+			fmt.Fprint(w, "\t\t\tenc, err := elem.BuildZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n")
 		} else {
-			fmt.Fprintf(w, "\t\t\tenc, err := %s[i].MarshalZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n", ref)
+			fmt.Fprintf(w, "\t\t\tenc, err := %s[i].BuildZAP()\n\t\t\tif err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}\n", ref)
 		}
 	case el.Kind() == reflect.Array:
 		fmt.Fprintf(w, "\t\t\tenc := %s[i][:]\n", ref)
@@ -707,7 +703,7 @@ func index(body *bytes.Buffer) string {
 }
 
 // element spells one list element for the little-endian write. A float crosses
-// as its bits, which is what the reflective encoder writes, so the two agree.
+// as its bits, which is what the reflective builder writes, so the two agree.
 func element(s Slot, ref string) string {
 	switch s.Elem {
 	case "f32":
@@ -735,13 +731,13 @@ func readList(w *bytes.Buffer, at, fn string, s Slot, f reflect.StructField, p *
 		if ptr {
 			fmt.Fprintf(w, "\t\t\trows[i] = new(%s)\n", p.spell(el))
 		}
-		fmt.Fprint(w, "\t\t\tif err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n")
+		fmt.Fprint(w, "\t\t\tif err := rows[i].WrapZAP(l.BytesAt(i)); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n")
 	case el.Kind() == reflect.Array:
 		fmt.Fprint(w, "\t\t\tcopy(rows[i][:], l.BytesAt(i))\n")
 	case s.Elem == "text":
 		fmt.Fprintf(w, "\t\t\trows[i] = %s(l.BytesAt(i))\n", p.spell(et))
 	case s.Elem == "bytes":
-		fmt.Fprintf(w, "\t\t\trows[i] = %s(append([]byte(nil), l.BytesAt(i)...))\n", p.spell(et))
+		fmt.Fprintf(w, "\t\t\traw := l.BytesAt(i)\n\t\t\trows[i] = %s(raw[:len(raw):len(raw)])\n", p.spell(et))
 	case s.Elem == "bool":
 		fmt.Fprintf(w, "\t\t\traw := l.BytesAt(i)\n\t\t\trows[i] = %s(len(raw) > 0 && raw[0] != 0)\n", p.spell(et))
 	default:
@@ -767,7 +763,7 @@ func readList(w *bytes.Buffer, at, fn string, s Slot, f reflect.StructField, p *
 // elementRead widens one list element that arrived at its own width. Anything
 // narrower than eight bytes was zero-extended into full by the caller; a signed
 // element is then sign-extended from its own width, which is what the reflective
-// decoder does — a negative int32 read as a uint64 is a very large number.
+// reader does — a negative int32 read as a uint64 is a very large number.
 func elementRead(s Slot) string {
 	n := widthOf(s.Elem)
 	switch s.Elem {

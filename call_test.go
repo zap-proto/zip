@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 	"net"
 	"os"
 	"path/filepath"
@@ -174,7 +174,7 @@ func TestCall_TypedRoundTripOverZAPOnUnixSocket(t *testing.T) {
 
 // TestCall_WireIsZAPFramesNotHTTP proves the bytes on that socket are ZAP
 // frames. It writes a length-prefixed ZAP request frame with zap's own
-// codec and decodes the reply with it — a positive identification of the wire
+// builder and reads the reply with it — a positive identification of the wire
 // format, not an inference from the fact that a call succeeded.
 //
 // It then shows the negative: a well-formed HTTP/1.1 request gets no HTTP
@@ -192,15 +192,15 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	// The body is ZAP, because this plane carries nothing else — a JSON body
 	// here is a caller that has not been updated, and is refused rather than
 	// read under the wrong layout.
-	inBody, err := zapenc.Marshal(&boolIn{Flag: "beta"})
+	inBody, err := zapwire.Build(&boolIn{Flag: "beta"})
 	if err != nil {
-		t.Fatalf("marshal ZAP body: %v", err)
+		t.Fatalf("build ZAP body: %v", err)
 	}
 	req.SetBody(inBody)
 
 	frame, merr := http.MarshalRequest(req)
 	if merr != nil {
-		t.Fatalf("marshal ZAP request frame: %v", merr)
+		t.Fatalf("build ZAP request frame: %v", merr)
 	}
 
 	conn, err := net.Dial("unix", sock)
@@ -240,7 +240,7 @@ func TestCall_WireIsZAPFramesNotHTTP(t *testing.T) {
 	// The reply is ZAP too. Decoding it with the JSON reader would fail, which is
 	// the point: there is no text encoding anywhere on this plane.
 	var out boolOut
-	if derr := zapenc.Unmarshal(resp.Body(), &out); derr != nil {
+	if derr := zapwire.Wrap(resp.Body(), &out); derr != nil {
 		t.Fatalf("the reply is not a ZAP message: %v", derr)
 	}
 	if !out.Enabled {

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 )
 
 // CppSDK is one generated C++20 client SDK: the header content, and any gaps.
@@ -106,7 +106,7 @@ func (g *cppRender) declare(t reflect.Type, op string, fields map[string]string)
 	if name, seen := g.named[t]; seen {
 		return name, name != ""
 	}
-	shape, err := zapenc.LayoutOf(t)
+	shape, err := zapwire.LayoutOf(t)
 	if err != nil {
 		g.named[t] = ""
 		g.gap(op, goName(t), t.String(), causeOf(err))
@@ -115,7 +115,7 @@ func (g *cppRender) declare(t reflect.Type, op string, fields map[string]string)
 	for _, s := range shape.Slots {
 		if strings.HasPrefix(s.Type, "bytes_fixed[") || strings.HasPrefix(s.Elem, "bytes_fixed[") {
 			g.named[t] = ""
-			g.gap(op, goName(t)+"."+s.Name, s.Type, causeCodec)
+			g.gap(op, goName(t)+"."+s.Name, s.Type, causeWire)
 			return "", false
 		}
 	}

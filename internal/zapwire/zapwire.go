@@ -1,9 +1,9 @@
-// Package zapenc encodes a Go value as a ZAP message and reads one back.
+// Package zapwire lays a Go value out as a ZAP message and reads one in place.
 //
 // It is what makes the op-call plane ZAP end to end. An op's In and Out are
 // ordinary Go structs; this derives their wire layout from the type itself, so
 // a service-to-service call carries the same bytes in memory that it puts on
-// the socket, with no second encoding in the middle. JSON stays where it
+// the socket, with no second format in the middle. JSON stays where it
 // belongs — at the boundary, for browsers — and never inside the binary
 // protocol.
 //
@@ -11,7 +11,7 @@
 //
 // Fields take slots in declaration order, each aligned to its own width, which
 // is the rule zap's own schema builder applies. Nothing is named on the wire:
-// a field IS its offset, exactly as a hand-written ZAP codec would spell it,
+// a field IS its offset, exactly as a hand-written ZAP layout would spell it,
 // and the type declaration is the schema both ends read. That is also the whole
 // compatibility rule — REORDERING, INSERTING OR RETYPING A FIELD CHANGES THE
 // WIRE. Append at the end, and only at the end.
@@ -25,7 +25,7 @@
 // ZAP message per element.
 //
 // Anything else — a map, an interface, a channel, a FIXED-SIZE ARRAY — is
-// refused at encode rather than dropped. A field that silently does not cross is
+// refused at build rather than dropped. A field that silently does not cross is
 // the failure this package exists to make impossible.
 //
 // # A type that owns its wire is not reflected over
@@ -34,17 +34,17 @@
 // reflect.ValueOf, sizes a builder by guess (lay.size+256) and walks the fields
 // again, so the cost is paid per call for a fact that is fixed at compile time.
 //
-// So a type may state its own wire form — [zip.Wire], MarshalZAP/UnmarshalZAP —
+// So a type may state its own wire form — [zip.Wire], BuildZAP/WrapZAP —
 // and both entry points below take that answer BEFORE they reach for reflect.
 // Generated code emits those two methods with the offsets as constants, which is
-// what a hand-written ZAP codec is, so the derivation moves to build time and the
+// what a hand-written ZAP layout is, so the derivation moves to build time and the
 // call path holds none of it.
 //
 // It is also the only way to carry what the derivation cannot express. A
 // bytes_fixed[N] field — an ids.ID is [32]byte — is refused here and written
 // inline by generated code through zap.Object.BytesFixed, so a round trip that
 // SUCCEEDS for such a type is proof the reflective path was not taken.
-package zapenc
+package zapwire
 
 import (
 	"encoding/binary"
@@ -59,21 +59,21 @@ import (
 
 // wire is [zip.Wire] restated where it is consumed, so this package depends on
 // nothing to recognise it. Both methods are required together: a type that
-// carried only one would encode from generated offsets and decode by reflection,
+// carried only one would build from generated offsets and read by reflection,
 // which is two answers to where its layout lives.
 type wire interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
+	BuildZAP() ([]byte, error)
+	WrapZAP([]byte) error
 }
 
-// Marshal encodes v as a ZAP message. v must be a struct or a pointer to one:
+// Build writes v as a ZAP message. v must be a struct or a pointer to one:
 // the message's root is an object, and there is nothing for a bare scalar to be
 // the root of.
 //
 // A v that states its own wire form answers for itself and nothing here reflects.
-func Marshal(v any) ([]byte, error) {
+func Build(v any) ([]byte, error) {
 	if w, ok := v.(wire); ok {
-		return w.MarshalZAP()
+		return w.BuildZAP()
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
@@ -83,7 +83,7 @@ func Marshal(v any) ([]byte, error) {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("zapenc: %s is not a struct", rv.Type())
+		return nil, fmt.Errorf("zapwire: %s is not a struct", rv.Type())
 	}
 	lay, err := layoutOf(rv.Type())
 	if err != nil {
@@ -96,27 +96,35 @@ func Marshal(v any) ([]byte, error) {
 	return b.Finish(), nil
 }
 
-// Unmarshal reads a ZAP message into v, which must be a non-nil pointer to a
-// struct. An empty message leaves v untouched — a void reply is an absence, not
-// a zero value that a caller might mistake for an answer.
-func Unmarshal(data []byte, v any) error {
+// Wrap points v at a ZAP message. v must be a non-nil pointer to a struct, and
+// its strings and byte slices come back as windows onto data, not copies of it:
+// a read is a pointer into the bytes that arrived, and nothing is decoded.
+//
+// So data is HANDED OVER, not lent. It belongs to v from here on, and whoever
+// passes it must not reuse it while v is alive — the op-call plane gives each
+// value a body nobody else holds (see zip.Call). A byte slice ends at its own
+// length, so an append reallocates instead of writing over the next field.
+//
+// An empty message leaves v untouched — a void reply is an absence, not a zero
+// value that a caller might mistake for an answer.
+func Wrap(data []byte, v any) error {
 	if len(data) == 0 {
 		return nil
 	}
 	if w, ok := v.(wire); ok {
-		return w.UnmarshalZAP(data)
+		return w.WrapZAP(data)
 	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return fmt.Errorf("zapenc: Unmarshal needs a non-nil pointer, got %T", v)
+		return fmt.Errorf("zapwire: Wrap needs a non-nil pointer, got %T", v)
 	}
 	rv = rv.Elem()
 	if rv.Kind() != reflect.Struct {
-		return fmt.Errorf("zapenc: %s is not a struct", rv.Type())
+		return fmt.Errorf("zapwire: %s is not a struct", rv.Type())
 	}
 	msg, err := zap.Parse(data)
 	if err != nil {
-		return fmt.Errorf("zapenc: %w", err)
+		return fmt.Errorf("zapwire: %w", err)
 	}
 	lay, err := layoutOf(rv.Type())
 	if err != nil {
@@ -146,7 +154,7 @@ const (
 	kStruct
 	kSlice
 	// kFixed is bytes_fixed[N] — N bytes written INLINE, aligned to 1. It has a
-	// layout and no reflective codec: see [Layout] and writeStruct's refusal.
+	// layout and no reflective path: see [Layout] and writeStruct's refusal.
 	kFixed
 )
 
@@ -155,9 +163,9 @@ type field struct {
 	offset int
 	kind   kind
 	n      int          // kFixed: the array length
-	ptr    bool         // the Go field is a pointer to the encoded type
+	ptr    bool         // the Go field is a pointer to the wire type
 	elem   *layout      // kStruct: the nested layout
-	slice  *sliceElem   // kSlice: how one element is encoded
+	slice  *sliceElem   // kSlice: how one element is laid out
 	typ    reflect.Type // the Go type at this field, minus any pointer
 }
 
@@ -188,7 +196,7 @@ type sliceElem struct {
 	ptr  bool
 	// n is kFixed's array length. A field carries it and an element has to
 	// carry it too: without it the schema states bytes_fixed[0], which is a
-	// width nothing writes and a generated codec would read zero bytes for.
+	// width nothing writes and a generated layout would read zero bytes for.
 	n int
 }
 
@@ -236,7 +244,7 @@ func layoutLocked(t reflect.Type) (*layout, error) {
 		return v.(*layout), nil
 	}
 	if derive.building[t] {
-		return nil, fmt.Errorf("zapenc: %s contains itself; a field is an offset and a width, so a recursive type has no wire form", t)
+		return nil, fmt.Errorf("zapwire: %s contains itself; a field is an offset and a width, so a recursive type has no wire form", t)
 	}
 	if derive.building == nil {
 		derive.building = map[reflect.Type]bool{}
@@ -319,7 +327,7 @@ func fieldOf(t reflect.Type) (field, error) {
 		// bytes_fixed[N]. Only a byte array: an array of anything else has no
 		// inline wire form, and a list is how a sequence crosses.
 		if t.Elem().Kind() != reflect.Uint8 {
-			return f, fmt.Errorf("zapenc: an array of %s has no wire form; use a slice", t.Elem())
+			return f, fmt.Errorf("zapwire: an array of %s has no wire form; use a slice", t.Elem())
 		}
 		f.kind, f.n = kFixed, t.Len()
 	case reflect.Slice:
@@ -334,7 +342,7 @@ func fieldOf(t reflect.Type) (field, error) {
 		}
 		f.slice = se
 	default:
-		return f, fmt.Errorf("zapenc: %s cannot cross the plane; give it a type that can", t.Kind())
+		return f, fmt.Errorf("zapwire: %s cannot cross the plane; give it a type that can", t.Kind())
 	}
 	return f, nil
 }
@@ -354,7 +362,7 @@ func sliceElemOf(t reflect.Type) (*sliceElem, error) {
 	se.elem = f.elem
 	se.n = f.n
 	if se.kind == kSlice {
-		return nil, fmt.Errorf("zapenc: a slice of slices has no wire form; wrap the inner one in a struct")
+		return nil, fmt.Errorf("zapwire: a slice of slices has no wire form; wrap the inner one in a struct")
 	}
 	return se, nil
 }
@@ -379,7 +387,7 @@ func width(k kind) int {
 
 func align(off, n int) int { return (off + n - 1) &^ (n - 1) }
 
-// ---- encode ---------------------------------------------------------------
+// ---- build ---------------------------------------------------------------
 
 func writeStruct(b *zap.Builder, lay *layout, rv reflect.Value, asRoot bool) error {
 	// Nested values and list elements must be written BEFORE the object that
@@ -452,7 +460,7 @@ func writeStruct(b *zap.Builder, lay *layout, rv reflect.Value, asRoot bool) err
 			// A nested value is a complete ZAP message stored as bytes, so a reader
 			// Parses it on its own — the same rule list elements follow, rather
 			// than a second one for the singular case.
-			inner, err := marshalStruct(f.elem, fv)
+			inner, err := buildStruct(f.elem, fv)
 			if err != nil {
 				return err
 			}
@@ -486,7 +494,7 @@ func writeList(b *zap.Builder, se *sliceElem, rv reflect.Value) (int, int, error
 				ev = ev.Elem()
 			}
 		}
-		enc, err := marshalElem(se, ev)
+		enc, err := buildElem(se, ev)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -498,13 +506,13 @@ func writeList(b *zap.Builder, se *sliceElem, rv reflect.Value) (int, int, error
 	return b.WriteBytes(blob), rv.Len(), nil
 }
 
-// marshalElem encodes one list element. A struct element is a complete ZAP
+// buildElem writes one list element. A struct element is a complete ZAP
 // message; a scalar element is its own little-endian bytes, and text is its
 // UTF-8 — so an element is always self-describing given the field's type.
-func marshalElem(se *sliceElem, ev reflect.Value) ([]byte, error) {
+func buildElem(se *sliceElem, ev reflect.Value) ([]byte, error) {
 	switch se.kind {
 	case kStruct:
-		return marshalStruct(se.elem, ev)
+		return buildStruct(se.elem, ev)
 	case kText:
 		return []byte(ev.String()), nil
 	case kBytes:
@@ -525,10 +533,10 @@ func marshalElem(se *sliceElem, ev reflect.Value) ([]byte, error) {
 	case kFixed:
 		return nil, fixedRefusal(se.typ)
 	}
-	return nil, fmt.Errorf("zapenc: list element of kind %d has no wire form", se.kind)
+	return nil, fmt.Errorf("zapwire: list element of kind %d has no wire form", se.kind)
 }
 
-func marshalStruct(lay *layout, rv reflect.Value) ([]byte, error) {
+func buildStruct(lay *layout, rv reflect.Value) ([]byte, error) {
 	b := zap.NewBuilder(lay.size + 128)
 	if err := writeStruct(b, lay, rv, true); err != nil {
 		return nil, err
@@ -542,7 +550,7 @@ func leInt(v uint64, n int) []byte {
 	return append([]byte(nil), buf[:n]...)
 }
 
-// ---- decode ---------------------------------------------------------------
+// ---- read ---------------------------------------------------------------
 
 func readStruct(o zap.Object, lay *layout, rv reflect.Value) error {
 	for _, f := range lay.fields {
@@ -596,7 +604,7 @@ func readField(o zap.Object, f field, target reflect.Value) error {
 		target.SetString(o.Text(f.offset))
 	case kBytes:
 		if b := o.Bytes(f.offset); len(b) > 0 {
-			target.SetBytes(append([]byte(nil), b...))
+			target.SetBytes(b[:len(b):len(b)]) // an append must not reach the next field
 		}
 	case kStruct:
 		raw := o.Bytes(f.offset)
@@ -605,7 +613,7 @@ func readField(o zap.Object, f field, target reflect.Value) error {
 		}
 		msg, err := zap.Parse(raw)
 		if err != nil {
-			return fmt.Errorf("zapenc: nested: %w", err)
+			return fmt.Errorf("zapwire: nested: %w", err)
 		}
 		return readStruct(msg.Root(), f.elem, target)
 	case kSlice:
@@ -619,14 +627,14 @@ func readField(o zap.Object, f field, target reflect.Value) error {
 // fixedRefusal is what the reflective path answers for bytes_fixed[N].
 //
 // The LAYOUT knows the shape — [Layout] gives it an offset and a width, which is
-// what a schema and a code generator need — and the reflective codec deliberately
+// what a schema and a code generator need — and the reflective path deliberately
 // does not carry it. Reflection is what this whole seam exists to leave, so making
 // it more capable is the wrong direction: an id is exactly the case that should
 // force a type to declare its own wire, and a type that has done so never reaches
 // this line.
 func fixedRefusal(t reflect.Type) error {
-	return fmt.Errorf("zapenc: %s is bytes_fixed[%d], which the reflective codec does not carry; "+
-		"declare the type's wire (MarshalZAP/UnmarshalZAP) and it crosses inline", t, t.Len())
+	return fmt.Errorf("zapwire: %s is bytes_fixed[%d], which the reflective layout does not carry; "+
+		"declare the type's wire (BuildZAP/WrapZAP) and it crosses inline", t, t.Len())
 }
 
 func readList(o zap.Object, f field, target reflect.Value) error {
@@ -661,9 +669,11 @@ func readElem(l zap.List, i int, se *sliceElem, target reflect.Value) error {
 	raw := l.BytesAt(i)
 	switch se.kind {
 	case kText:
+		// zap has no text view over a list element, only BytesAt, so this is the
+		// one read that copies. The bytes beside it are still a window.
 		target.SetString(string(raw))
 	case kBytes:
-		target.SetBytes(append([]byte(nil), raw...))
+		target.SetBytes(raw[:len(raw):len(raw)])
 	case kBool:
 		target.SetBool(len(raw) > 0 && raw[0] != 0)
 	case kInt8, kInt16, kInt32, kInt64:
@@ -702,16 +712,16 @@ func f64from(u uint64) float64 { return math.Float64frombits(u) }
 // Slot is where one field of a message sits on the wire, and what it is.
 //
 // It is what a .zap schema states as `Name type @Offset` and what a generated
-// codec states as a Go constant. Both are projections of the SAME derivation the
-// reflective codec encodes against, which is the point: the schema, the generated
-// code and the running encoder cannot describe three wires.
+// layout states as a Go constant. Both are projections of the SAME derivation the
+// reflective path builds against, which is the point: the schema, the generated
+// code and the running builder cannot describe three wires.
 type Slot struct {
 	Name   string // the Go field name
 	Offset int
 	Width  int
 	Type   string // the .zap type: u64, text, bytes, bytes_fixed[32], list<…>, struct
 	N      int    // bytes_fixed[N]: the length. Otherwise 0.
-	Ptr    bool   // the Go field is a pointer to the encoded type
+	Ptr    bool   // the Go field is a pointer to the wire type
 	Elem   string // list<…>: the element's .zap type
 }
 
@@ -728,7 +738,7 @@ type Shape struct {
 // stated apart from width: it is N bytes INLINE, aligned to 1, so an id sits
 // immediately after the u32 before it.
 //
-// This is the derivation Marshal encodes against, so a schema or a generator
+// This is the derivation Build writes against, so a schema or a generator
 // reading it describes the wire that is actually spoken. Deriving it a second
 // time — packing the offsets, or giving a nested value four bytes instead of the
 // eight it takes as bytes — produces a document about a wire nobody speaks.
@@ -737,7 +747,7 @@ func LayoutOf(t reflect.Type) (Shape, error) {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
-		return Shape{}, fmt.Errorf("zapenc: %s is not a struct", t)
+		return Shape{}, fmt.Errorf("zapwire: %s is not a struct", t)
 	}
 	lay, err := layoutOf(t)
 	if err != nil {

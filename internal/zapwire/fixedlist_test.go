@@ -1,4 +1,4 @@
-package zapenc
+package zapwire
 
 import (
 	"reflect"
@@ -8,7 +8,7 @@ import (
 
 // A list of ids is the shape every chain reply is full of, and it is exactly
 // the shape bytes_fixed exists for. The element has to keep its WIDTH — the
-// schema is the contract a generated codec is built from, and bytes_fixed[0]
+// schema is the contract a generated layout is built from, and bytes_fixed[0]
 // is a contract to read nothing — and the refusal has to be the one that says
 // what to do about it, not the one that says a kind has no wire form.
 type fixedList struct {
@@ -36,11 +36,11 @@ func TestFixedListElementKeepsItsWidth(t *testing.T) {
 }
 
 func TestFixedListRefusalNamesTheFix(t *testing.T) {
-	_, err := Marshal(&fixedList{Nodes: [][20]byte{{1}}})
+	_, err := Build(&fixedList{Nodes: [][20]byte{{1}}})
 	if err == nil {
-		t.Fatal("the reflective codec must refuse bytes_fixed, in a list as in a field")
+		t.Fatal("the reflective layout must refuse bytes_fixed, in a list as in a field")
 	}
-	if !strings.Contains(err.Error(), "MarshalZAP") {
+	if !strings.Contains(err.Error(), "BuildZAP") {
 		t.Fatalf("the refusal has to name the fix, got: %v", err)
 	}
 }

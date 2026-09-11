@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"strings"
 
 	zap "github.com/zap-proto/go"
 )
@@ -22,12 +21,12 @@ const (
 )
 
 var _ interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
+	BuildZAP() ([]byte, error)
+	WrapZAP([]byte) error
 } = (*Ided)(nil)
 
-// MarshalZAP writes Ided from constant offsets.
-func (x *Ided) MarshalZAP() ([]byte, error) {
+// BuildZAP writes Ided from constant offsets.
+func (x *Ided) BuildZAP() ([]byte, error) {
 	if x == nil {
 		return nil, nil
 	}
@@ -47,7 +46,7 @@ func (x *Ided) MarshalZAP() ([]byte, error) {
 	ob := b.StartObject(idedSize)
 	ob.SetBytesFixed(idedIDAt, x.ID[:])
 	ob.SetText(idedNameAt, string(x.Name))
-	innerLeaf, err := x.Leaf.MarshalZAP()
+	innerLeaf, err := x.Leaf.BuildZAP()
 	if err != nil {
 		return nil, err
 	}
@@ -59,8 +58,8 @@ func (x *Ided) MarshalZAP() ([]byte, error) {
 	return b.Finish(), nil
 }
 
-// UnmarshalZAP reads Ided out of the buffer that arrived.
-func (x *Ided) UnmarshalZAP(data []byte) error {
+// WrapZAP reads Ided out of the buffer that arrived.
+func (x *Ided) WrapZAP(data []byte) error {
 	if x == nil || len(data) == 0 {
 		return nil
 	}
@@ -70,7 +69,7 @@ func (x *Ided) UnmarshalZAP(data []byte) error {
 	}
 	o := m.Root()
 	copy(x.ID[:], o.BytesFixed(idedIDAt, 32))
-	x.Name = string(strings.Clone(o.Text(idedNameAt)))
+	x.Name = string(o.Text(idedNameAt))
 	if l := o.List(idedIDsAt); l.Len() > 0 {
 		rows := make([][32]uint8, l.Len())
 		for i := range rows {
@@ -79,7 +78,7 @@ func (x *Ided) UnmarshalZAP(data []byte) error {
 		x.IDs = rows
 	}
 	if raw := o.Bytes(idedLeafAt); len(raw) > 0 {
-		if err := x.Leaf.UnmarshalZAP(raw); err != nil {
+		if err := x.Leaf.WrapZAP(raw); err != nil {
 			return err
 		}
 	}
@@ -95,12 +94,12 @@ const (
 )
 
 var _ interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
+	BuildZAP() ([]byte, error)
+	WrapZAP([]byte) error
 } = (*Leaf)(nil)
 
-// MarshalZAP writes Leaf from constant offsets.
-func (x *Leaf) MarshalZAP() ([]byte, error) {
+// BuildZAP writes Leaf from constant offsets.
+func (x *Leaf) BuildZAP() ([]byte, error) {
 	if x == nil {
 		return nil, nil
 	}
@@ -112,8 +111,8 @@ func (x *Leaf) MarshalZAP() ([]byte, error) {
 	return b.Finish(), nil
 }
 
-// UnmarshalZAP reads Leaf out of the buffer that arrived.
-func (x *Leaf) UnmarshalZAP(data []byte) error {
+// WrapZAP reads Leaf out of the buffer that arrived.
+func (x *Leaf) WrapZAP(data []byte) error {
 	if x == nil || len(data) == 0 {
 		return nil
 	}
@@ -123,7 +122,7 @@ func (x *Leaf) UnmarshalZAP(data []byte) error {
 	}
 	o := m.Root()
 	x.N = uint32(o.Uint32(leafNAt))
-	x.S = string(strings.Clone(o.Text(leafSAt)))
+	x.S = string(o.Text(leafSAt))
 	return nil
 }
 
@@ -165,12 +164,12 @@ const (
 )
 
 var _ interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
+	BuildZAP() ([]byte, error)
+	WrapZAP([]byte) error
 } = (*Trunk)(nil)
 
-// MarshalZAP writes Trunk from constant offsets.
-func (x *Trunk) MarshalZAP() ([]byte, error) {
+// BuildZAP writes Trunk from constant offsets.
+func (x *Trunk) BuildZAP() ([]byte, error) {
 	if x == nil {
 		return nil, nil
 	}
@@ -260,7 +259,7 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	if kidsN > 0 {
 		var blob []byte
 		for i := range x.Kids {
-			enc, err := x.Kids[i].MarshalZAP()
+			enc, err := x.Kids[i].BuildZAP()
 			if err != nil {
 				return nil, err
 			}
@@ -279,7 +278,7 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 			if elem == nil {
 				elem = new(Leaf)
 			}
-			enc, err := elem.MarshalZAP()
+			enc, err := elem.BuildZAP()
 			if err != nil {
 				return nil, err
 			}
@@ -311,7 +310,7 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	if pKidsN > 0 {
 		var blob []byte
 		for i := range *x.PKids {
-			enc, err := (*x.PKids)[i].MarshalZAP()
+			enc, err := (*x.PKids)[i].BuildZAP()
 			if err != nil {
 				return nil, err
 			}
@@ -354,7 +353,7 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	ob.SetUint64(trunkCAt, uint64(x.C))
 	ob.SetText(trunkTextAt, string(x.Text))
 	ob.SetBytes(trunkRawAt, []byte(x.Raw))
-	innerLeaf, err := x.Leaf.MarshalZAP()
+	innerLeaf, err := x.Leaf.BuildZAP()
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +368,7 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		ob.SetBool(trunkPtrBAt, bool((*x.PtrB)))
 	}
 	if x.PtrL != nil {
-		innerPtrL, err := x.PtrL.MarshalZAP()
+		innerPtrL, err := x.PtrL.BuildZAP()
 		if err != nil {
 			return nil, err
 		}
@@ -417,8 +416,8 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	return b.Finish(), nil
 }
 
-// UnmarshalZAP reads Trunk out of the buffer that arrived.
-func (x *Trunk) UnmarshalZAP(data []byte) error {
+// WrapZAP reads Trunk out of the buffer that arrived.
+func (x *Trunk) WrapZAP(data []byte) error {
 	if x == nil || len(data) == 0 {
 		return nil
 	}
@@ -439,17 +438,19 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	x.F32 = float32(o.Float32(trunkF32At))
 	x.F64 = float64(o.Float64(trunkF64At))
 	x.C = Count(o.Uint64(trunkCAt))
-	x.Text = string(strings.Clone(o.Text(trunkTextAt)))
-	x.Raw = []uint8(append([]byte(nil), o.Bytes(trunkRawAt)...))
+	x.Text = string(o.Text(trunkTextAt))
+	if raw := o.Bytes(trunkRawAt); len(raw) > 0 {
+		x.Raw = []uint8(raw[:len(raw):len(raw)])
+	}
 	if raw := o.Bytes(trunkLeafAt); len(raw) > 0 {
-		if err := x.Leaf.UnmarshalZAP(raw); err != nil {
+		if err := x.Leaf.WrapZAP(raw); err != nil {
 			return err
 		}
 	}
 	if v := uint64(o.Uint64(trunkPtrUAt)); v != uint64(0) {
 		x.PtrU = &v
 	}
-	if v := string(strings.Clone(o.Text(trunkPtrSAt))); v != "" {
+	if v := string(o.Text(trunkPtrSAt)); v != "" {
 		x.PtrS = &v
 	}
 	if v := bool(o.Bool(trunkPtrBAt)); v {
@@ -457,7 +458,7 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	}
 	if raw := o.Bytes(trunkPtrLAt); len(raw) > 0 {
 		var v Leaf
-		if err := v.UnmarshalZAP(raw); err != nil {
+		if err := v.WrapZAP(raw); err != nil {
 			return err
 		}
 		x.PtrL = &v
@@ -499,7 +500,8 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	if l := o.List(trunkBufsAt); l.Len() > 0 {
 		rows := make([][]uint8, l.Len())
 		for i := range rows {
-			rows[i] = []uint8(append([]byte(nil), l.BytesAt(i)...))
+			raw := l.BytesAt(i)
+			rows[i] = []uint8(raw[:len(raw):len(raw)])
 		}
 		x.Bufs = rows
 	}
@@ -514,7 +516,7 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	if l := o.List(trunkKidsAt); l.Len() > 0 {
 		rows := make([]Leaf, l.Len())
 		for i := range rows {
-			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
+			if err := rows[i].WrapZAP(l.BytesAt(i)); err != nil {
 				return err
 			}
 		}
@@ -524,7 +526,7 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 		rows := make([]*Leaf, l.Len())
 		for i := range rows {
 			rows[i] = new(Leaf)
-			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
+			if err := rows[i].WrapZAP(l.BytesAt(i)); err != nil {
 				return err
 			}
 		}
@@ -539,7 +541,7 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 	if l := o.List(trunkPKidsAt); l.Len() > 0 {
 		rows := make([]Leaf, l.Len())
 		for i := range rows {
-			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
+			if err := rows[i].WrapZAP(l.BytesAt(i)); err != nil {
 				return err
 			}
 		}

@@ -1,4 +1,4 @@
-package zapenc
+package zapwire
 
 import (
 	"strings"
@@ -30,7 +30,7 @@ func TestARecursiveTypeIsRefusedNotFatal(t *testing.T) {
 		{"a pointer to itself", viaPointer{}},
 		{"two types through each other", mutualA{}},
 	} {
-		_, err := Marshal(tc.v)
+		_, err := Build(tc.v)
 		if err == nil {
 			t.Errorf("%s: crossed the plane; it has no bounded width", tc.name)
 			continue
@@ -44,8 +44,8 @@ func TestARecursiveTypeIsRefusedNotFatal(t *testing.T) {
 // The refusal must not leave the in-progress set dirty: a second call has to
 // fail the same way, not report a cycle that is no longer being walked.
 func TestTheRefusalIsRepeatable(t *testing.T) {
-	_, first := Marshal(tree{})
-	_, second := Marshal(tree{})
+	_, first := Build(tree{})
+	_, second := Build(tree{})
 	if first == nil || second == nil {
 		t.Fatal("expected both to be refused")
 	}
@@ -57,14 +57,14 @@ func TestTheRefusalIsRepeatable(t *testing.T) {
 // A refused type must not poison the types beside it — the guard is a cold-path
 // set, not a permanent verdict on everything derived after it.
 func TestAGoodTypeStillCrossesAfterOneIsRefused(t *testing.T) {
-	if _, err := Marshal(tree{}); err == nil {
+	if _, err := Build(tree{}); err == nil {
 		t.Fatal("expected refusal")
 	}
 	type fine struct {
 		N uint64
 		S string
 	}
-	if _, err := Marshal(fine{N: 1, S: "x"}); err != nil {
+	if _, err := Build(fine{N: 1, S: "x"}); err != nil {
 		t.Errorf("a sound type was refused after a recursive one: %v", err)
 	}
 }
@@ -82,8 +82,8 @@ func TestConcurrentDerivationIsSafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = Marshal(wide{})
-			_, _ = Marshal(tree{})
+			_, _ = Build(wide{})
+			_, _ = Build(tree{})
 		}()
 	}
 	wg.Wait()

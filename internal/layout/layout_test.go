@@ -6,75 +6,75 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 )
 
-// TestTheCodecKeepsTheWire is the whole reason the offsets are read from one
-// derivation instead of computed a second time. A generated codec goes out one
+// TestTheLayoutKeepsTheWire is the whole reason the offsets are read from one
+// derivation instead of computed a second time. A generated layout goes out one
 // pod at a time, so the pod that has it and the pod that has not are speaking
 // the same wire — or they are speaking two, and the second one is a silent
 // mis-read of every field after the first that moved.
-func TestTheCodecKeepsTheWire(t *testing.T) {
+func TestTheLayoutKeepsTheWire(t *testing.T) {
 	for _, v := range trunks() {
-		was, err := zapenc.Marshal(&v)
+		was, err := zapwire.Build(&v)
 		if err != nil {
 			t.Fatalf("reflective: %v", err)
 		}
-		is, err := v.MarshalZAP()
+		is, err := v.BuildZAP()
 		if err != nil {
 			t.Fatalf("generated: %v", err)
 		}
 		if !bytes.Equal(was, is) {
-			t.Fatalf("the generated codec moved the wire\n reflective %d bytes: % x\n generated  %d bytes: % x",
+			t.Fatalf("the generated layout moved the wire\n reflective %d bytes: % x\n generated  %d bytes: % x",
 				len(was), was, len(is), is)
 		}
 	}
 }
 
 // TestEitherSideReadsTheOther holds the decode direction: bytes written by one
-// encoder read back through the other into the same value, both ways round.
+// builder read back through the other into the same value, both ways round.
 func TestEitherSideReadsTheOther(t *testing.T) {
 	for _, v := range trunks() {
-		enc, err := v.MarshalZAP()
+		enc, err := v.BuildZAP()
 		if err != nil {
 			t.Fatal(err)
 		}
 		var byReflection Trunk
-		if err := zapenc.Unmarshal(enc, &byReflection); err != nil {
+		if err := zapwire.Wrap(enc, &byReflection); err != nil {
 			t.Fatal(err)
 		}
-		var byCodec Trunk
-		if err := byCodec.UnmarshalZAP(enc); err != nil {
+		var byLayout Trunk
+		if err := byLayout.WrapZAP(enc); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(byReflection, byCodec) {
-			t.Fatalf("the two decoders disagree\n reflective %+v\n generated  %+v", byReflection, byCodec)
+		if !reflect.DeepEqual(byReflection, byLayout) {
+			t.Fatalf("the two readers disagree\n reflective %+v\n generated  %+v", byReflection, byLayout)
 		}
 	}
 }
 
-// TestAnIDCrossesOnlyWithACodec is the forcing function stated as a test. The
-// reflective encoder refuses bytes_fixed[N] — an ids.ID is [32]byte — and the
-// same value with a codec goes out and comes back whole.
-func TestAnIDCrossesOnlyWithACodec(t *testing.T) {
+// TestAnIDCrossesOnlyOnAStatedWire is the forcing function stated as a test. The
+// reflective builder refuses bytes_fixed[N] — an ids.ID is [32]byte — and the
+// same value on a stated wire goes out and comes back whole.
+func TestAnIDCrossesOnlyOnAStatedWire(t *testing.T) {
 	v := Ided{
 		ID:   [32]byte{0: 0xf0, 31: 0x0d},
 		Name: "chain",
 		IDs:  [][32]byte{{0: 1}, {0: 2}},
 		Leaf: Leaf{N: 9, S: "leaf"},
 	}
-	if _, err := zapenc.Marshal(&Loose{ID: v.ID, Name: v.Name}); err == nil {
-		t.Fatal("the reflective encoder carried a fixed array; the refusal is what forces a codec")
+	if _, err := zapwire.Build(&Loose{ID: v.ID, Name: v.Name}); err == nil {
+		t.Fatal("the reflective builder carried a fixed array; the refusal is what forces a stated wire")
 	} else if !strings.Contains(err.Error(), "bytes_fixed[32]") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 
-	enc, err := v.MarshalZAP()
+	enc, err := v.BuildZAP()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var back Ided
-	if err := back.UnmarshalZAP(enc); err != nil {
+	if err := back.WrapZAP(enc); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(v, back) {

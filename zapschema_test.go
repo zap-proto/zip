@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 )
 
 // ---- the types the cases below are built from ------------------------------
@@ -182,10 +182,10 @@ func TestZAPSchema_AWordAfterAByteIsAtEight(t *testing.T) {
 
 // bytes_fixed[N] is the exception that makes alignment worth stating apart from
 // width: N bytes INLINE, aligned to 1, so an id does not push the next field to
-// a 32-byte boundary. The schema states it and the REFLECTIVE encoder refuses
-// it, so the op is named as needing a generated codec — not as a gap, because
+// a 32-byte boundary. The schema states it and the REFLECTIVE builder refuses
+// it, so the op is named as needing a generated layout — not as a gap, because
 // nothing about it is unexpressible.
-func TestZAPSchema_AFixedArrayIsInlineAndNeedsACodec(t *testing.T) {
+func TestZAPSchema_AFixedArrayIsInlineAndNeedsALayout(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/v", nop[schEmpty, schValidator]) })
 	st := structNamed(t, s, "schValidator")
 	if got := st.Fields[0].Type; got != "bytes_fixed[20]" {
@@ -200,9 +200,9 @@ func TestZAPSchema_AFixedArrayIsInlineAndNeedsACodec(t *testing.T) {
 	if len(s.Coded) != 1 || s.Coded[0].Field != "NodeID" || s.Coded[0].Type != "bytes_fixed[20]" {
 		t.Fatalf("coded = %+v, want the id named", s.Coded)
 	}
-	// And the claim is about the ENCODER, not about this package's opinion of it.
-	if _, err := zapencMarshal(schValidator{}); err == nil {
-		t.Fatal("the reflective encoder carries it now; this case describes nothing")
+	// And the claim is about the BUILDER, not about this package's opinion of it.
+	if _, err := zapwireBuild(schValidator{}); err == nil {
+		t.Fatal("the reflective builder carries it now; this case describes nothing")
 	}
 }
 
@@ -380,7 +380,7 @@ func TestZAPSchema_GapsByCause(t *testing.T) {
 
 // A struct records every failing field, not just the first. The list's whole
 // value is that it sizes the work, and stopping at the first understates it —
-// which is exactly what LayoutOf does, correctly, for the encoder's question.
+// which is exactly what LayoutOf does, correctly, for the builder's question.
 func TestZAPSchema_EveryFailingFieldIsNamed(t *testing.T) {
 	type two struct {
 		A map[string]string
@@ -577,9 +577,9 @@ func TestZAPSchema_AnEntirelyBlockedAppHasNoInterface(t *testing.T) {
 
 // ---- helpers ---------------------------------------------------------------
 
-// zapencMarshal is the reflective encoder the op-call plane calls (call.go), so
+// zapwireBuild is the reflective builder the op-call plane calls (call.go), so
 // a case about what it refuses asks IT rather than restating its rules.
-func zapencMarshal(v any) ([]byte, error) { return zapenc.Marshal(v) }
+func zapwireBuild(v any) ([]byte, error) { return zapwire.Build(v) }
 
 // methods flattens the per-app interfaces, for cases built on one app.
 func methods(s *Schema) []*Method {

@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/zap-proto/zip"
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 )
 
 // ── the child under test ────────────────────────────────────────────────────
@@ -129,13 +129,13 @@ func TestNest_OneComposeFourProjections(t *testing.T) {
 
 	// 4. The by-name call plane runs the child's actual handler. Its body is
 	//    ZAP — this plane is service-to-service and carries nothing else.
-	in, err := zapenc.Marshal(&userIn{ID: "u-1"})
+	in, err := zapwire.Build(&userIn{ID: "u-1"})
 	if err != nil {
-		t.Fatalf("marshal ZAP: %v", err)
+		t.Fatalf("build ZAP: %v", err)
 	}
 	out := postZAP(t, host, zip.CallPath+"iam_get_user", in)
 	var got userOut
-	if err := zapenc.Unmarshal(out, &got); err != nil {
+	if err := zapwire.Wrap(out, &got); err != nil {
 		t.Fatalf("call plane reply is not ZAP: %v (%q)", err, out)
 	}
 	if got.Name != "iam says hello" || got.ID != "u-1" {
@@ -525,7 +525,7 @@ func TestNest_HostRuleReachesAComposedChild(t *testing.T) {
 	if !strings.Contains(out, "refused by host") {
 		t.Errorf("MCP: the host's rule did not reach the composed op: %s", out)
 	}
-	in, err := zapenc.Marshal(&userIn{ID: "u-1"}) // the call plane's body is ZAP and only ZAP
+	in, err := zapwire.Build(&userIn{ID: "u-1"}) // the call plane's body is ZAP and only ZAP
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

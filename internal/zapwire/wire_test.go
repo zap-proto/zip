@@ -1,4 +1,4 @@
-package zapenc_test
+package zapwire_test
 
 import (
 	"bytes"
@@ -7,16 +7,16 @@ import (
 	"testing"
 
 	zap "github.com/zap-proto/go"
-	"github.com/zap-proto/zip/internal/zapenc"
+	"github.com/zap-proto/zip/internal/zapwire"
 )
 
 // A type that states its own wire form is never reflected over, and this file
-// proves it without instrumenting the encoder.
+// proves it without instrumenting the builder.
 //
-// The lever is a field the reflective codec deliberately does not carry. A
+// The lever is a field the reflective layout deliberately does not carry. A
 // fixed-size array HAS a layout — an offset and a width, which is what a schema
 // and a code generator need — and the reflective encode and decode both refuse
-// it, so a value carrying one either crosses through its own MarshalZAP or it
+// it, so a value carrying one either crosses through its own BuildZAP or it
 // does not cross at all. A successful round trip is therefore the proof, and [TestReflectionRefusesTheSameShape]
 // is the control that keeps it honest: the identical field list with the methods
 // removed still fails, so the pass above is the methods and not the shape.
@@ -33,7 +33,7 @@ const (
 	heightSize      = 72
 )
 
-// height is what a generated view+codec looks like: offsets are constants, and
+// height is what a generated view+layout looks like: offsets are constants, and
 // nothing about the layout is computed while a call is in flight.
 type height struct {
 	Height uint64   `zap:"0"`
@@ -42,7 +42,7 @@ type height struct {
 	Name   string   `zap:"64"`
 }
 
-func (h *height) MarshalZAP() ([]byte, error) {
+func (h *height) BuildZAP() ([]byte, error) {
 	b := zap.NewBuilder(heightSize + len(h.Name) + 32)
 	ob := b.StartObject(heightSize)
 	ob.SetUint64(heightHeightOff, h.Height)
@@ -53,7 +53,7 @@ func (h *height) MarshalZAP() ([]byte, error) {
 	return b.Finish(), nil
 }
 
-func (h *height) UnmarshalZAP(data []byte) error {
+func (h *height) WrapZAP(data []byte) error {
 	m, err := zap.Parse(data)
 	if err != nil {
 		return err
@@ -76,7 +76,7 @@ type heightByFields struct {
 	Name   string
 }
 
-func TestAWireTypeCarriesAnIDThroughTheReflectiveEncoder(t *testing.T) {
+func TestAWireTypeCarriesAnIDThroughBuildAndWrap(t *testing.T) {
 	in := &height{Height: 1 << 60, Name: "P-chain"}
 	for i := range in.Chain {
 		in.Chain[i] = byte(i + 1)
@@ -85,16 +85,16 @@ func TestAWireTypeCarriesAnIDThroughTheReflectiveEncoder(t *testing.T) {
 		in.Node[i] = byte(200 - i)
 	}
 
-	// Marshal and Unmarshal are the SAME entry points the op-call plane uses.
+	// Build and Wrap are the SAME entry points the op-call plane uses.
 	// Reaching reflect for this value would fail, so reaching the far side at all
 	// is the assertion.
-	raw, err := zapenc.Marshal(in)
+	raw, err := zapwire.Build(in)
 	if err != nil {
-		t.Fatalf("Marshal: %v — the reflective path was taken, and it cannot carry a fixed array", err)
+		t.Fatalf("Build: %v — the reflective path was taken, and it cannot carry a fixed array", err)
 	}
 	var out height
-	if err := zapenc.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
+	if err := zapwire.Wrap(raw, &out); err != nil {
+		t.Fatalf("Wrap: %v", err)
 	}
 	if out.Height != in.Height || out.Name != in.Name {
 		t.Fatalf("scalars did not cross: %+v", out)
@@ -108,21 +108,21 @@ func TestAWireTypeCarriesAnIDThroughTheReflectiveEncoder(t *testing.T) {
 }
 
 func TestReflectionRefusesTheSameShape(t *testing.T) {
-	_, err := zapenc.Marshal(&heightByFields{Name: "P-chain"})
+	_, err := zapwire.Build(&heightByFields{Name: "P-chain"})
 	if err == nil {
-		t.Fatal("the reflective encoder accepted a fixed array; the proof above no longer holds")
+		t.Fatal("the reflective builder accepted a fixed array; the proof above no longer holds")
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte("the reflective codec does not carry")) {
+	if !bytes.Contains([]byte(err.Error()), []byte("the reflective layout does not carry")) {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
 
-// TestAWireTypeIsWhatItSays keeps the generated codec honest about the layout it
-// claims. A codec whose offsets drifted from the declaration would still round
+// TestAWireTypeIsWhatItSays keeps the generated layout honest about the layout it
+// claims. A layout whose offsets drifted from the declaration would still round
 // trip against ITSELF, and both ends would agree while disagreeing with every
 // peer built from the schema.
 func TestAWireTypeIsWhatItSays(t *testing.T) {
-	raw, err := zapenc.Marshal(&height{Height: 7})
+	raw, err := zapwire.Build(&height{Height: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestAWireTypeIsWhatItSays(t *testing.T) {
 
 // ---- what it costs -------------------------------------------------------
 
-// wide (zapenc_test.go) is the reflective encoder's own fixture, so the two
+// wide (zapwire_test.go) is the reflective builder's own fixture, so the two
 // benchmarks below encode a comparable shape by the two paths.
 
 type reply struct {
@@ -159,7 +159,7 @@ const (
 	wireReplySize     = 24
 )
 
-func (r *wireReply) MarshalZAP() ([]byte, error) {
+func (r *wireReply) BuildZAP() ([]byte, error) {
 	b := zap.NewBuilder(wireReplySize + len(r.Text) + 16)
 	ob := b.StartObject(wireReplySize)
 	ob.SetText(wireReplyTextOff, r.Text)
@@ -169,7 +169,7 @@ func (r *wireReply) MarshalZAP() ([]byte, error) {
 	return b.Finish(), nil
 }
 
-func (r *wireReply) UnmarshalZAP(data []byte) error {
+func (r *wireReply) WrapZAP(data []byte) error {
 	m, err := zap.Parse(data)
 	if err != nil {
 		return err
@@ -182,65 +182,65 @@ func (r *wireReply) UnmarshalZAP(data []byte) error {
 }
 
 // TestTheTwoPathsWriteTheSameBytes is what makes the migration safe: a type that
-// gains a codec must not gain a new wire, or every peer still on the reflective
+// gains a stated wire must not gain a new one, or every peer still on the reflective
 // path reads a different message.
 func TestTheTwoPathsWriteTheSameBytes(t *testing.T) {
-	byFields, err := zapenc.Marshal(&reply{Text: "commerce", Flag: true, Count: 42})
+	byFields, err := zapwire.Build(&reply{Text: "commerce", Flag: true, Count: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
-	byCodec, err := zapenc.Marshal(&wireReply{Text: "commerce", Flag: true, Count: 42})
+	byLayout, err := zapwire.Build(&wireReply{Text: "commerce", Flag: true, Count: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(byFields, byCodec) {
-		t.Fatalf("the wire moved:\n reflective %x\n generated  %x", byFields, byCodec)
+	if !bytes.Equal(byFields, byLayout) {
+		t.Fatalf("the wire moved:\n reflective %x\n generated  %x", byFields, byLayout)
 	}
 }
 
-func BenchmarkMarshalByReflection(b *testing.B) {
+func BenchmarkBuildByReflection(b *testing.B) {
 	v := &reply{Text: "commerce", Flag: true, Count: 42}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := zapenc.Marshal(v); err != nil {
+		if _, err := zapwire.Build(v); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkMarshalByCodec(b *testing.B) {
+func BenchmarkBuildByLayout(b *testing.B) {
 	v := &wireReply{Text: "commerce", Flag: true, Count: 42}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := zapenc.Marshal(v); err != nil {
+		if _, err := zapwire.Build(v); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkUnmarshalByReflection(b *testing.B) {
-	raw, err := zapenc.Marshal(&reply{Text: "commerce", Flag: true, Count: 42})
+func BenchmarkWrapByReflection(b *testing.B) {
+	raw, err := zapwire.Build(&reply{Text: "commerce", Flag: true, Count: 42})
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
 		var out reply
-		if err := zapenc.Unmarshal(raw, &out); err != nil {
+		if err := zapwire.Wrap(raw, &out); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkUnmarshalByCodec(b *testing.B) {
-	raw, err := zapenc.Marshal(&wireReply{Text: "commerce", Flag: true, Count: 42})
+func BenchmarkWrapByLayout(b *testing.B) {
+	raw, err := zapwire.Build(&wireReply{Text: "commerce", Flag: true, Count: 42})
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
 		var out wireReply
-		if err := zapenc.Unmarshal(raw, &out); err != nil {
+		if err := zapwire.Wrap(raw, &out); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -278,9 +278,9 @@ type pageView struct{ o zap.Object }
 
 func (p pageView) Rows() zap.List { return p.o.List(pageRowsOff) }
 
-func rowID(l zap.List, i int) string           { return l.ObjectAt(i).Text(rowIDOff) }
-func rowAmount(l zap.List, i int) int64        { return l.ObjectAt(i).Int64(rowAmountOff) }
-func (p pageView) UnmarshalZAP(b []byte) error { return nil } // unused; see wrapPage
+func rowID(l zap.List, i int) string      { return l.ObjectAt(i).Text(rowIDOff) }
+func rowAmount(l zap.List, i int) int64   { return l.ObjectAt(i).Int64(rowAmountOff) }
+func (p pageView) WrapZAP(b []byte) error { return nil } // unused; see wrapPage
 
 func wrapPage(b []byte) (pageView, error) {
 	m, err := zap.Parse(b)
@@ -342,7 +342,7 @@ func BenchmarkReadPageByReflection(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				var out page
-				if err := zapenc.Unmarshal(raw, &out); err != nil {
+				if err := zapwire.Wrap(raw, &out); err != nil {
 					b.Fatal(err)
 				}
 				_ = out.Rows[n-1].Amount
@@ -369,7 +369,7 @@ func BenchmarkReadPageByView(b *testing.B) {
 
 // ---- the layout is the wire ------------------------------------------------
 
-// TestTheLayoutIsWhatMarshalEncodes is the gate that makes [zapenc.LayoutOf] safe
+// TestTheLayoutIsWhatBuildWrites is the gate that makes [zapwire.LayoutOf] safe
 // to generate from. It does not compare the derivation to a table of expected
 // numbers — a table is a second derivation and would agree with a wrong one. It
 // ENCODES a value and reads every field back at the offset the layout states, so
@@ -378,7 +378,7 @@ func BenchmarkReadPageByView(b *testing.B) {
 // It is also where the two mistakes a re-derivation makes go red. Packing the
 // offsets puts Text at 1 rather than 8; giving the nested value four bytes puts
 // Tail at 20 rather than 24.
-func TestTheLayoutIsWhatMarshalEncodes(t *testing.T) {
+func TestTheLayoutIsWhatBuildWrites(t *testing.T) {
 	type nest struct {
 		Slug string
 	}
@@ -392,11 +392,11 @@ func TestTheLayoutIsWhatMarshalEncodes(t *testing.T) {
 	in := &shaped{Flag: true, Text: "commerce", Count: -7,
 		Nested: nest{Slug: "acme"}, Tail: 0xDEADBEEF}
 
-	sh, err := zapenc.LayoutOf(reflect.TypeOf(*in))
+	sh, err := zapwire.LayoutOf(reflect.TypeOf(*in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := zapenc.Marshal(in)
+	raw, err := zapwire.Build(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestTheLayoutIsWhatMarshalEncodes(t *testing.T) {
 	}
 	o := m.Root()
 
-	at := map[string]zapenc.Slot{}
+	at := map[string]zapwire.Slot{}
 	for _, s := range sh.Slots {
 		at[s.Name] = s
 	}
@@ -438,14 +438,14 @@ func TestTheLayoutIsWhatMarshalEncodes(t *testing.T) {
 
 // TestBytesFixedIsLaidOutAndNotEncoded is the split this seam turns on: the
 // layout knows an id's offset and width — which is what a schema and a code
-// generator need — and the reflective codec refuses to carry it, which is what
+// generator need — and the reflective layout refuses to carry it, which is what
 // makes an id force a type to declare its own wire.
 func TestBytesFixedIsLaidOutAndNotEncoded(t *testing.T) {
-	sh, err := zapenc.LayoutOf(reflect.TypeOf(heightByFields{}))
+	sh, err := zapwire.LayoutOf(reflect.TypeOf(heightByFields{}))
 	if err != nil {
 		t.Fatalf("the layout must know bytes_fixed: %v", err)
 	}
-	want := []zapenc.Slot{
+	want := []zapwire.Slot{
 		{Name: "Height", Offset: 0, Width: 8, Type: "u64"},
 		{Name: "Chain", Offset: 8, Width: 32, Type: "bytes_fixed[32]", N: 32},
 		{Name: "Node", Offset: 40, Width: 20, Type: "bytes_fixed[20]", N: 20},
@@ -457,9 +457,9 @@ func TestBytesFixedIsLaidOutAndNotEncoded(t *testing.T) {
 	if sh.Size != heightSize {
 		t.Errorf("size: got %d want %d", sh.Size, heightSize)
 	}
-	// And those are the offsets the hand-written codec above states, so the two
+	// And those are the offsets the hand-written layout above states, so the two
 	// cannot drift.
 	if want[1].Offset != heightChainOff || want[2].Offset != heightNodeOff || want[3].Offset != heightNameOff {
-		t.Error("the codec's constants are not the layout's offsets")
+		t.Error("the layout's constants are not the layout's offsets")
 	}
 }

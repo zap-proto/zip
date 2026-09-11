@@ -314,7 +314,7 @@ union, and the prototype changes no byte of it — holds either way.
    counter, not a change counter; detecting "nothing moved" would be a second
    code path for one operation.
 7. **ZAP cannot carry a free-form value.** The tidy symmetry — forward a mounted
-   op over the remote's own ZAP call plane — is impossible: ZAP encodes structs
+   op over the remote's own ZAP call plane — is impossible: ZAP lays out structs
    and this side has no struct, by construction. Mounted ops forward over the
    declared REST route with JSON, which is the boundary encoding anyway.
 
@@ -433,7 +433,7 @@ error handler, validator and `Authorizer` — it is exposed exactly as much as t
 REST routes and no more. The whole input arrives as the body: addressing by name
 means there is no URL to carry half of it, the same way `tools/call` does it.
 
-**The body is ZAP, and only ZAP (v1.18.5).** `internal/zapenc` derives a wire
+**The body is ZAP, and only ZAP (v1.18.5).** `internal/zapwire` derives a wire
 layout from the In/Out type itself — fields take slots in declaration order,
 each aligned to its own width, which is the rule zap's own schema builder
 applies. Nothing is named on the wire: a field IS its offset. So a
@@ -443,9 +443,10 @@ routes a browser reaches and in the MCP envelope an agent reads; it has no place
 inside the binary protocol. Refusals cross as ZAP too (`callFault`), status
 intact, so `errors.As` still recovers the `*HTTPError` the callee returned.
 
-`op.invoke` takes the decoder as a PARAMETER, so there is still exactly ONE
-handler core under REST, MCP, CLI and the call plane — the encoding belongs to
-the transport, not to the contract.
+`op.invoke` takes the read as a PARAMETER — `jsonenc.Unmarshal` on the REST,
+MCP and CLI adaptors, `zapwire.Wrap` on the call plane — so there is still
+exactly ONE handler core, and the wire belongs to the transport, not to the
+contract.
 
 **The compatibility rule follows from the layout: reordering, inserting or
 retyping a field changes the wire. Append at the end, and only at the end.**
@@ -483,37 +484,37 @@ only the type names changed: the layout is identical by construction rather than
 by a rule someone has to keep. A document-derived client would lay its fields
 alphabetically and read every value after the first from the wrong offset.
 
-### The SDK writes the codec too (v1.36.41)
+### The SDK writes the layout too (v1.36.41)
 
 The restatement being layout-identical is what lets the SDK do the one thing it
 used to refuse. `bytes_fixed[N]` — an `ids.ID` is `[32]byte` — has an offset and
-a width, and the REFLECTIVE encoder still refuses it (see `codec.go` below, and
+a width, and the REFLECTIVE layout still refuses it (see `layout.go` below, and
 that refusal stays). The SDK read the refusal as a fact about the op and reported
 a gap, so half of node's contract had no Go client: **43 of 94 ops**, while the
 Rust and C++ legs carried all 94.
 
-It is a fact about the encoder, not the op. `Codecs` already writes the two
+It is a fact about the reflective path, not the op. `Layouts` already writes the two
 methods that carry an id inline, from those same offsets. So the SDK writes one:
 same emitter, same `LayoutOf` shape, same builder calls, with this package's
 names substituted through a `naming` seam (`name` / `field` / `spell`) that
-`codec.go`'s emitter now asks instead of reading `t.Name()`. **One emitter. Two
+`layout.go`'s emitter now asks instead of reading `t.Name()`. **One emitter. Two
 emitters would be two wires, and the second would be spoken by nobody.**
 
 Which types get one is not "all of them". `Wire` is checked at the ROOT of
-Marshal and Unmarshal only, so the set has to be closed BOTH ways:
+Build and Wrap only, so the set has to be closed BOTH ways:
 
-- **upward**, because a parent encoded reflectively reflects over its children —
-  a nested codec is reached by the parent's method and never by the walk;
-- **downward**, because a codec calls `MarshalZAP` on every value it nests.
+- **upward**, because a parent built reflectively reflects over its children —
+  a nested layout is reached by the parent's method and never by the walk;
+- **downward**, because a layout calls `BuildZAP` on every value it nests.
 
 So one id anywhere under an op's In or Out states the wire for that whole tree,
 and a tree with no id in it keeps the derived wire it already had. That is the
-line: the ops that already crossed are not re-encoded to fix the ones that could
+line: the ops that already crossed are not rebuilt to fix the ones that could
 not, and their generated source does not move.
 
 **Two guards, because a wrong offset is worse than a gap.** The restatement is
 checked against the layout it claims — same field count, same names, same order —
-and a mismatch is a gap (`no codec`), never a guessed layout. And `spell`
+and a mismatch is a gap (`no wire`), never a guessed layout. And `spell`
 preserves `reflect.Kind` for every kind that has a layout, which is what makes
 the widths identical: `int` stays `int`, a named `uint32` becomes `uint32`, a
 `[32]byte` becomes `[32]uint8`. Kind determines width, so the layouts cannot
@@ -551,12 +552,49 @@ canonical path works on a fresh host. An existing directory keeps its own mode:
 a deployment needing a socket shared across users creates the directory itself
 and points `ZIP_RUNTIME_DIR` at it.
 
-## Stating a type's wire — `codec.go` (v1.36.26)
+## A read is a pointer into the bytes that arrived
 
-`zip.Layouts(roots...)` renders the `MarshalZAP`/`UnmarshalZAP` pair for each
+ZAP has no decode step, and neither does the plane. `zapwire.Wrap` points a
+value's strings and byte slices into the message it was handed
+(`zap.Object.Text` is `unsafe.String` over it), and `zapwire.Build` writes one.
+With the `BuildZAP`/`WrapZAP` pair of `zip.Wire` they are named for the layout
+they write and read. There is no Marshal or Unmarshal on this side of zip: those
+are JSON's, and JSON lives only in the adaptors that face something speaking it
+(REST, MCP, the CLI, OpenAPI, the extension runtimes).
+`TestTheZAPPlaneSpeaksNoJSON` holds that line for `call.go`, `wire.go`,
+`layout.go` and `internal/zapwire`.
+
+Zero-copy has one rule: **the bytes are handed over, not lent.** A fasthttp body
+goes back to its pool when its request or response is released, and the next
+message is written over it. So `Call` takes the reply body out of the response
+(`SwapBody`, no copy) before reading an Out, an Approval or a refusal from it,
+and the call plane does the same with the request body before reading In, so a
+handler may keep its input. Before this, every string in a `Call` reply pointed
+into a buffer the next call overwrote: a kept session id read `ing","ki` a few
+calls later. The race detector cannot see that, because the reuse is sequential.
+`TestCall_ReplyOutlivesTheNextCall`, `TestCall_RefusalOutlivesTheNextCall` and
+`TestCall_HandlerMayKeepItsInput` pin it.
+
+A `[]byte` read this way ends at its own length (`b[:len(b):len(b)]`), so an
+append reallocates instead of writing over the next field. A text element of a
+list is the one read that still copies: zap has `List.BytesAt` and no text view.
+
+## JSON on Go 1.27
+
+Go 1.27 turns `GOEXPERIMENT=jsonv2` on by default and ships `encoding/json/v2`
+as go1.27 API, which a file at this module's go1.26 language version may not
+call. `internal/jsonenc/v2.go` therefore requires `go1.27`, and
+`v2_pre127.go` keeps the experiment working on 1.25 and 1.26. Either way,
+`jsonenc.Marshal` writes v1's bytes: sorted map keys, and `null` for a nil map
+or slice. Without that, the same app answered REST and MCP differently
+depending on the toolchain that built it.
+
+## Stating a type's wire — `layout.go` (v1.36.26)
+
+`zip.Layouts(roots...)` renders the `BuildZAP`/`WrapZAP` pair for each
 root and for every struct nested below it, grouped by the package that owns the
 type. `LayoutOf`'s doc named three readers of the one derivation — the plane
-encodes against it, a `.zap` schema states it, a generator emits it as constants
+builds against it, a `.zap` schema states it, a generator emits it as constants
 — and this is the third.
 
 Two things it buys, and the second is the load-bearing one.
@@ -564,32 +602,32 @@ Two things it buys, and the second is the load-bearing one.
 1. **The copy stops being derived.** The layout is cached; the COPY is not, so
    every reflective call walks the fields again and sizes a builder by guess.
 2. **An id can cross at all.** `bytes_fixed[N]` is refused outright by the
-   reflective encoder — deliberately, since an id is exactly the case that should
+   reflective layout — deliberately, since an id is exactly the case that should
    force a type to declare its own wire — so a reply holding an `ids.ID`
    ([32]byte) cannot cross the plane until it has one.
 
-`Wire` is checked at the ROOT of Marshal and Unmarshal only, so a nested value
+`Wire` is checked at the ROOT of Build and Wrap only, so a nested value
 still goes through the reflective path: the set of emitted types is closed
-downward, and a parent's codec reaches each nested value BY ITS METHOD. The
+downward, and a parent's layout reaches each nested value BY ITS METHOD. The
 exception is a value with NO SLOTS — a `time.Time`, a `netip.AddrPort`, anything
 whose fields are all unexported. It crosses as a complete and empty object and
 carries nothing, so the parent writes those bytes inline and there is no method
-to reach for. The value is lost either way; that is the reflective encoder's
+to reach for. The value is lost either way; that is the reflective builder's
 answer too, and answering differently would be a different wire.
 
 **The emitted file depends on the ZAP builder and nothing else, and declares no
 package-level name of its own.** `Wire` is restated in it, the way
-`internal/zapenc` restates it, so a leaf module can state its wire without taking
+`internal/zapwire` restates it, so a leaf module can state its wire without taking
 on this one's dependencies — but written INLINE per assertion rather than as a
 named interface, because a generator cannot know which identifiers a package has
 free. `github.com/luxfi/utxo` imports a package called `wire`. Every helper is
-block-local for the same reason. The assertion is what makes a deleted codec a
+block-local for the same reason. The assertion is what makes a deleted layout a
 build failure rather than a silent return to reflection.
 
 **The wire does not move**, and that is held, not asserted:
-`internal/codec.TestTheLayoutKeepsTheWire` requires the generated bytes to equal
-`zapenc.Marshal`'s byte for byte over a fixture carrying one field of every form.
-That is what lets a codec roll out one pod at a time. `TestTheCodecIsCheckedIn`
+`internal/layout.TestTheLayoutKeepsTheWire` requires the generated bytes to equal
+`zapwire.Build`'s byte for byte over a fixture carrying one field of every form.
+That is what lets a layout roll out one pod at a time. `TestTheLayoutIsCheckedIn`
 regenerates and diffs, so a type that moved without a regeneration is a failing
 test rather than a wire that moved under its readers.
 
@@ -727,7 +765,7 @@ transport sat underneath the protocol, exactly backwards from how `zaphttp` and
 ### zap-proto/mcp
 
 The sibling of `zap-proto/http`: same seams (`Server`/`ListenAndServe`/`Serve`,
-`Dial`/`Transport`/`Do`), same offset discipline in the codec, neither depending
+`Dial`/`Transport`/`Do`), same offset discipline in the layout, neither depending
 on the other. It implements `schema/zap_mcp.zap`, which had described this wire
 since that repo opened while only TypeScript spoke it.
 

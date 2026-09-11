@@ -23,15 +23,15 @@ import (
 // Declared at package scope, because reflect gives a type declared inside a
 // function no package path — and [zip.Layouts] groups by the package that owns
 // the type, which is the question here: the SDK restates these types in a
-// package of its own, and the codec it writes beside them has to be the codec
+// package of its own, and the layout it writes beside them has to be the layout
 // zip writes here.
 // ---------------------------------------------------------------------------
 
 // TxID is an id — [32]byte, the bytes_fixed[32] of a .zap schema, and the exact
-// value the reflective encoder refuses.
+// value the reflective builder refuses.
 type TxID [32]byte
 
-// Leaf is a value nested inside another, so a codec reaches it BY ITS METHOD.
+// Leaf is a value nested inside another, so a layout reaches it BY ITS METHOD.
 // It holds no id of its own, which is the point: it is coded because the tree
 // above it is.
 type Leaf struct {
@@ -53,7 +53,7 @@ type Tx struct {
 }
 
 // Ided spells the same kind of wire with NAMED types, which the SDK cannot
-// name: it restates TxID as the [32]uint8 it is. So the two codecs spell the
+// name: it restates TxID as the [32]uint8 it is. So the two layouts spell the
 // field differently and must still write the same bytes — that divergence is
 // the one this fixture exists for.
 type Ided struct {
@@ -69,7 +69,7 @@ type Ided struct {
 // also happens to work.
 //
 // Where the SDK keeps the type's own name and its own spelling, "the same
-// codec" is literal: the section is byte-identical, because it is the same
+// layout" is literal: the section is byte-identical, because it is the same
 // emitter reading the same [LayoutOf] offsets. Anything less than identical
 // here is a second wire.
 func TestSDK_TheLayoutIsTheOneZipEmits(t *testing.T) {
@@ -91,13 +91,13 @@ func TestSDK_TheLayoutIsTheOneZipEmits(t *testing.T) {
 	for _, name := range native[0].Types {
 		want := section(t, string(native[0].Source), name)
 		if !strings.Contains(string(sdk.Source), want) {
-			t.Errorf("the SDK's codec for %s is not the one zip emits.\n--- zip ---\n%s\n--- sdk ---\n%s",
+			t.Errorf("the SDK's layout for %s is not the one zip emits.\n--- zip ---\n%s\n--- sdk ---\n%s",
 				name, want, sdk.Source)
 		}
 	}
 }
 
-// section is one type's codec, cut out of an emitted file by the banner the
+// section is one type's layout, cut out of an emitted file by the banner the
 // emitter writes above it.
 func section(t *testing.T, src, name string) string {
 	t.Helper()
@@ -116,8 +116,8 @@ func section(t *testing.T, src, name string) string {
 // TestSDK_OnlyTheTreesThatNeedOneStateTheirWire is the line the emission draws,
 // and why it is drawn there.
 //
-// A codec is not free of consequence: a parent encoded reflectively reflects
-// over its children too, so a nested codec is reached by the parent's METHOD
+// A layout is not free of consequence: a parent built reflectively reflects
+// over its children too, so a nested layout is reached by the parent's METHOD
 // and never by the reflective walk. That makes the set closed upward AND
 // downward — and it also means every type given one is a type whose wire moved
 // from derived to stated. Ops that already crossed do not need that, and do not
@@ -154,33 +154,33 @@ func TestSDK_OnlyTheTreesThatNeedOneStateTheirWire(t *testing.T) {
 	src := string(sdk.Source)
 	// Upward from the id, and downward from what the id forced.
 	for _, want := range []string{"Wrap", "Tx", "Leaf"} {
-		if !strings.Contains(src, "func (x *"+want+") MarshalZAP()") {
+		if !strings.Contains(src, "func (x *"+want+") BuildZAP()") {
 			t.Errorf("%s holds an id in its tree and does not state its wire:\n%s", want, src)
 		}
 	}
 	// And nowhere else. A tree with no id keeps the derived wire it had, which
 	// is what makes this change touch only the ops that could not cross.
 	for _, no := range []string{"Plain", "PlainLeaf"} {
-		if strings.Contains(src, "func (x *"+no+") MarshalZAP()") {
-			t.Errorf("%s has no id anywhere in it and was re-encoded anyway:\n%s", no, src)
+		if strings.Contains(src, "func (x *"+no+") BuildZAP()") {
+			t.Errorf("%s has no id anywhere in it and was rebuilt anyway:\n%s", no, src)
 		}
 	}
 }
 
-// TestSDK_TheTwoCodecsWriteTheSameBytes is the claim run rather than read.
+// TestSDK_TheTwoLayoutsWriteTheSameBytes is the claim run rather than read.
 //
-// It builds a module holding both: the service's types with the codec zip emits
-// for them, and the generated SDK with the codec the SDK emits for its
+// It builds a module holding both: the service's types with the layout zip emits
+// for them, and the generated SDK with the layout the SDK emits for its
 // restatement of them. The same value is put in both — through the json tags
 // the SDK copies verbatim, so nothing is filled in twice by hand — and the two
-// MarshalZAP calls must agree byte for byte, each side must read the other's
+// BuildZAP calls must agree byte for byte, each side must read the other's
 // bytes back to the value it started from, and the whole thing must survive a
 // real ZAP call over a real socket.
 //
 // A Go client that agreed with nobody would still round-trip against itself.
 // This is the test that a Rust or C++ client, which reaches these ops already,
 // is talking to the same wire.
-func TestSDK_TheTwoCodecsWriteTheSameBytes(t *testing.T) {
+func TestSDK_TheTwoLayoutsWriteTheSameBytes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("compiles a module with the go toolchain")
 	}
@@ -202,7 +202,7 @@ func TestSDK_TheTwoCodecsWriteTheSameBytes(t *testing.T) {
 		t.Fatalf("Layouts: %v", err)
 	}
 	// The emitter names the package the TYPES live in, and in the probe they
-	// live in svc. That one line is the only edit; the codec below it is the
+	// live in svc. That one line is the only edit; the layout below it is the
 	// bytes zip wrote.
 	gen := bytes.Replace(native[0].Source,
 		[]byte("\npackage "+native[0].Package+"\n"), []byte("\npackage svc\n"), 1)
@@ -261,11 +261,11 @@ func TestSDK_TheTwoCodecsWriteTheSameBytes(t *testing.T) {
 		t.Fatalf("go run: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), "SAME WIRE OK") {
-		t.Fatalf("the two codecs are not the same wire:\n%s", out)
+		t.Fatalf("the two layouts are not the same wire:\n%s", out)
 	}
 }
 
-// probeDocs is the values the probe puts through both codecs, as JSON. They are
+// probeDocs is the values the probe puts through both layouts, as JSON. They are
 // filled HERE, off the declared type, so the probe carries no second copy of
 // them to drift — and the SDK copies the json tags verbatim, so one document
 // lands in both shapes identically.
@@ -306,7 +306,7 @@ func probeDocs(t *testing.T) string {
 	}
 	b.WriteString("}\n\nvar idedDocs = []string{\n")
 	// The zero Ided has a nil *TxID: an inline slot has no null, so absence
-	// comes back as all-zero, which is what the codec reads as nil.
+	// comes back as all-zero, which is what the layout reads as nil.
 	for _, v := range []Ided{{}, {ID: TxID(full.ID), Ref: &ref, IDs: rid.IDs, Name: "ÿ"}, rid} {
 		j, err := json.Marshal(v)
 		if err != nil {
@@ -319,7 +319,7 @@ func probeDocs(t *testing.T) string {
 }
 
 // probeTypes restates the service's types in the probe. If it drifted from the
-// declaration the codec beside it was generated from, that codec would name a
+// declaration the layout beside it was generated from, that layout would name a
 // field this struct does not have, and the module would not build.
 const probeTypes = `package svc
 
@@ -368,11 +368,11 @@ import (
 @DOCS@
 
 type wire interface {
-	MarshalZAP() ([]byte, error)
-	UnmarshalZAP([]byte) error
+	BuildZAP() ([]byte, error)
+	WrapZAP([]byte) error
 }
 
-// same puts one document into both shapes, encodes each with its own codec, and
+// same puts one document into both shapes, builds each with its own layout, and
 // requires the bytes and both cross-reads to agree.
 func same(what, doc string, a, b wire) {
 	if err := json.Unmarshal([]byte(doc), a); err != nil {
@@ -381,27 +381,27 @@ func same(what, doc string, a, b wire) {
 	if err := json.Unmarshal([]byte(doc), b); err != nil {
 		fail("%s: sdk side: %v", what, err)
 	}
-	x, err := a.MarshalZAP()
+	x, err := a.BuildZAP()
 	if err != nil {
-		fail("%s: service codec: %v", what, err)
+		fail("%s: service layout: %v", what, err)
 	}
-	y, err := b.MarshalZAP()
+	y, err := b.BuildZAP()
 	if err != nil {
-		fail("%s: sdk codec: %v", what, err)
+		fail("%s: sdk layout: %v", what, err)
 	}
 	if !bytes.Equal(x, y) {
 		fail("%s: two wires\n zip %d bytes: %% x\n sdk %d bytes: %% x", what, len(x), len(y))
 	}
 	// Each side reads what the other wrote back to the value it started from.
 	back := reflect.New(reflect.TypeOf(a).Elem()).Interface().(wire)
-	if err := back.UnmarshalZAP(y); err != nil {
+	if err := back.WrapZAP(y); err != nil {
 		fail("%s: service reading the sdk's bytes: %v", what, err)
 	}
 	if !reflect.DeepEqual(a, back) {
 		fail("%s: the service read the sdk's bytes as something else\n was %+v\n got %+v", what, a, back)
 	}
 	other := reflect.New(reflect.TypeOf(b).Elem()).Interface().(wire)
-	if err := other.UnmarshalZAP(x); err != nil {
+	if err := other.WrapZAP(x); err != nil {
 		fail("%s: sdk reading the service's bytes: %v", what, err)
 	}
 	if !reflect.DeepEqual(b, other) {
@@ -481,8 +481,8 @@ func fail(format string, a ...any) {
 // "reached by its method". A type whose fields are all unexported — a time.Time,
 // a netip.AddrPort — has no slots, so it crosses as a complete and EMPTY object
 // that its parent writes inline. There is nothing to state and no method to
-// reach for, and [Layouts] answers the same way. A codec here that called
-// MarshalZAP on it would be a method that does not exist.
+// reach for, and [Layouts] answers the same way. A layout here that called
+// BuildZAP on it would be a method that does not exist.
 func TestSDK_AValueWithNoSlotsIsStillWrittenInline(t *testing.T) {
 	type stamped struct {
 		ID   [32]byte  `json:"id"`
@@ -501,13 +501,13 @@ func TestSDK_AValueWithNoSlotsIsStillWrittenInline(t *testing.T) {
 		t.Fatalf("gaps: %+v", sdk.Gaps)
 	}
 	src := string(sdk.Source)
-	if !strings.Contains(src, "func (x *Stamped) MarshalZAP()") {
+	if !strings.Contains(src, "func (x *Stamped) BuildZAP()") {
 		t.Fatalf("the type holding the id does not state its wire:\n%s", src)
 	}
-	if strings.Contains(src, "func (x *Time) MarshalZAP()") {
-		t.Errorf("a value with no slots was given a codec:\n%s", src)
+	if strings.Contains(src, "func (x *Time) BuildZAP()") {
+		t.Errorf("a value with no slots was given a layout:\n%s", src)
 	}
-	if strings.Contains(src, "x.When.MarshalZAP()") {
+	if strings.Contains(src, "x.When.BuildZAP()") {
 		t.Errorf("the parent reaches for a method the value does not have:\n%s", src)
 	}
 	// What zip writes for one, written the same way here: a complete and empty

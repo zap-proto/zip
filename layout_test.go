@@ -12,7 +12,7 @@ import (
 )
 
 // TestTheLayoutIsCheckedIn regenerates internal/layout/zap_gen.go and requires the
-// file on disk to match. The generated codec is the wire those types speak, so a
+// file on disk to match. The generated layout is the wire those types speak, so a
 // change to the types that nobody regenerated is a wire that moved under its
 // readers — and this is where that is noticed, not in a rolling deploy.
 func TestTheLayoutIsCheckedIn(t *testing.T) {
@@ -40,7 +40,7 @@ func TestTheLayoutIsCheckedIn(t *testing.T) {
 }
 
 // TestTheEmittedSourceCompiles builds the package the emitter wrote. format.Source
-// only proves it PARSES; a codec that names a field that moved, or converts a
+// only proves it PARSES; a layout that names a field that moved, or converts a
 // value the type will not take, parses and does not build.
 func TestTheEmittedSourceCompiles(t *testing.T) {
 	out, err := exec.Command("go", "build", "./internal/layout").CombinedOutput()

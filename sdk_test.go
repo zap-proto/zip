@@ -283,7 +283,7 @@ func TestSDK_TheNameIsTheOpsName(t *testing.T) {
 func TestSDK_IsDeterministic(t *testing.T) {
 	// Two apps: one whose types cross by derivation, one that states its wire.
 	// The second walks maps the first does not — which types are coded, and
-	// which imports their codecs reach for — and Go randomises map order per
+	// which imports their layouts reach for — and Go randomises map order per
 	// run. A generator that wobbled would fail the regenerate-and-diff gate
 	// downstream on a change nobody made.
 	coded := func() *zip.App {
@@ -446,17 +446,17 @@ func TestSDK_AWholeAppStillGeneratesAroundAGap(t *testing.T) {
 	}
 }
 
-// TestSDK_AnIdNeedsItsCodecFirst is the gap that covers most of a chain node's
+// TestSDK_AnIdNeedsItsLayoutFirst is the gap that covers most of a chain node's
 // API, so it is worth naming: ids.ID is [32]byte and ids.NodeID is [20]byte, and
 // a fixed array is exactly the case where the LAYOUT is right and the reflective
-// encoder still refuses — the type is expected to declare its own wire.
+// builder still refuses — the type is expected to declare its own wire.
 //
 // Without this the generated client offers the method and the call fails on the
 // wire, which is the failure this projection exists to remove. It is also not
-// fixable by generating harder: the declared type's MarshalZAP lives in the
+// fixable by generating harder: the declared type's BuildZAP lives in the
 // service's package, and restating the field as [32]uint8 restates the bytes and
 // not the layout.
-func TestSDK_AnIdCrossesOnTheCodecTheSDKWrites(t *testing.T) {
+func TestSDK_AnIdCrossesOnTheLayoutTheSDKWrites(t *testing.T) {
 	type ID [32]byte
 	type Tx struct {
 		TxID   ID     `json:"txID"`
@@ -486,12 +486,12 @@ func TestSDK_AnIdCrossesOnTheCodecTheSDKWrites(t *testing.T) {
 		"copy(x.TxID[:], o.BytesFixed(txTxIDAt, 32))",
 	} {
 		if !strings.Contains(src, want) {
-			t.Errorf("the emitted codec does not carry the id inline: want %q\n%s", want, src)
+			t.Errorf("the emitted layout does not carry the id inline: want %q\n%s", want, src)
 		}
 	}
 	// The ZAP schema still reports the field, and still should: [Schema.Coded]
-	// is what the REFLECTIVE encoder will not carry, which has not changed. It
-	// is the list of fields that need a codec, and now the SDK writes one.
+	// is what the REFLECTIVE builder will not carry, which has not changed. It
+	// is the list of fields that need a layout, and now the SDK writes one.
 	if coded := zip.ZAPSchema("p", app).Coded; len(coded) != 1 || coded[0].Field != "TxID" {
 		t.Errorf("the schema stopped reporting the field reflection refuses: %+v", coded)
 	}
@@ -532,7 +532,7 @@ func TestSDK_AnEmbeddedUnnameableTypeIsAGapAndNotASyntaxError(t *testing.T) {
 	//
 	// The refusal has to come from a value the wire genuinely cannot carry. An
 	// id is no longer one — a fixed array states its own wire now (see
-	// [TestSDK_AnIdCrossesOnTheCodecTheSDKWrites]) — so the field here is an
+	// [TestSDK_AnIdCrossesOnTheLayoutTheSDKWrites]) — so the field here is an
 	// interface, which names no type and so has nothing to declare. That is
 	// what node's two remaining gaps are.
 	type AssetID struct {
