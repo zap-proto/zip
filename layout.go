@@ -1,7 +1,7 @@
 package zip
 
-// The Go codec — the source that STATES a type's ZAP wire instead of having one
-// derived from it at every call.
+// Layouts — the source that STATES a type's ZAP wire instead of deriving one at
+// every call. Nothing here runs on the served path; this is a generator.
 //
 // [LayoutOf] names three readers of the one derivation: the plane encodes
 // against it, a .zap schema states it as `Name type @Offset`, and a generator
@@ -32,7 +32,7 @@ package zip
 // for field and in the same order, for every field the reflective encoder can
 // write at all. That is not a promise about intent — it falls out of reading the
 // offsets from [LayoutOf] rather than deriving them a second time, and
-// TestTheCodecKeepsTheWire holds it against the reflective encoder directly.
+// TestTheLayoutKeepsTheWire holds it against the reflective encoder directly.
 //
 // The sequence it reproduces: every list is written FIRST, because SetList takes
 // an offset that must already exist; then the object is started at the declared
@@ -58,9 +58,9 @@ import (
 	"strings"
 )
 
-// Codec is one emitted file: the Go source stating the wire of every type in one
+// Layout is one emitted file: the Go source stating the wire of every type in one
 // package, and the names of the types it states.
-type Codec struct {
+type Layout struct {
 	Path    string   // the package's import path
 	Package string   // its package clause
 	Types   []string // the types declared, alphabetically
@@ -74,7 +74,7 @@ type Codec struct {
 	Stated bool
 }
 
-// Codecs renders a [Wire] implementation for each of roots and for every struct
+// Layouts renders a [Wire] implementation for each of roots and for every struct
 // nested below them, grouped by the package that owns the type.
 //
 // A nested value is reached BY ITS METHOD, so the set is closed downward: a
@@ -87,7 +87,7 @@ type Codec struct {
 // is no layout to state and a codec that guessed one would speak a wire nobody
 // reads. Answering that is a change to the TYPE, which is not a generator's to
 // make.
-func Codecs(roots ...reflect.Type) ([]Codec, error) {
+func Layouts(roots ...reflect.Type) ([]Layout, error) {
 	want := map[reflect.Type]bool{}
 	var refused []string
 	for _, r := range roots {
@@ -104,7 +104,7 @@ func Codecs(roots ...reflect.Type) ([]Codec, error) {
 	for t := range want {
 		byPath[t.PkgPath()] = append(byPath[t.PkgPath()], t)
 	}
-	out := make([]Codec, 0, len(byPath))
+	out := make([]Layout, 0, len(byPath))
 	for path, ts := range byPath {
 		sort.Slice(ts, func(i, j int) bool { return ts[i].Name() < ts[j].Name() })
 		c, err := one(path, ts, want)
@@ -308,7 +308,7 @@ func (p *pkg) spell(t reflect.Type) string {
 	return t.String()
 }
 
-func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Codec, error) {
+func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Layout, error) {
 	p := &pkg{
 		self:  path,
 		alias: map[string]string{},
@@ -319,7 +319,7 @@ func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Codec, err
 	names := make([]string, 0, len(ts))
 	for _, t := range ts {
 		if err := declare(&body, t, p); err != nil {
-			return Codec{}, err
+			return Layout{}, err
 		}
 		names = append(names, t.Name())
 	}
@@ -352,9 +352,9 @@ func one(path string, ts []reflect.Type, want map[reflect.Type]bool) (Codec, err
 
 	src, err := format.Source(out.Bytes())
 	if err != nil {
-		return Codec{}, fmt.Errorf("zip: emitted source for %s does not parse: %w\n%s", path, err, out.String())
+		return Layout{}, fmt.Errorf("zip: emitted source for %s does not parse: %w\n%s", path, err, out.String())
 	}
-	return Codec{Path: path, Package: clause, Types: names, Source: src}, nil
+	return Layout{Path: path, Package: clause, Types: names, Source: src}, nil
 }
 
 // stated is the compile-time assertion that a type answers for its own bytes.

@@ -18,7 +18,7 @@ type optionalID struct {
 }
 
 func TestAnOptionalIDIsReadBack(t *testing.T) {
-	written, err := Codecs(reflect.TypeOf(optionalID{}))
+	written, err := Layouts(reflect.TypeOf(optionalID{}))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -455,7 +455,7 @@ func TestSDK_AWholeAppStillGeneratesAroundAGap(t *testing.T) {
 // wire, which is the failure this projection exists to remove. It is also not
 // fixable by generating harder: the declared type's MarshalZAP lives in the
 // service's package, and restating the field as [32]uint8 restates the bytes and
-// not the codec.
+// not the layout.
 func TestSDK_AnIdCrossesOnTheCodecTheSDKWrites(t *testing.T) {
 	type ID [32]byte
 	type Tx struct {
