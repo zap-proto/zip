@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/zap-proto/fiber/v3"
 
@@ -71,7 +73,7 @@ type registeredOp struct {
 	// registered long before that. The invoke seam asks it on every call and the
 	// document asks it once — so "is this op governed" has one answer, and a
 	// gated op cannot publish a contract its seam does not keep.
-	rule   func() Authorizer
+	rule func() Authorizer
 	// result is the [App.OnResult] hook in force over this op, asked the same way
 	// and for the same reason as rule: composition settles it at build, and the
 	// op was registered before that.
@@ -159,15 +161,15 @@ func WithOperationID(id string) OpOption {
 // A declared non-2xx is for an op that answers a failure with its OWN TYPED
 // BODY — a 409 carrying the conflicting record, a 404 carrying what was
 // searched for. It is not a second way to spell an error: [ErrNotFound] and
-// friends remain how a handler returns a failure, and they render the standard
-// {status, code, error} envelope every client already parses.
+// friends remain how a handler returns a failure, and they render the RFC 9457
+// problem document every refusal is written in.
 //
-// The difference is which body reaches the wire. An error returns the envelope;
-// a declared status returns the op's Out type, described in the document under
-// that code like any other response. Reach for the error unless the caller
-// genuinely needs a typed body it cannot get from the envelope — two ways to
-// spell the same failure is exactly the drift this package spends its doc
-// comments avoiding.
+// The difference is which body reaches the wire. An error returns the problem
+// document; a declared status returns the op's Out type, described in the
+// document under that code like any other response. Reach for the error unless
+// the caller genuinely needs a typed body a problem document cannot carry — two
+// ways to spell the same failure is exactly the drift this package spends its
+// doc comments avoiding.
 func WithStatus(codes ...int) OpOption {
 	if len(codes) == 0 {
 		panic("zip: WithStatus needs at least one status")
@@ -586,19 +588,41 @@ var textReader = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 // names a function fully — "github.com/luxfi/node/vms/platformvm.(*Service).getHeight"
 // — and the package ends at the last '/' segment's first '.', which is the one
 // place a path cannot have one.
+//
+// Package main is the exception: a built binary names its functions
+// "main.(*Store).Add", while cmd/zipdoc files their prose under the package's
+// import path. The build info carries that path, so a service whose handlers
+// live in package main finds its own doc comments. Under go test the package
+// keeps its import path and nothing is substituted.
 func pkgOf(fn any) string {
 	at := runtime.FuncForPC(reflect.ValueOf(fn).Pointer())
 	if at == nil {
 		return ""
 	}
-	full := at.Name()
+	return packageOf(at.Name(), mainPath())
+}
+
+// packageOf reads the package out of a runtime function name. program is the
+// import path that "main" stands for.
+func packageOf(full, program string) string {
 	slash := strings.LastIndexByte(full, '/')
 	dot := strings.IndexByte(full[slash+1:], '.')
 	if dot < 0 {
 		return full
 	}
-	return full[:slash+1+dot]
+	if pkg := full[:slash+1+dot]; pkg != "main" {
+		return pkg
+	}
+	return program
 }
+
+// mainPath is the import path of this binary's package main.
+var mainPath = sync.OnceValue(func() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Path != "" {
+		return bi.Path
+	}
+	return "main"
+})
 
 func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
 	scope := on.OpScope()
