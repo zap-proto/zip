@@ -39,6 +39,7 @@ func respOf(t *testing.T, a *zip.App, path, method string) (string, map[string]a
 	}
 	op, _ := item[method].(map[string]any)
 	resp, _ := op["responses"].(map[string]any)
+	delete(resp, "default") // the refusal every op publishes; this reads the success
 	if len(resp) != 1 {
 		t.Fatalf("responses = %v, want exactly one declared status", resp)
 	}

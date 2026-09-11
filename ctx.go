@@ -278,9 +278,8 @@ func (e *HTTPError) With(detail map[string]any) *HTTPError {
 	return e
 }
 
-// MarshalJSON writes the RFC 9457 problem document, with no `instance`: a value
-// marshalled on its own has no occurrence to name. Served through an address,
-// the same document gains one — see [HTTPError.problem].
+// MarshalJSON writes the RFC 9457 problem document, the same one the error
+// handler serves — see [HTTPError.problem].
 func (e *HTTPError) MarshalJSON() ([]byte, error) {
 	return jsonenc.Marshal(e.problem())
 }

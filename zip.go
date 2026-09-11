@@ -114,8 +114,10 @@ type Config struct {
 	// how much of it they may have.
 	Warm int
 
-	// ErrorHandler is the catch-all error handler. Defaults to zip.errorHandler
-	// which renders {error, code, status} JSON.
+	// ErrorHandler replaces the handler that writes every refusal. Unset, a
+	// refusal is an RFC 9457 problem document (application/problem+json), or
+	// RFC 6749's {error, error_description} at an address declared with [OAuth].
+	// See problem.go.
 	ErrorHandler fiber.ErrorHandler
 
 	// Concurrency caps the maximum number of concurrent connections the

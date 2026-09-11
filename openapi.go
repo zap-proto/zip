@@ -75,6 +75,9 @@ func (a *App) buildOpenAPI() map[string]any {
 	// One registry for the whole document: a type reached by two ops is one
 	// definition in components.schemas that both point at.
 	reg := newSchemaRegistry(specDefs)
+	// The addresses whose refusals speak RFC 6749, read from the same walk the
+	// error handler is built from, so the document and the wire agree.
+	oauth := composeOAuth(a.plan())
 
 	// Sort ops by path,method for deterministic output.
 	ops := append([]*registeredOp{}, a.Registry()...)
@@ -289,6 +292,13 @@ func (a *App) buildOpenAPI() map[string]any {
 			}
 		}
 
+		// Any status the op does not declare is a refusal, written in the body its
+		// address speaks (see problem.go). Publishing that body is what lets a
+		// client generated from this document type its errors.
+		if resp, ok := opObj["responses"].(map[string]any); ok {
+			resp["default"] = refusalResponse(reg, oauth[op.Method+" "+op.Path])
+		}
+
 		paths[path][strings.ToLower(op.Method)] = opObj
 	}
 
@@ -303,6 +313,62 @@ func (a *App) buildOpenAPI() map[string]any {
 		"components": map[string]any{
 			"schemas": reg.defs,
 		},
+	}
+}
+
+// The schema names a refusal body is published under. Neither can be the name
+// of a Go type: a type name has no '-', and a qualified one contains a '.'.
+const (
+	problemSchema = "problem-details"
+	oauthSchema   = "oauth-error"
+)
+
+// refusalResponse is an op's `default` response: an RFC 9457 problem document,
+// or RFC 6749's error pair at an OAuth address.
+func refusalResponse(reg *schemaRegistry, oauth bool) map[string]any {
+	name, media, schema := problemSchema, mimeProblem, problemDocument
+	if oauth {
+		name, media, schema = oauthSchema, mimeJSON, oauthError
+	}
+	if _, ok := reg.defs[name]; !ok {
+		reg.defs[name] = schema()
+	}
+	return map[string]any{
+		"description": "refused",
+		"content":     map[string]any{media: map[string]any{"schema": reg.ref(name)}},
+	}
+}
+
+// problemDocument is the shape [HTTPError.problem] writes. A refusal's own
+// extension members sit beside these, which an object schema allows by default.
+// additionalProperties is left out rather than written as true: readers of the
+// document, CommandsFromSpec among them, parse every schema as an object.
+func problemDocument() map[string]any {
+	str := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
+	return map[string]any{
+		"type":        "object",
+		"description": "An RFC 9457 problem document.",
+		"properties": map[string]any{
+			"type":   str("about:blank"),
+			"title":  str("The status's reason phrase."),
+			"status": map[string]any{"type": "integer", "format": "int64", "description": "The HTTP status."},
+			"detail": str("What was refused, for a person to read."),
+			"code":   str("A stable token a client can branch on, when the refusal names one."),
+		},
+		"required": []string{"type", "status", "detail"},
+	}
+}
+
+// oauthError is the shape [HTTPError.oauth] writes (RFC 6749 §5.2).
+func oauthError() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "An RFC 6749 error response.",
+		"properties": map[string]any{
+			"error":             map[string]any{"type": "string"},
+			"error_description": map[string]any{"type": "string"},
+		},
+		"required": []string{"error"},
 	}
 }
 

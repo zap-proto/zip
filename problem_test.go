@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/zap-proto/zip"
@@ -284,6 +285,78 @@ func TestOAuthTakesTypedOpsToo(t *testing.T) {
 	}
 	if len(app.Routes()) != 1 || app.Routes()[0].Op == "" {
 		t.Errorf("the op was not registered as an op: %v", app.Routes())
+	}
+}
+
+// TestTheDocumentDeclaresTheRefusal: every op publishes a `default` response in
+// the vocabulary its address speaks, so a generated client types its errors —
+// and the refusal on the wire carries every member that schema requires.
+func TestTheDocumentDeclaresTheRefusal(t *testing.T) {
+	type in struct {
+		Name string `json:"name"`
+	}
+	type out struct {
+		OK bool `json:"ok"`
+	}
+	ok := func(context.Context, *in) (*out, error) { return &out{OK: true}, nil }
+	app := zip.New(zip.Config{AppName: "declared", DisableStartupMessage: true})
+	zip.Post(app, "/v1/things", ok)
+	zip.Post(zip.OAuth(app), "/v1/oauth/token", ok)
+
+	raw, err := json.Marshal(app.OpenAPISpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			Responses map[string]struct {
+				Content map[string]struct {
+					Schema struct {
+						Ref string `json:"$ref"`
+					} `json:"schema"`
+				} `json:"content"`
+			} `json:"responses"`
+		} `json:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Required []string `json:"required"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct{ path, media, schema string }{
+		{"/v1/things", "application/problem+json", "problem-details"},
+		{"/v1/oauth/token", "application/json", "oauth-error"},
+	} {
+		ref := doc.Paths[c.path]["post"].Responses["default"].Content[c.media].Schema.Ref
+		if ref != "#/components/schemas/"+c.schema {
+			t.Errorf("%s: default %s schema is %q, want %s", c.path, c.media, ref, c.schema)
+			continue
+		}
+		req, err := http.NewRequest("POST", c.path, strings.NewReader("{"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := res.Header.Get("Content-Type"); got != c.media {
+			t.Errorf("%s: Content-Type %q, the document says %s", c.path, got, c.media)
+		}
+		b, _ := io.ReadAll(res.Body)
+		var body map[string]any
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Fatalf("%s: %s", c.path, b)
+		}
+		for _, member := range doc.Components.Schemas[c.schema].Required {
+			if _, ok := body[member]; !ok {
+				t.Errorf("%s: the refusal has no %q, which the document requires: %s", c.path, member, b)
+			}
+		}
 	}
 }
 
