@@ -145,6 +145,25 @@ const mimeJSON = "application/json"
 // the HTTP+SSE transport are absent here, so nothing needs a migration window.
 const mcpProtocolVersion = "2026-07-28"
 
+// mcpRevisions are the revisions this door answers in. The two before
+// mcpProtocolVersion define the same Streamable HTTP transport and the same tool
+// methods, and neither has JSON-RPC batches, so a client that asks for one is
+// served it as written.
+var mcpRevisions = map[string]bool{"2025-06-18": true, "2025-11-25": true, mcpProtocolVersion: true}
+
+// negotiate is the revision an initialize is answered in, by the MCP lifecycle's
+// version negotiation: the one the client asked for when this door speaks it,
+// else the newest.
+func negotiate(params []byte) string {
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if json.Unmarshal(params, &p) == nil && mcpRevisions[p.ProtocolVersion] {
+		return p.ProtocolVersion
+	}
+	return mcpProtocolVersion
+}
+
 // defaultMCPPath is where an app serves its own MCP door unless MCPConfig moves
 // it, and therefore where a host forwards a composed tools/call.
 const defaultMCPPath = "/mcp"
@@ -409,7 +428,7 @@ func (a *App) MCP(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 	// own migration path assumes.
 	case "initialize", "server/discover":
 		return f.Answer(mcpJSON(map[string]any{
-			"protocolVersion": mcpProtocolVersion,
+			"protocolVersion": negotiate(f.Params),
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": a.mcpName(), "version": a.cfg.OpenAPI.Version},
 		}))

@@ -42,3 +42,33 @@ func TestDiscoverAnswersLikeInitialize(t *testing.T) {
 		t.Fatalf("server/discover %v != initialize %v", disc["protocolVersion"], in["protocolVersion"])
 	}
 }
+
+// A client that asks for a revision this door speaks is answered in it; one that
+// asks for anything else is answered in the newest. The official TypeScript and
+// Python clients both refuse an initialize answered in a revision they did not
+// ask for and do not know.
+func TestInitializeAnswersTheRevisionTheClientAsked(t *testing.T) {
+	a := New(Config{})
+	for asked, want := range map[string]string{
+		"2025-11-25": "2025-11-25",
+		"2025-06-18": "2025-06-18",
+		"2026-07-28": "2026-07-28",
+		"2024-11-05": mcpProtocolVersion,
+		"":           mcpProtocolVersion,
+	} {
+		params, err := json.Marshal(map[string]any{"protocolVersion": asked})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := a.MCP(context.Background(), &zapmcp.Frame{Method: "initialize", Kind: zapmcp.Request, ID: "1", Params: params})
+		var got struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		if err := json.Unmarshal(f.Result, &got); err != nil {
+			t.Fatalf("asked %q: %v", asked, err)
+		}
+		if got.ProtocolVersion != want {
+			t.Errorf("asked %q: answered %q, want %q", asked, got.ProtocolVersion, want)
+		}
+	}
+}
