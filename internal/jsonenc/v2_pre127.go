@@ -1,10 +1,7 @@
-//go:build goexperiment.jsonv2 && go1.27
+//go:build goexperiment.jsonv2 && !go1.27
 
-// The go1.27 constraint is what lets this file use encoding/json/v2 at all.
-// Go 1.27 turns the experiment on by default and ships the package as go1.27
-// API, which a file compiled at the module's go1.26 language version may not
-// call — vet refuses it. Requiring go1.27 raises this file's version to match.
-// Earlier toolchains with the experiment set read v2_pre127.go instead.
+// Go 1.25 and 1.26 carry encoding/json/v2 only as an experiment, outside any
+// versioned API, so this file needs no version of its own. See v2.go.
 
 package jsonenc
 
