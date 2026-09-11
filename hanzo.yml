@@ -32,3 +32,8 @@ test:
     # deliberately separate declarations of the batch shapes still describe one
     # thing. See contract/doc.go.
     run: cd contract && go test -count=1 -timeout 5m ./...
+  - name: go-test-local-service
+    # examples/local-service is its own module so SQLite stays out of zip's
+    # graph. It checks its generated doc file is current, then asserts its op
+    # answers over REST, MCP, OpenAPI and the CLI.
+    run: cd examples/local-service && go tool zipdoc -check && go test -count=1 -timeout 5m ./...
