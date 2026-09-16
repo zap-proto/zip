@@ -118,7 +118,8 @@ func (a *App) makeRoom(starter *plugin) {
 			return cmp.Compare(x.lastUse.Load(), y.lastUse.Load())
 		})
 		cold := evictable[0]
-		if !cold.evict("room", now.Sub(time.Unix(0, cold.lastUse.Load()))) {
+		coldSeen := cold.lastUse.Load()
+		if !cold.evict("room", now.Sub(time.Unix(0, coldSeen)), coldSeen) {
 			return // already down; re-reading would spin
 		}
 	}
@@ -190,7 +191,8 @@ func (a *App) evictOver(warm int, now time.Time) int {
 		if live-stopped <= warm {
 			break
 		}
-		if p.evict("lru", now.Sub(time.Unix(0, p.lastUse.Load()))) {
+		lruSeen := p.lastUse.Load()
+		if p.evict("lru", now.Sub(time.Unix(0, lruSeen)), lruSeen) {
 			stopped++
 		}
 	}
@@ -215,15 +217,34 @@ func (p *plugin) evictIfIdle(now time.Time) bool {
 	if last == 0 || now.Sub(time.Unix(0, last)) < after {
 		return false
 	}
-	return p.evict("idle", now.Sub(time.Unix(0, last)))
+	return p.evict("idle", now.Sub(time.Unix(0, last)), last)
 }
 
 // evict stops p's current instance and reports whether it stopped one. It is
 // the one place a plugin is reclaimed, so the two policies above cannot come to
 // disagree about how a child is taken down; reason says which asked.
-func (p *plugin) evict(reason string, idle time.Duration) bool {
+func (p *plugin) evict(reason string, idle time.Duration, seen int64) bool {
 	p.mu.Lock()
 	if p.closed || p.disabled.Load() {
+		p.mu.Unlock()
+		return false
+	}
+	// THE CLOCK IS RE-READ UNDER THE LOCK, and this is the whole of the fix.
+	//
+	// The caller decided to evict from a lastUse it read outside the lock. A
+	// request arriving in that window does not just get served by the instance
+	// about to drain — it can START one, because target() brings a lazy plugin
+	// up with a CAS on p.cur. The swap below then takes that brand-new child
+	// down, and the caller which just started it waits out the drain and gets a
+	// 502. In production this read as "zip lazy plugin started on first request"
+	// and "zip idle plugin evicted · idle 2h37m58s" at the SAME timestamp, over
+	// and over: every Slack event 502'd after 43 to 64 seconds and no agent run
+	// ever began.
+	//
+	// lastUse moving is exactly the signal that someone used or started it since
+	// the decision, so the decision is stale and the eviction is refused. seen
+	// of 0 means the caller is not making an idleness claim.
+	if seen != 0 && p.lastUse.Load() != seen {
 		p.mu.Unlock()
 		return false
 	}
