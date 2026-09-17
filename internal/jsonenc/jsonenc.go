@@ -6,8 +6,19 @@ import (
 	"io"
 )
 
-// Variant names the JSON implementation. zip.New() logs it once at startup.
-const Variant = "encoding/json/v2"
+// Variant names the encoder AND what it says, because the two are chosen
+// separately here and naming only the first misleads in the direction that
+// matters: v2's own semantics keep a zero under omitempty, write a nil slice as
+// [] and a nil map as {}, decode case-sensitively and leave a map's keys
+// unsorted. This wire does none of that.
+//
+// It is a DECLARATION, not a reading of the toolchain. zip marshals through
+// encoding/json/v2 because this package imports it; a build with
+// GOEXPERIMENT=nojsonv2 does not fall back to v1, it fails to compile, so the
+// name can never describe an encoder the binary is not using.
+//
+// zip.New() logs it once at startup, which is the one moment anyone asks.
+const Variant = "encoding/json/v2 (v1 semantics, sorted keys)"
 
 // wire is what zip's JSON says, stated once and passed to every call.
 //

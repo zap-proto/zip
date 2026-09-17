@@ -42,9 +42,10 @@ import (
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
-// JSONVariant names the JSON implementation on the edge, which zip.New logs
-// once at startup. Per HIP-0106 the wire stack is "JSON only at edge, ZAP
-// between services", so this is the one place the edge's encoder is stated.
+// JSONVariant names the JSON implementation on the edge and the semantics it
+// writes, which zip.New logs once at startup. Per HIP-0106 the wire stack is
+// "JSON only at edge, ZAP between services", so this is the one place the
+// edge's encoder is stated. What it means is in [jsonenc.Variant].
 const JSONVariant = jsonenc.Variant
 
 // Handler is zip's request handler signature. Returning an error causes
