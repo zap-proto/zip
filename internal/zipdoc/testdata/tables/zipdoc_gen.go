@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	zip.Describe("github.com/zap-proto/zip/internal/zipdoc/testdata/tables POST /v1/items/", zip.Doc{
+	zip.Describe("github.com/zap-proto/zip/internal/zipdoc/testdata/tables POST /v1/items", zip.Doc{
 		Description: "Creates a new catalog item.",
 		Fields: map[string]string{
 			"ItemIn.name":  "Name of the item.",

@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/zap-proto/zip/internal/addr"
 	"go/ast"
 	"go/constant"
 	"go/parser"
@@ -565,18 +566,9 @@ func isZipGroup(t types.Type) bool {
 
 // joinPath composes a prefix with a leaf the way the router does, so the key this
 // pass writes is the path zip registered.
-func joinPath(prefix, path string) string {
-	if path == "" {
-		path = "/"
-	}
-	if prefix == "" {
-		return path
-	}
-	if path[0] != '/' {
-		path = "/" + path
-	}
-	return strings.TrimRight(prefix, "/") + path
-}
+// joinPath is [addr.Join] — the router's own rule, so a route this pass files
+// prose under is the address the router serves.
+func joinPath(prefix, path string) string { return addr.Join(prefix, path) }
 
 // calleeIdent is the identifier being called, past any parens and any explicit
 // type arguments: zip.Get, zip.Get[A,B], Get and Get[A,B] all yield the Get.

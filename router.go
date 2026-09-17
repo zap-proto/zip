@@ -1,7 +1,7 @@
 package zip
 
 import (
-	"strings"
+	"github.com/zap-proto/zip/internal/addr"
 
 	"github.com/zap-proto/fiber/v3"
 )
@@ -26,16 +26,7 @@ type opScope struct {
 // so a typed op's identity IS the route it registered — the document, the tool
 // name and the command all read op.Path, and a path composed by a second rule
 // would name a route that does not exist.
-func joinPath(prefix, path string) string {
-	path = normPath(path)
-	if prefix == "" {
-		return path
-	}
-	if path[0] != '/' {
-		path = "/" + path
-	}
-	return strings.TrimRight(prefix, "/") + path
-}
+func joinPath(prefix, path string) string { return addr.Join(prefix, path) }
 
 // splitChain adapts one registration chain — middleware first, the final
 // handler LAST — to fiber's variadic signature. fiber
@@ -46,12 +37,10 @@ func joinPath(prefix, path string) string {
 // normPath maps the empty leaf to the group root: Get("") on a Group("/x")
 // means "/x". fiber never matches an empty path, so
 // the normalization lives here — one place, every route method.
-func normPath(path string) string {
-	if path == "" {
-		return "/"
-	}
-	return path
-}
+// normPath and joinPath are [addr.Norm] and [addr.Join]. The rule lives in one
+// package because cmd/zipdoc composes the same two things to find a route's
+// prose, and a second copy of it drifted.
+func normPath(path string) string { return addr.Norm(path) }
 
 func splitChain(app *App, handlers []Handler) (fiber.Handler, []any) {
 	if len(handlers) == 0 {

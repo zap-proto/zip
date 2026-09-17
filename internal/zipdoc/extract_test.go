@@ -282,7 +282,9 @@ func TestExtract_BothTablesLiftTheSameDocs(t *testing.T) {
 		t.Errorf("legacy response = %s", legacy.Response)
 	}
 
-	scoped := opByKey(t, p, "POST /v1/items/")
+	// The group's leaf is "/", which IS the group's own address — one canonical
+	// spelling, the same one the router declares and the document publishes.
+	scoped := opByKey(t, p, "POST /v1/items")
 	if !strings.HasPrefix(scoped.Description, "Creates a new catalog item") {
 		t.Errorf("scoped description = %q", scoped.Description)
 	}
