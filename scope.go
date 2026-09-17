@@ -92,7 +92,7 @@ func (s *Scope) Delete[In, Out any](path string, fn TypedHandler[In, Out], opts 
 // are two frames of this package between them.
 func (s *Scope) declare[In, Out any](method, path string, fn TypedHandler[In, Out], opts []OpOption) *Operation[In, Out] {
 	all := append(append([]OpOption(nil), s.opts...), opts...)
-	return &Operation[In, Out]{op: registerTyped(2, s.on, method, path, fn, all...)}
+	return &Operation[In, Out]{op: registerTyped(1, s.on, method, path, fn, all...)}
 }
 
 // Operation is a declared typed route. Its methods carry the metadata that

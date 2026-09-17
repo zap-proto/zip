@@ -635,6 +635,12 @@ var mainPath = sync.OnceValue(func() string {
 	return "main"
 })
 
+// registerTyped declares one typed op. depth is how many frames sit between it
+// and the line the programmer wrote, NOT counting the public door itself: zero
+// for [Get] and its four siblings, one for a scope's verb method, which reaches
+// here through [Scope.declare]. Get it wrong and every conflict, cycle and
+// post-seal write in a scoped service cites a line in some caller far above the
+// registration. TestSite_IsTheWrittenLine holds the count.
 func registerTyped[In, Out any](depth int, on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) *registeredOp {
 	scope := on.OpScope()
 	app := scope.App

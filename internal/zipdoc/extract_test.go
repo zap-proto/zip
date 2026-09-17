@@ -304,5 +304,31 @@ func TestExtract_ScopeRegistrationsLiftDocs(t *testing.T) {
 				t.Errorf("%s: Fields[%q] = %q, want %q", op.Key(), key, got, want)
 			}
 		}
+
+	}
+}
+
+// A scope composes its prefix through a NESTED scope, and a metadata chain
+// follows the declaration. Both are shapes a service is written in, and both
+// hid the registration from this pass: the chain's outer call is what the walk
+// sees, and a nested prefix left uncomposed names a route the router does not
+// serve.
+func TestExtract_ScopeComposes(t *testing.T) {
+	p := load(t, "scoped")
+	if len(p.Ops) != 3 {
+		var keys []string
+		for _, o := range p.Ops {
+			keys = append(keys, o.Key())
+		}
+		t.Fatalf("ops = %d, want 3; got %v", len(p.Ops), keys)
+	}
+	chained := opByKey(t, p, "POST /v1/accounts/open")
+	if !strings.Contains(chained.Description, "account for the caller's org") {
+		t.Errorf("description = %q; the chain does not hide the declaration", chained.Description)
+	}
+	opByKey(t, p, "GET /v1/accounts/:id")
+	nested := opByKey(t, p, "GET /v1/accounts/:id/ledger")
+	if !strings.Contains(nested.Description, "what the account holds") {
+		t.Errorf("nested description = %q", nested.Description)
 	}
 }

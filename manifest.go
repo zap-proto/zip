@@ -86,9 +86,11 @@ type ManifestOp struct {
 	Statuses        []int    `json:"statuses,omitempty"`
 	ResponseHeaders []string `json:"responseHeaders,omitempty"`
 
-	// Pkg is the module the handler was declared in and Origin the app that
-	// declared it when it arrived by composition. Together they say WHO owns
-	// this op, which is what keeps two services' /height apart.
+	// Pkg is the package that REGISTERED the op — where the registration is
+	// written, which is the source its prose was read from, not wherever the
+	// handler happens to be declared. Origin is the app that declared it when it
+	// arrived by composition. Together they say WHO owns this op, which is what
+	// keeps two services' /height apart.
 	Pkg    string `json:"pkg,omitempty"`
 	Origin string `json:"origin,omitempty"`
 
