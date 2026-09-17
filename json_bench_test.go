@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/zap-proto/zip"
+	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
 // chatRequest is a representative request payload — same kind of shape
@@ -149,9 +150,17 @@ func BenchmarkJSONUnmarshalOnly(b *testing.B) {
 	}
 }
 
-// TestJSONVariantConstant pins the one JSON implementation zip.New logs.
+// TestJSONVariantConstant pins the one JSON implementation zip.New logs — as
+// the ENCODER reports it, not as a second copy of the string.
+//
+// It was a literal, and the literal is what drifted: the encoder moved to v2
+// and the test went on asserting the old name, so the suite went red over two
+// spellings of one fact rather than over any behaviour.
 func TestJSONVariantConstant(t *testing.T) {
-	if zip.JSONVariant != "encoding/json" {
-		t.Fatalf("JSONVariant = %q, want encoding/json", zip.JSONVariant)
+	if zip.JSONVariant != jsonenc.Variant {
+		t.Fatalf("JSONVariant = %q, encoder reports %q", zip.JSONVariant, jsonenc.Variant)
+	}
+	if zip.JSONVariant == "" {
+		t.Fatal("JSONVariant is empty; zip.New logs it at startup")
 	}
 }
