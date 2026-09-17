@@ -434,7 +434,7 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 	// request to read headers from. A declared header field is simply supplied
 	// as an argument here — which is why the honest answer on a transport with
 	// no request is "nothing", not a panic.
-	return c.op.invoke(ctx, jsonenc.Unmarshal, body, nil, path, nil)
+	return c.op.invoke(withOp(ctx, servedOp(c.op)), jsonenc.Unmarshal, body, nil, path, nil)
 }
 
 // Remote executes a command against a running zip service, and reads that

@@ -315,12 +315,12 @@ func TestExtract_BothTablesLiftTheSameDocs(t *testing.T) {
 // serve.
 func TestExtract_NestedGroupComposes(t *testing.T) {
 	p := load(t, "nested")
-	if len(p.Ops) != 3 {
+	if len(p.Ops) != 4 {
 		var keys []string
 		for _, o := range p.Ops {
 			keys = append(keys, o.Key())
 		}
-		t.Fatalf("ops = %d, want 3; got %v", len(p.Ops), keys)
+		t.Fatalf("ops = %d, want 4; got %v", len(p.Ops), keys)
 	}
 	chained := opByKey(t, p, "POST /v1/accounts/open")
 	if !strings.Contains(chained.Description, "account for the caller's org") {
@@ -330,5 +330,13 @@ func TestExtract_NestedGroupComposes(t *testing.T) {
 	nested := opByKey(t, p, "GET /v1/accounts/:id/ledger")
 	if !strings.Contains(nested.Description, "what the account holds") {
 		t.Errorf("nested description = %q", nested.Description)
+	}
+
+	// A handler that reads its own address through zip.OpOf is registered as a
+	// bound method, so it is documented. Handing it an address from a wrapper
+	// instead is what hid one service's whole surface from this pass.
+	watch := opByKey(t, p, "GET /v1/accounts/:id/watch")
+	if !strings.Contains(watch.Description, "activity as it happens") {
+		t.Errorf("watch description = %q; reading the address does not hide the declaration", watch.Description)
 	}
 }

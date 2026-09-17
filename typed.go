@@ -646,6 +646,11 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 	// here, so no way of reaching this op can skip a check another way makes. A
 	// nil *Out becomes a nil `any`.
 	run := func(ctx context.Context, in *In) (out any, err error) {
+		// The operation, readable by the handler through [OpOf]. Stated here
+		// because this is the one contract every projection funnels through, and
+		// only as the DECLARATION: a seam that matched an occurrence has already
+		// stated the resolved address and keeps it.
+		ctx = declaredOp(ctx, meta)
 		// TOLD ONCE, ON EVERY WAY OUT. This is the one contract every projection
 		// funnels through — REST, an MCP tools/call, the call plane, the graph and
 		// an in-process invoke — so a hook here is told about all of them, and a
@@ -772,7 +777,12 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		if op.readsHeaders {
 			header = func(k string) string { return c.Get(k) }
 		}
-		out, err := op.invoke(callerContext(c), jsonenc.Unmarshal, body, c.Queries(), path, header)
+		// THE MATCHED ROUTE IS THE ADDRESS. materialise mounts each occurrence at
+		// its absolute path, so the pattern fiber matched is where this op is
+		// served — including the prefix of whichever host composed it, which the
+		// registration-time identity cannot name.
+		served := Op{Method: meta.Method, Path: c.Route().Path, OperationID: meta.OperationID}
+		out, err := op.invoke(withOp(callerContext(c), served), jsonenc.Unmarshal, body, c.Queries(), path, header)
 		if err != nil {
 			return err
 		}

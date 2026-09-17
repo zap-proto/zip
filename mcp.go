@@ -729,7 +729,7 @@ func (a *App) tool(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 	// object, so the body IS the whole input — neither query nor path binds.
 	// The header reader comes off the ctx, so it answers honestly on a transport
 	// that has a request behind it and nothing on one that does not.
-	out, err := op.invoke(ctx, jsonenc.Unmarshal, params.Arguments, nil, nil, headerOf(ctx))
+	out, err := op.invoke(withOp(ctx, servedOp(op)), jsonenc.Unmarshal, params.Arguments, nil, nil, headerOf(ctx))
 	return a.answer(f, out, err)
 }
 

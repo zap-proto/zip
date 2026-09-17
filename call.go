@@ -155,7 +155,7 @@ func (a *App) installCallPlane() {
 		// through a text format on the way. JSON is the BOUNDARY encoding — it
 		// belongs on the REST routes a browser reaches and in the MCP envelope an
 		// agent reads, and has no place inside the binary protocol.
-		out, err := op.invoke(callerContext(fc), zapenc.Unmarshal, fc.Body(), nil, nil, func(k string) string { return fc.Get(k) })
+		out, err := op.invoke(withOp(callerContext(fc), servedOp(op)), zapenc.Unmarshal, fc.Body(), nil, nil, func(k string) string { return fc.Get(k) })
 		if err != nil {
 			return sendCallError(fc, err)
 		}

@@ -50,6 +50,18 @@ func (a *API) Balance(ctx context.Context, in *struct{}) (*Ledger, error) {
 	return &Ledger{}, nil
 }
 
+// Watch streams the account's activity as it happens.
+//
+// It reads the address it was asked at rather than being handed one by a
+// wrapper, which is what keeps the declaration below a bound method this pass
+// can see.
+func (a *API) Watch(ctx context.Context, in *struct{}) (*Ledger, error) {
+	if op, ok := zip.OpOf(ctx); ok {
+		_ = op.Path
+	}
+	return &Ledger{}, nil
+}
+
 // Register declares the accounts surface.
 func Register(app *zip.App, api *API) {
 	accounts := app.Group("/v1/accounts").Tag("accounts")
@@ -61,4 +73,9 @@ func Register(app *zip.App, api *API) {
 
 	// A nested group composes its prefix.
 	accounts.Group("/:id").Get("/ledger", api.Balance)
+
+	// A handler that reads its own address is still a bound method here, so it
+	// is documented like any other. Composing the address in a helper instead is
+	// what made a whole service's operations invisible.
+	accounts.Get("/:id/watch", api.Watch)
 }
