@@ -261,3 +261,48 @@ func TestExtract_MalformedExampleIsAnError(t *testing.T) {
 		t.Errorf("error = %v, want it to name the Example", err)
 	}
 }
+
+// TestExtract_ScopeRegistrationsLiftDocs asserts that concrete scope method registrations
+// (e.g. scope.Post) lift the exact same doc comments and field descriptions as package-level
+// registrations (zip.Post).
+func TestExtract_ScopeRegistrationsLiftDocs(t *testing.T) {
+	p := load(t, "scopedoc")
+	if len(p.Ops) != 2 {
+		t.Fatalf("ops = %d, want 2", len(p.Ops))
+	}
+
+	legacy := opByKey(t, p, "POST /v1/legacy/items")
+	if !strings.HasPrefix(legacy.Description, "Creates a new catalog item via legacy registrar") {
+		t.Errorf("legacy description = %q", legacy.Description)
+	}
+	if legacy.Example != `{"name":"Widget","price":999}` {
+		t.Errorf("legacy example = %s", legacy.Example)
+	}
+	if legacy.Response != `{"id":"itm_1","ok":true}` {
+		t.Errorf("legacy response = %s", legacy.Response)
+	}
+
+	scoped := opByKey(t, p, "POST /v1/items/")
+	if !strings.HasPrefix(scoped.Description, "Creates a new catalog item") {
+		t.Errorf("scoped description = %q", scoped.Description)
+	}
+	if scoped.Example != `{"name":"Widget","price":999}` {
+		t.Errorf("scoped example = %s", scoped.Example)
+	}
+	if scoped.Response != `{"id":"itm_1","ok":true}` {
+		t.Errorf("scoped response = %s", scoped.Response)
+	}
+
+	for _, op := range []Op{legacy, scoped} {
+		for key, want := range map[string]string{
+			"ItemIn.name":  "Name of the item.",
+			"ItemIn.price": "Price in cents.",
+			"ItemOut.id":   "ID of the created item.",
+			"ItemOut.ok":   "OK indicates status.",
+		} {
+			if got := op.Fields[key]; got != want {
+				t.Errorf("%s: Fields[%q] = %q, want %q", op.Key(), key, got, want)
+			}
+		}
+	}
+}

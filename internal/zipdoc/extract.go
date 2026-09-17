@@ -171,8 +171,9 @@ func (e *extractor) pkg(p *packages.Package) ([]Op, error) {
 	return ops, err
 }
 
-// call reads one zip.Get[In,Out](app, path, handler) — or Post/Put/Patch/Delete
-// — into an Op. Anything that is not such a call is reported as not found.
+// call reads one zip.Get[In,Out](app, path, handler) or scope.Get(path, handler)
+// — or Post/Put/Patch/Delete siblings — into an Op. Anything that is not such a call
+// is reported as not found.
 func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[types.Object]string) (Op, bool, error) {
 	id := calleeIdent(call.Fun)
 	if id == nil {
@@ -183,36 +184,86 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 		return Op{}, false, nil
 	}
 	method, ok := verbs[fn.Name()]
-	if !ok || len(call.Args) < 3 {
-		return Op{}, false, nil
-	}
-	// The instantiation, not the syntax: zip.Post(app, p, validate) infers In and
-	// Out from the handler and writes no type arguments at all, and a registration
-	// this pass cannot see is a hole in the spec.
-	args := info.Instances[id].TypeArgs
-	if args == nil || args.Len() != 2 {
+	if !ok {
 		return Op{}, false, nil
 	}
 
-	lit := info.Types[call.Args[1]].Value
+	sig, _ := fn.Type().(*types.Signature)
+	var targetExpr ast.Expr
+	var pathArg ast.Expr
+	var handlerArg ast.Expr
+
+	if sig != nil && sig.Recv() != nil {
+		// Method call on a receiver, e.g. scope.Post(path, handler, opts...)
+		if len(call.Args) < 2 {
+			return Op{}, false, nil
+		}
+		fun := ast.Unparen(call.Fun)
+		switch ef := fun.(type) {
+		case *ast.IndexExpr:
+			fun = ast.Unparen(ef.X)
+		case *ast.IndexListExpr:
+			fun = ast.Unparen(ef.X)
+		}
+		sel, ok := fun.(*ast.SelectorExpr)
+		if !ok {
+			return Op{}, false, nil
+		}
+		targetExpr = sel.X
+		pathArg = call.Args[0]
+		handlerArg = call.Args[1]
+	} else {
+		// Package-level function call: zip.Post(app, path, handler, opts...)
+		if len(call.Args) < 3 {
+			return Op{}, false, nil
+		}
+		targetExpr = call.Args[0]
+		pathArg = call.Args[1]
+		handlerArg = call.Args[2]
+	}
+
+	// Resolve In and Out types: from type arguments on call if present,
+	// or inferred from handler signature.
+	var inType, outType types.Type
+	if inst, ok := info.Instances[id]; ok && inst.TypeArgs != nil && inst.TypeArgs.Len() == 2 {
+		inType = inst.TypeArgs.At(0)
+		outType = inst.TypeArgs.At(1)
+	} else if hType := info.TypeOf(handlerArg); hType != nil {
+		if hSig, ok := hType.Underlying().(*types.Signature); ok && hSig.Params().Len() >= 2 && hSig.Results().Len() >= 1 {
+			inParam := hSig.Params().At(1).Type()
+			if ptr, ok := inParam.(*types.Pointer); ok {
+				inType = ptr.Elem()
+			} else {
+				inType = inParam
+			}
+			outRes := hSig.Results().At(0).Type()
+			if ptr, ok := outRes.(*types.Pointer); ok {
+				outType = ptr.Elem()
+			} else {
+				outType = outRes
+			}
+		}
+	}
+	if inType == nil || outType == nil {
+		return Op{}, false, nil
+	}
+
+	lit := info.Types[pathArg].Value
 	if lit == nil || lit.Kind() != constant.String {
-		return Op{}, false, fmt.Errorf("%s: zip.%s route path is not a constant string, so the operation has no identity to document",
-			e.load.Position(call.Args[1].Pos()), fn.Name())
+		return Op{}, false, fmt.Errorf("%s: %s route path is not a constant string, so the operation has no identity to document",
+			e.load.Position(pathArg.Pos()), fn.Name())
 	}
 	path := constant.StringVal(lit)
 
 	// The op's identity is the WHOLE path — a group's prefix composed with the
-	// leaf, exactly as zip composes it at registration. Filing prose under the
-	// leaf alone is how a doc comment on a group-declared op vanished from both
-	// the document and the MCP tool list: docFor looks up the composed path and
-	// never matched.
-	prefix, perr := routerPrefix(info, prefixes, call.Args[0])
+	// leaf, exactly as zip composes it at registration.
+	prefix, perr := routerPrefix(info, prefixes, targetExpr)
 	if perr != nil {
-		return Op{}, false, fmt.Errorf("%s: zip.%s: %w", e.load.Position(call.Args[0].Pos()), fn.Name(), perr)
+		return Op{}, false, fmt.Errorf("%s: %s: %w", e.load.Position(targetExpr.Pos()), fn.Name(), perr)
 	}
 	path = joinPath(prefix, path)
 
-	doc := e.handlerDoc(info, call, call.Args[2])
+	doc := e.handlerDoc(info, call, handlerArg)
 	prose, example, response, err := splitDoc(doc)
 	if err != nil {
 		return Op{}, false, fmt.Errorf("%s: %s %s: %w", e.load.Position(call.Pos()), method, path, err)
@@ -226,8 +277,8 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 		Fields:      map[string]string{},
 	}
 	seen := map[*types.Named]bool{}
-	e.fields(args.At(0), op.Fields, seen)
-	e.fields(args.At(1), op.Fields, seen)
+	e.fields(inType, op.Fields, seen)
+	e.fields(outType, op.Fields, seen)
 	return op, true, nil
 }
 
@@ -367,12 +418,12 @@ func (e *extractor) alias(info *types.Info, call *ast.CallExpr, prefixes map[typ
 }
 
 // isZipRouter reports whether t is a route table this pass may read: *zip.App,
-// or any type zip.Router names (a group, an app, whatever a host hands down).
+// *zip.Scope, or any type zip.Router names (a group, an app, whatever a host hands down).
 func isZipRouter(t types.Type) bool {
 	if t == nil {
 		return false
 	}
-	if isZipApp(t) {
+	if isZipApp(t) || isZipScope(t) {
 		return true
 	}
 	named, ok := t.(*types.Named)
@@ -413,30 +464,55 @@ func groupPrefixes(info *types.Info, f *ast.File) map[types.Object]string {
 	return out
 }
 
-// groupCallPrefix reads `<router>.Group("<literal>")` into the full prefix it
+// groupCallPrefix reads `<router>.Group("<literal>")`, `<router>.Scope("<literal>")`,
+// or fluent chains like `<router>.Group(...).Use(...).Tag(...)` into the full prefix it
 // yields, composing with the receiver's own prefix when the receiver is a group.
 func groupCallPrefix(info *types.Info, known map[types.Object]string, e ast.Expr) (string, bool) {
 	call, ok := ast.Unparen(e).(*ast.CallExpr)
-	if !ok || len(call.Args) < 1 {
+	if !ok {
 		return "", false
 	}
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Group" {
+	if !ok {
 		return "", false
 	}
-	lit := info.Types[call.Args[0]].Value
-	if lit == nil || lit.Kind() != constant.String {
-		return "", false
+
+	// Unwrap fluent chaining wrappers:
+	switch sel.Sel.Name {
+	case "Use", "Tag", "WithTags", "Name", "With":
+		return groupCallPrefix(info, known, sel.X)
 	}
-	outer := ""
-	if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
-		if obj := info.Uses[id]; obj != nil {
-			outer = known[obj]
+
+	switch sel.Sel.Name {
+	case "Group", "GroupScope", "Scope":
+		if len(call.Args) >= 1 {
+			lit := info.Types[call.Args[0]].Value
+			if lit != nil && lit.Kind() == constant.String {
+				outer := ""
+				if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
+					if obj := info.Uses[id]; obj != nil {
+						outer = known[obj]
+					}
+				} else if p, ok := groupCallPrefix(info, known, sel.X); ok {
+					outer = p
+				}
+				return joinPath(outer, constant.StringVal(lit)), true
+			}
 		}
-	} else if p, ok := groupCallPrefix(info, known, sel.X); ok {
-		outer = p
+		// If Scope() was called without arguments, it inherits the receiver's prefix
+		if sel.Sel.Name == "Scope" && len(call.Args) == 0 {
+			outer := ""
+			if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
+				if obj := info.Uses[id]; obj != nil {
+					outer = known[obj]
+				}
+			} else if p, ok := groupCallPrefix(info, known, sel.X); ok {
+				outer = p
+			}
+			return outer, true
+		}
 	}
-	return joinPath(outer, constant.StringVal(lit)), true
+	return "", false
 }
 
 // routerPrefix is the prefix an op registered on this router sits under. An *App
@@ -458,6 +534,9 @@ func routerPrefix(info *types.Info, prefixes map[types.Object]string, arg ast.Ex
 	if p, ok := groupCallPrefix(info, prefixes, arg); ok {
 		return p, nil
 	}
+	if isZipScope(info.Types[arg].Type) {
+		return "", nil
+	}
 	return "", fmt.Errorf("cannot resolve the path prefix of the router this op registers on, so its doc comment " +
 		"would be filed under the wrong path and silently dropped from the document and the MCP tool. " +
 		"Register on the *zip.App, or on a group assigned in this file as `g := <router>.Group(\"/prefix\")`")
@@ -474,6 +553,22 @@ func isZipApp(t types.Type) bool {
 		return false
 	}
 	return named.Obj().Pkg().Path() == ZipPkg && named.Obj().Name() == "App"
+}
+
+// isZipScope reports whether t is *zip.Scope or *zip.Group.
+func isZipScope(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == ZipPkg && (named.Obj().Name() == "Scope" || named.Obj().Name() == "Group")
 }
 
 // joinPath composes a prefix with a leaf the way the router does, so the key this
