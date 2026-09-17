@@ -95,7 +95,7 @@ func TestBreaker_Middleware_HappyPath(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	b := middleware.NewBreaker(middleware.BreakerConfig{FailureThreshold: 3})
 	app.Use(b.Middleware())
-	app.Get("/ok", func(c *zip.Ctx) error {
+	app.Raw("GET", "/ok", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]bool{"ok": true})
 	})
 	req, _ := http.NewRequest("GET", "/ok", nil)
@@ -117,7 +117,7 @@ func TestBreaker_Middleware_ShortCircuits(t *testing.T) {
 		OpenWindow:       time.Hour, // effectively never re-opens for the test
 	})
 	app.Use(b.Middleware())
-	app.Get("/fail", func(c *zip.Ctx) error {
+	app.Raw("GET", "/fail", func(c *zip.Ctx) error {
 		return zip.Errorf(500, "broken")
 	})
 	for i := 0; i < 2; i++ {

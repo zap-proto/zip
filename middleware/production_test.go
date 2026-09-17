@@ -36,8 +36,8 @@ func brandForHost(host string) string {
 func prodApp(cfg middleware.ProductionHeadersConfig) *zip.App {
 	app := zip.New(zip.Config{DisableStartupMessage: true, ServerHeader: "zip"})
 	app.Use(middleware.RequestID(), middleware.ProductionHeaders(cfg))
-	app.Get("/ok", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
-	app.Get("/boom", func(c *zip.Ctx) error { return zip.ErrForbidden("nope") })
+	app.Raw("GET", "/ok", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	app.Raw("GET", "/boom", func(c *zip.Ctx) error { return zip.ErrForbidden("nope") })
 	return app
 }
 

@@ -78,15 +78,15 @@ func register(app *zip.App, method, path string) {
 	fn := func(_ context.Context, _ *listAppsIn) (*listAppsOut, error) { return &listAppsOut{}, nil }
 	switch method {
 	case "GET":
-		zip.Get(app, path, fn)
+		app.Get(path, fn)
 	case "POST":
-		zip.Post(app, path, fn)
+		app.Post(path, fn)
 	case "PUT":
-		zip.Put(app, path, fn)
+		app.Put(path, fn)
 	case "PATCH":
-		zip.Patch(app, path, fn)
+		app.Patch(path, fn)
 	case "DELETE":
-		zip.Delete(app, path, fn)
+		app.Delete(path, fn)
 	}
 }
 
@@ -179,7 +179,7 @@ func deployApp(t *testing.T) *zip.App {
 		Example:  json.RawMessage(`{"app":"acme","env":"main","wait":true}`),
 		Response: json.RawMessage(`{"app":"acme","env":"main","restarted":true}`),
 	})
-	zip.Post(app, "/v1/paas/apps/:app/deploy", func(_ context.Context, in *deployIn) (*deployOut, error) {
+	app.Post("/v1/paas/apps/:app/deploy", func(_ context.Context, in *deployIn) (*deployOut, error) {
 		return &deployOut{App: in.App, Env: in.Env, Restarted: in.Wait}, nil
 	})
 
@@ -187,7 +187,7 @@ func deployApp(t *testing.T) *zip.App {
 		Description: "ListApps returns the fleet board.",
 		Fields:      map[string]string{"listAppsIn.env": "Filter by env."},
 	})
-	zip.Get(app, "/v1/paas/apps", func(_ context.Context, in *listAppsIn) (*listAppsOut, error) {
+	app.Get("/v1/paas/apps", func(_ context.Context, in *listAppsIn) (*listAppsOut, error) {
 		return &listAppsOut{Apps: []string{"acme:" + in.Env}}, nil
 	})
 	return app
@@ -266,10 +266,9 @@ func TestCLI_ANewRouteIsANewCommand(t *testing.T) {
 		Fields:      map[string]string{"refundIn.cents": "Amount to refund, in cents."},
 		Example:     json.RawMessage(`{"invoice":"inv_1","cents":1200}`),
 	})
-	zip.Post(app, "/v1/billing/invoices/:invoice/refund",
-		func(_ context.Context, in *refundIn) (*refundOut, error) {
-			return &refundOut{Refunded: in.Cents}, nil
-		})
+	app.Post("/v1/billing/invoices/:invoice/refund", func(_ context.Context, in *refundIn) (*refundOut, error) {
+		return &refundOut{Refunded: in.Cents}, nil
+	})
 
 	cmds := app.Commands()
 	if len(cmds) != before+1 {
@@ -331,8 +330,8 @@ func TestCLI_OperationIDIsTheOneIdentity(t *testing.T) {
 	fn := func(_ context.Context, in *deployIn) (*deployOut, error) {
 		return &deployOut{App: in.App, Env: in.Env}, nil
 	}
-	zip.Post(app, "/v1/billing/charge", fn, zip.WithOperationID("billing_refund"))
-	zip.Get(app, "/v1/billing/invoices", fn) // no explicit id: the default token
+	app.Post("/v1/billing/charge", fn, zip.WithOperationID("billing_refund"))
+	app.Get("/v1/billing/invoices", fn) // no explicit id: the default token
 
 	// Every projection, one token per op.
 	byOp := map[string]zip.Command{}
@@ -424,7 +423,7 @@ type everyKind struct {
 // reflect kinds that has to be kept equal to the first by hand.
 func TestCLI_FlagKindIsTheSchemaKind(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "kinds", DisableStartupMessage: true})
-	zip.Post(app, "/v1/kinds/things", func(_ context.Context, in *everyKind) (*everyKind, error) {
+	app.Post("/v1/kinds/things", func(_ context.Context, in *everyKind) (*everyKind, error) {
 		return in, nil
 	})
 	spec, err := json.Marshal(app.OpenAPISpec())
@@ -490,7 +489,7 @@ func TestCLI_SpecAndRegistryAgree(t *testing.T) {
 		// op's example out of its parameters, so what round-trips is the value.
 		Example: json.RawMessage(`{"before":"2026-01-01","app":"acme"}`),
 	})
-	zip.Delete(app, "/v1/paas/apps/:app", func(_ context.Context, in *purgeIn) (*deployOut, error) {
+	app.Delete("/v1/paas/apps/:app", func(_ context.Context, in *purgeIn) (*deployOut, error) {
 		return &deployOut{App: in.App}, nil
 	})
 	spec, err := json.Marshal(app.OpenAPISpec())

@@ -24,13 +24,13 @@ import (
 // verbs, two lifetimes, neither silent.
 func TestPhantomComposition_PostSealUseAlwaysPanics(t *testing.T) {
 	host := quiet("host")
-	host.Get("/live", func(c *Ctx) error { return c.String(200, "live") })
+	host.Raw("GET", "/live", func(c *Ctx) error { return c.String(200, "live") })
 	if err := build(host); err != nil {
 		t.Fatalf("build: %v", err)
 	}
 
 	ghost := quiet("ghost")
-	ghost.Get("/phantom", func(c *Ctx) error { return c.String(200, "phantom") })
+	ghost.Raw("GET", "/phantom", func(c *Ctx) error { return c.String(200, "phantom") })
 
 	func() {
 		defer func() {
@@ -51,7 +51,7 @@ func TestPhantomComposition_PostSealUseAlwaysPanics(t *testing.T) {
 	// The refused Use left NOTHING behind: a later, unrelated Include must not
 	// suddenly materialise the phantom route.
 	later := quiet("later")
-	later.Get("/later", func(c *Ctx) error { return c.String(200, "later") })
+	later.Raw("GET", "/later", func(c *Ctx) error { return c.String(200, "later") })
 	if err := hostOf(t, host).Include(later); err != nil {
 		t.Fatalf("Include: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestPhantomComposition_PostSealUseAlwaysPanics(t *testing.T) {
 // a Use racing a transaction must panic, not slip through the window.
 func TestPhantomComposition_UseRacingATransactionStillPanics(t *testing.T) {
 	host := quiet("host")
-	host.Get("/live", func(c *Ctx) error { return c.String(200, "live") })
+	host.Raw("GET", "/live", func(c *Ctx) error { return c.String(200, "live") })
 	if err := build(host); err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestPhantomComposition_UseRacingATransactionStillPanics(t *testing.T) {
 				}
 			}()
 			g := quiet("g")
-			g.Get("/g", func(c *Ctx) error { return nil })
+			g.Raw("GET", "/g", func(c *Ctx) error { return nil })
 			host.Use(g) // must panic, every time
 			mu.Lock()
 			slipped++
@@ -97,7 +97,7 @@ func TestPhantomComposition_UseRacingATransactionStillPanics(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			p := quiet("p")
-			p.Get("/p", func(c *Ctx) error { return nil })
+			p.Raw("GET", "/p", func(c *Ctx) error { return nil })
 			_ = hostOf(t, host).Include(p) // may fail on a collision; either is fine
 		}()
 	}

@@ -42,9 +42,9 @@ import (
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
-// JSONVariant names the JSON implementation on the edge: stdlib
-// encoding/json, whatever the toolchain. Per HIP-0106 the wire stack is
-// "JSON only at edge, ZAP between services".
+// JSONVariant names the JSON implementation on the edge, which zip.New logs
+// once at startup. Per HIP-0106 the wire stack is "JSON only at edge, ZAP
+// between services", so this is the one place the edge's encoder is stated.
 const JSONVariant = jsonenc.Variant
 
 // Handler is zip's request handler signature. Returning an error causes
@@ -440,44 +440,71 @@ func (a *App) ShutdownWithContext(ctx context.Context) error {
 	return a.shutdown(ctx)
 }
 
-// With returns a Router whose subsequent leaf registrations (Get/Post/…/All)
+// With returns a group whose subsequent leaf registrations
 // have mw wrapped around the handler at registration time — pure
 // composition (RateLimit(CSRF(handler))). It does NOT touch the global Use
 // stack and does NOT route through c.Next(); it is the per-route counterpart to
-// Use. Routes registered on the returned Router still obey specificity
+// Use. Routes registered on the returned group still obey specificity
 // precedence exactly like any other route.
 //
 //	app.With(RateLimit, CSRF).Post("/v1/keys", mintKey)
-func (a *App) With(mw ...Middleware) Router {
-	return &wrapRouter{inner: a, wrap: Chain(mw...)}
+func (a *App) With(mw ...Middleware) *Group {
+	return (&Group{on: a.group(here(1), "")}).chain(mw)
 }
 
-// Get / Post / Put / Patch / Delete / Head / Options / All register routes.
-// Chains are in wrapping order: middleware first, the final handler last.
+// Raw registers a route that is NOT a typed operation — see [Group.Raw] for
+// what that means and why it is the longer spelling. Chains are in wrapping
+// order: middleware first, the final handler last.
 //
-// These still take ...Handler and always will. A bare closure written inline is
-// a *Handler by conversion, so nothing about route registration changes when
-// composition widens — [zip.H] is needed only at [App.Use].
-func (a *App) Get(path string, handlers ...Handler) Router  { return a.method("GET", path, handlers) }
-func (a *App) Post(path string, handlers ...Handler) Router { return a.method("POST", path, handlers) }
-func (a *App) Put(path string, handlers ...Handler) Router  { return a.method("PUT", path, handlers) }
-func (a *App) Patch(path string, handlers ...Handler) Router {
-	return a.method("PATCH", path, handlers)
-}
-func (a *App) Delete(path string, handlers ...Handler) Router {
-	return a.method("DELETE", path, handlers)
-}
-func (a *App) Head(path string, handlers ...Handler) Router { return a.method("HEAD", path, handlers) }
-func (a *App) Options(path string, handlers ...Handler) Router {
-	return a.method("OPTIONS", path, handlers)
+// The method is a string because the verb NAMES belong to the typed operations:
+//
+//	app.Raw("GET", "/healthz", ok)
+//
+// [MethodAll] is the one that answers a path whatever the verb.
+func (a *App) Raw(method, path string, handlers ...Handler) *App {
+	a.raw(here(1), method, path, handlers)
+	return a
 }
 
-// All registers a handler for any HTTP method.
-func (a *App) All(path string, handlers ...Handler) Router {
-	return a.method(methodAll, path, handlers)
+// Get declares a GET operation at the root.
+func (a *App) Get[In, Out any](path string, fn TypedHandler[In, Out], opts ...OpOption) *Operation[In, Out] {
+	return &Operation[In, Out]{op: registerTyped(0, a, "GET", path, fn, opts...)}
 }
 
-func (a *App) method(method, path string, handlers []Handler) Router {
+// Post declares a POST operation at the root.
+func (a *App) Post[In, Out any](path string, fn TypedHandler[In, Out], opts ...OpOption) *Operation[In, Out] {
+	return &Operation[In, Out]{op: registerTyped(0, a, "POST", path, fn, opts...)}
+}
+
+// Put declares a PUT operation at the root.
+func (a *App) Put[In, Out any](path string, fn TypedHandler[In, Out], opts ...OpOption) *Operation[In, Out] {
+	return &Operation[In, Out]{op: registerTyped(0, a, "PUT", path, fn, opts...)}
+}
+
+// Patch declares a PATCH operation at the root.
+func (a *App) Patch[In, Out any](path string, fn TypedHandler[In, Out], opts ...OpOption) *Operation[In, Out] {
+	return &Operation[In, Out]{op: registerTyped(0, a, "PATCH", path, fn, opts...)}
+}
+
+// Delete declares a DELETE operation at the root.
+func (a *App) Delete[In, Out any](path string, fn TypedHandler[In, Out], opts ...OpOption) *Operation[In, Out] {
+	return &Operation[In, Out]{op: registerTyped(0, a, "DELETE", path, fn, opts...)}
+}
+
+// Alias is [Group.Alias] at the root.
+func (a *App) Alias(method, canonical, legacy string, h Handler) *App {
+	a.Raw(method, canonical, h)
+	a.Raw(method, legacy, h)
+	return a
+}
+
+// OAuth is [Group.OAuth] at the root.
+func (a *App) OAuth() *Group { return a.Group("").OAuth() }
+
+// Undeclared is [Group.Undeclared] at the root.
+func (a *App) Undeclared() *Group { return a.Group("").Undeclared() }
+
+func (a *App) raw(site callsite, method, path string, handlers []Handler) {
 	// A scoped [App.With] lives on the App itself, so a leaf registered on this
 	// scope at any time is wrapped — including one registered after the scope was
 	// handed out. A decorator could only wrap what passed through it.
@@ -498,15 +525,14 @@ func (a *App) method(method, path string, handlers []Handler) Router {
 	} else {
 		handlers = append([]Handler(nil), handlers...)
 	}
-	a.addRoute(here(2), route{method: method, path: normPath(path), chain: handlers})
-	return a
+	a.addRoute(site, route{method: method, path: normPath(path), chain: handlers})
 }
 
-// OpScope makes the App itself a place a typed op can be declared. The prefix
+// opScope makes the App itself a place a typed op lands. The prefix
 // is not reported here: a group's prefix is a property of WHERE the group is
 // included, and one definition may be included in two places, so the absolute
 // path is computed by the walk and never baked into the op.
-func (a *App) OpScope() OpScope { return OpScope{App: a, Middleware: a.wrap} }
+func (a *App) opScope() opScope { return opScope{App: a, Middleware: a.wrap} }
 
 // errors.As helper for HTTPError unwrapping in tests / external callers.
 func asHTTPError(err error) (*HTTPError, bool) {

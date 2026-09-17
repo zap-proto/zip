@@ -53,7 +53,7 @@ func respOf(t *testing.T, a *zip.App, path, method string) (string, map[string]a
 // The declared status reaches the WIRE.
 func TestWithStatus_ReachesTheWire(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
-	zip.Post(a, "/v1/st/things", mk, zip.WithStatus(201))
+	a.Post("/v1/st/things", mk, zip.WithStatus(201))
 
 	code, body := call2(t, a, "POST", "/v1/st/things", `{"name":"x"}`)
 	if code != 201 {
@@ -69,7 +69,7 @@ func TestWithStatus_ReachesTheWire(t *testing.T) {
 // document that says 200 treats a 201 as unexpected.
 func TestWithStatus_ReachesTheDocument(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
-	zip.Post(a, "/v1/st/things", mk, zip.WithStatus(201))
+	a.Post("/v1/st/things", mk, zip.WithStatus(201))
 
 	code, body := respOf(t, a, "/v1/st/things", "post")
 	if code != "201" {
@@ -90,7 +90,7 @@ func TestWithStatus_ReachesTheDocument(t *testing.T) {
 // declaration is what the caller was promised.
 func TestWithStatus_NilOutKeepsTheDeclaredStatus(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
-	zip.Post(a, "/v1/st/jobs", nilOut, zip.WithStatus(202))
+	a.Post("/v1/st/jobs", nilOut, zip.WithStatus(202))
 
 	if code, body := call2(t, a, "POST", "/v1/st/jobs", `{"name":"x"}`); code != 202 || strings.TrimSpace(body) != "" {
 		t.Fatalf("status = %d body = %q, want 202 with no body", code, body)
@@ -104,8 +104,8 @@ func TestWithStatus_NilOutKeepsTheDeclaredStatus(t *testing.T) {
 // defaults, and a document that never asked for this does not churn.
 func TestWithStatus_DefaultsAreUnchanged(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
-	zip.Post(a, "/v1/st/plain", mk)
-	zip.Post(a, "/v1/st/void", nilOut)
+	a.Post("/v1/st/plain", mk)
+	a.Post("/v1/st/void", nilOut)
 
 	if code, _ := call2(t, a, "POST", "/v1/st/plain", `{"name":"x"}`); code != 200 {
 		t.Errorf("status = %d, want the 200 default", code)
@@ -161,7 +161,7 @@ func TestWithStatus_AcceptsADeclaredNonSuccessCode(t *testing.T) {
 // untouched: an MCP tools/call still answers with the op's result.
 func TestWithStatus_MCPIsUnaffected(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
-	zip.Post(a, "/v1/st/things", mk, zip.WithStatus(201), zip.WithOperationID("st_make"))
+	a.Post("/v1/st/things", mk, zip.WithStatus(201), zip.WithOperationID("st_make"))
 	if err := a.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}

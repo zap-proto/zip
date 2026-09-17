@@ -25,7 +25,7 @@ type linkOut struct {
 func linked(t *testing.T, path string) *http.Response {
 	t.Helper()
 	a := quiet("linked")
-	Get(a, "/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
+	a.Get("/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
 		return &linkOut{Name: "thing"}, nil
 	})
 	a.installOpenAPIRoutes()
@@ -60,7 +60,7 @@ func rel(resp *http.Response, name string) string {
 // nothing, and reports the API as broken rather than as undescribed.
 func TestLink_NamesOnlyAddressesThisAppServes(t *testing.T) {
 	a := quiet("served")
-	Get(a, "/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
+	a.Get("/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
 		return &linkOut{Name: "thing"}, nil
 	})
 	a.installOpenAPIRoutes()
@@ -109,7 +109,7 @@ func TestLink_SelfIsTheAddressReached(t *testing.T) {
 func TestLink_AnAppWithNoDocumentStillNamesItself(t *testing.T) {
 	a := New(Config{AppName: "silent", DisableStartupMessage: true,
 		OpenAPI: OpenAPIConfig{Disabled: true}})
-	Get(a, "/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
+	a.Get("/thing", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
 		return &linkOut{Name: "thing"}, nil
 	})
 	a.installOpenAPIRoutes() // no-op when Disabled
@@ -137,7 +137,7 @@ func TestLink_AnAppWithNoDocumentStillNamesItself(t *testing.T) {
 // named nothing. This is the case that was silently uncovered.
 func TestLink_PlainRoutesAreNamedToo(t *testing.T) {
 	a := New(Config{AppName: "plain", DisableStartupMessage: true})
-	a.Get("/plain", func(c *Ctx) error { return c.String(200, "ok") })
+	a.Raw("GET", "/plain", func(c *Ctx) error { return c.String(200, "ok") })
 	a.installOpenAPIRoutes() // returns early: nothing typed to describe
 	if err := a.Build(); err != nil {
 		t.Fatalf("build: %v", err)
@@ -163,7 +163,7 @@ func TestLink_AHandlersOwnLinksSurvive(t *testing.T) {
 		c.fc.Response().Header.Add("Link", `</page?after=2>; rel="next"`)
 		return c.Continue()
 	}))
-	Get(a, "/page", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
+	a.Get("/page", func(ctx context.Context, _ *linkIn) (*linkOut, error) {
 		return &linkOut{Name: "page"}, nil
 	})
 	a.installOpenAPIRoutes()
@@ -192,12 +192,12 @@ func TestLink_AHandlersOwnLinksSurvive(t *testing.T) {
 func TestSelfLinkIsNotWrittenTwice(t *testing.T) {
 	a := New(Config{AppName: "hop", DisableStartupMessage: true})
 	// A handler standing in for the far end of a hop.
-	a.Get("/v1/relayed", func(c *Ctx) error {
+	a.Raw("GET", "/v1/relayed", func(c *Ctx) error {
 		c.Fiber().Response().Header.Add("Link", `</v1/relayed>; rel="self"`)
 		c.Fiber().Response().Header.Add("Link", `</.well-known/openapi.json>; rel="service-desc"`)
 		return c.JSON(200, map[string]bool{"ok": true})
 	})
-	Get(a, "/v1/own", func(_ context.Context, _ *struct{}) (*struct {
+	a.Get("/v1/own", func(_ context.Context, _ *struct{}) (*struct {
 		OK bool `json:"ok"`
 	}, error) {
 		return &struct {

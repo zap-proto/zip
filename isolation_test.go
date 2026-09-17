@@ -26,11 +26,11 @@ func TestTwoAppsNoStateBleed(t *testing.T) {
 	b := zip.New(zip.Config{AppName: "b", DisableStartupMessage: true})
 
 	// Route registered on A only.
-	a.Get("/from-a", func(c *zip.Ctx) error {
+	a.Raw("GET", "/from-a", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"from": "a"})
 	})
 	// Route registered on B only.
-	b.Get("/from-b", func(c *zip.Ctx) error {
+	b.Raw("GET", "/from-b", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"from": "b"})
 	})
 
@@ -95,7 +95,7 @@ func TestTwoAppsNoStateBleed(t *testing.T) {
 func TestTwoAppsIndependentShutdown(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "a", DisableStartupMessage: true})
 	b := zip.New(zip.Config{AppName: "b", DisableStartupMessage: true})
-	b.Get("/still-up", func(c *zip.Ctx) error { return c.JSON(200, map[string]bool{"ok": true}) })
+	b.Raw("GET", "/still-up", func(c *zip.Ctx) error { return c.JSON(200, map[string]bool{"ok": true}) })
 
 	if err := a.Shutdown(); err != nil {
 		t.Fatalf("a.Shutdown: %v", err)

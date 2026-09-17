@@ -21,15 +21,15 @@ type declOut struct {
 func declApp(t *testing.T) *zip.App {
 	t.Helper()
 	app := zip.New(zip.Config{AppName: "demo", DisableStartupMessage: true})
-	zip.Post(app, "/v1/demo/quote", func(ctx context.Context, in *declIn) (*declOut, error) {
+	app.Post("/v1/demo/quote", func(ctx context.Context, in *declIn) (*declOut, error) {
 		return &declOut{Total: "1.00"}, nil
 	}, zip.WithOperationID("demo_quote"))
-	zip.Get(app, "/v1/demo/quotes/:id", func(ctx context.Context, in *declIn) (*declOut, error) {
+	app.Get("/v1/demo/quotes/:id", func(ctx context.Context, in *declIn) (*declOut, error) {
 		return &declOut{Total: "2.00"}, nil
 	}, zip.WithOperationID("demo_quote_read"))
 	// An UNTYPED route: in no document, no MCP tool, no op — and still declared,
 	// because a route a host does not mount is a 405 on live traffic.
-	app.Post("/v1/demo/ingest", func(c *zip.Ctx) error { return c.JSON(204, nil) })
+	app.Raw("POST", "/v1/demo/ingest", func(c *zip.Ctx) error { return c.JSON(204, nil) })
 	return app
 }
 
@@ -78,7 +78,7 @@ func TestDeclarationCarriesEager(t *testing.T) {
 		t.Fatal("a request-driven app declared itself eager")
 	}
 	app := zip.New(zip.Config{AppName: "pubsub", Eager: true, DisableStartupMessage: true})
-	app.Get("/v1/pubsub/topics", func(c *zip.Ctx) error { return nil })
+	app.Raw("GET", "/v1/pubsub/topics", func(c *zip.Ctx) error { return nil })
 	if !app.Declaration().Eager {
 		t.Fatal("an app that owns a consumer declared itself lazy")
 	}
@@ -157,8 +157,8 @@ func containsStr(hay, needle string) bool {
 // exists to avoid.
 func TestUndeclaredServesAndIsNotDeclared(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "u", DisableStartupMessage: true})
-	a.Get("/v1/kept", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"a": "b"}) })
-	zip.Undeclared(a).All("/v1/retired", func(c *zip.Ctx) error {
+	a.Raw("GET", "/v1/kept", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"a": "b"}) })
+	a.Undeclared().Raw(zip.MethodAll, "/v1/retired", func(c *zip.Ctx) error {
 		return c.JSON(410, map[string]string{"successor": "/v1/kept"})
 	})
 	if err := a.Build(); err != nil {

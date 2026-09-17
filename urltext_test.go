@@ -64,8 +64,8 @@ func echoText(_ context.Context, in *textIn) (*textOut, error) {
 func rawText(t *testing.T, path string) string {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Get(a, "/v1/t/thing", echoText)
-	zip.Get(a, "/v1/t/thing/:id", echoText)
+	a.Get("/v1/t/thing", echoText)
+	a.Get("/v1/t/thing/:id", echoText)
 
 	res, err := a.Fiber().Test(httpGet(t, path))
 	if err != nil {
@@ -165,7 +165,7 @@ func TestAWrittenFormOnANumericKindIsRead(t *testing.T) {
 	type countIn struct {
 		N count `json:"n"`
 	}
-	zip.Get(a, "/v1/t/count", func(_ context.Context, in *countIn) (*countIn, error) { return in, nil })
+	a.Get("/v1/t/count", func(_ context.Context, in *countIn) (*countIn, error) { return in, nil })
 
 	for word, want := range map[string]count{"all": 1 << 20, "7": 7} {
 		resp, err := a.Test(httptest.NewRequest("GET", "/v1/t/count?n="+word, nil))

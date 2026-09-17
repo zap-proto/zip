@@ -39,10 +39,7 @@ func main() {
 		},
 	})
 
-	zip.Post(app, "/v1/validate", validate,
-		zip.WithSummary("Validate an email and age"),
-		zip.WithTags("validation"),
-	)
+	app.Post("/v1/validate", validate, zip.WithSummary("Validate an email and age"), zip.WithTags("validation"))
 
 	log.Fatal(app.Listen("http://:8080"))
 }

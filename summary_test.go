@@ -50,7 +50,7 @@ func TestSummary_IsOneSentenceOnOneLine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := zip.New(zip.Config{AppName: "wrap", DisableStartupMessage: true})
 			zip.Describe("GET /v1/wrap/"+tc.name, zip.Doc{Description: tc.doc})
-			zip.Get(app, "/v1/wrap/"+tc.name, wrapHandler)
+			app.Get("/v1/wrap/"+tc.name, wrapHandler)
 
 			paths, _ := app.OpenAPISpec()["paths"].(map[string]map[string]any)
 			op, _ := paths["/v1/wrap/"+tc.name]["get"].(map[string]any)

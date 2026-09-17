@@ -58,7 +58,7 @@ func main() {
 
 	// STEP 1 — the mechanical port. The same shape as the gin handler, running
 	// on zip after one edit, and invisible to every projection until step 2.
-	app.Get("/legacy/users/:id", func(c *zip.Ctx) error {
+	app.Raw("GET", "/legacy/users/:id", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"id": c.Param("id")})
 	})
 
@@ -67,8 +67,8 @@ func main() {
 	// type says what the request IS, and one declaration feeds the route, the
 	// document, the tool list, the CLI and the call plane.
 	v1 := app.Group("/v1")
-	zip.Get(v1, "/users/:id", getUser)
-	zip.Post(v1, "/users", createUser)
+	v1.Get("/users/:id", getUser)
+	v1.Post("/users", createUser)
 
 	log.Fatal(app.Listen("http://:8080"))
 }

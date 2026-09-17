@@ -34,7 +34,7 @@ func TestDoc_ReachesTheSpec(t *testing.T) {
 		Example:  json.RawMessage(`{"limit":25,"org":"hanzo"}`),
 		Response: json.RawMessage(`{"invoices":["inv_2","inv_1"]}`),
 	})
-	zip.Post(app, "/v1/billing/invoices", func(_ context.Context, in *invIn) (*invOut, error) {
+	app.Post("/v1/billing/invoices", func(_ context.Context, in *invIn) (*invOut, error) {
 		return &invOut{}, nil
 	})
 

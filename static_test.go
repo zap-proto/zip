@@ -64,7 +64,7 @@ func bothFS(t *testing.T, fn func(t *testing.T, assets fs.FS)) {
 func TestStatic_ServesFile(t *testing.T) {
 	bothFS(t, func(t *testing.T, assets fs.FS) {
 		app := zip.New(zip.Config{DisableStartupMessage: true})
-		app.Get("/assets/*", zip.Static(assets))
+		app.Raw("GET", "/assets/*", zip.Static(assets))
 
 		want, _ := fs.ReadFile(assets, "main.css")
 		resp, body := serve(t, app, "GET", "/assets/main.css", nil)
@@ -86,7 +86,7 @@ func TestStatic_ServesFile(t *testing.T) {
 func TestStatic_Head(t *testing.T) {
 	bothFS(t, func(t *testing.T, assets fs.FS) {
 		app := zip.New(zip.Config{DisableStartupMessage: true})
-		app.Get("/assets/*", zip.Static(assets))
+		app.Raw("GET", "/assets/*", zip.Static(assets))
 
 		want, _ := fs.ReadFile(assets, "main.css")
 		resp, body := serve(t, app, "HEAD", "/assets/main.css", nil)
@@ -111,8 +111,8 @@ func TestStatic_Head(t *testing.T) {
 func TestStatic_MissingFallsThroughToNext(t *testing.T) {
 	bothFS(t, func(t *testing.T, assets fs.FS) {
 		app := zip.New(zip.Config{DisableStartupMessage: true})
-		app.Get("/assets/*", zip.Static(assets))
-		app.Get("/*", func(c *zip.Ctx) error { return c.String(200, "spa") })
+		app.Raw("GET", "/assets/*", zip.Static(assets))
+		app.Raw("GET", "/*", func(c *zip.Ctx) error { return c.String(200, "spa") })
 
 		resp, body := serve(t, app, "GET", "/assets/does-not-exist.css", nil)
 		if resp.StatusCode != 200 || body != "spa" {
@@ -129,7 +129,7 @@ func TestStatic_MissingFallsThroughToNext(t *testing.T) {
 // set), never a 500.
 func TestStatic_Missing404WhenNoCatchAll(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/assets/*", zip.Static(embedAssets(t)))
+	app.Raw("GET", "/assets/*", zip.Static(embedAssets(t)))
 
 	resp, _ := serve(t, app, "GET", "/assets/nope.css", nil)
 	if resp.StatusCode != 404 {
@@ -144,7 +144,7 @@ func TestStatic_Missing404WhenNoCatchAll(t *testing.T) {
 // never a 200.
 func TestStatic_TraversalBlocked(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/assets/*", zip.Static(dirAssets()))
+	app.Raw("GET", "/assets/*", zip.Static(dirAssets()))
 
 	for _, target := range []string{
 		"/assets/../secret.txt",
@@ -168,8 +168,8 @@ func TestStatic_TraversalBlocked(t *testing.T) {
 // while every other subpath is served by Static.
 func TestStatic_LaterStaticRouteWins(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/assets/*", zip.Static(embedAssets(t)))
-	app.Get("/assets/special.txt", func(c *zip.Ctx) error { return c.String(200, "special-route") })
+	app.Raw("GET", "/assets/*", zip.Static(embedAssets(t)))
+	app.Raw("GET", "/assets/special.txt", func(c *zip.Ctx) error { return c.String(200, "special-route") })
 
 	if resp, body := serve(t, app, "GET", "/assets/special.txt", nil); resp.StatusCode != 200 || body != "special-route" {
 		t.Fatalf("/assets/special.txt: status=%d body=%q, want the specific route to win over Static", resp.StatusCode, body)
@@ -184,7 +184,7 @@ func TestStatic_LaterStaticRouteWins(t *testing.T) {
 func TestStatic_WithIndex(t *testing.T) {
 	bothFS(t, func(t *testing.T, assets fs.FS) {
 		app := zip.New(zip.Config{DisableStartupMessage: true})
-		app.Get("/app/*", zip.Static(assets, zip.WithIndex("index.html")))
+		app.Raw("GET", "/app/*", zip.Static(assets, zip.WithIndex("index.html")))
 
 		idx, _ := fs.ReadFile(assets, "index.html")
 		if resp, body := serve(t, app, "GET", "/app/", nil); resp.StatusCode != 200 || body != string(idx) {
@@ -203,7 +203,7 @@ func TestStatic_WithIndex(t *testing.T) {
 // strip maps it to "main.css".
 func TestStatic_WithStripPrefix(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/static/*", zip.Static(embedAssets(t), zip.WithStripPrefix("/static/v2/")))
+	app.Raw("GET", "/static/*", zip.Static(embedAssets(t), zip.WithStripPrefix("/static/v2/")))
 
 	if resp, body := serve(t, app, "GET", "/static/v2/main.css", nil); resp.StatusCode != 200 || !strings.HasPrefix(body, "body{") {
 		t.Fatalf("/static/v2/main.css: status=%d body=%q, want main.css via strip-prefix", resp.StatusCode, body)
@@ -215,7 +215,7 @@ func TestStatic_WithStripPrefix(t *testing.T) {
 // omitted there by design).
 func TestStatic_IfModifiedSince304(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/assets/*", zip.Static(dirAssets()))
+	app.Raw("GET", "/assets/*", zip.Static(dirAssets()))
 
 	resp, _ := serve(t, app, "GET", "/assets/main.css", nil)
 	lastMod := resp.Header.Get("Last-Modified")

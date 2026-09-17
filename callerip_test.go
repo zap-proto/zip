@@ -15,7 +15,7 @@ func ipApp(t *testing.T, cfg Config) *App {
 	t.Helper()
 	cfg.DisableStartupMessage = true
 	a := New(cfg)
-	Get(a, "/whoami", func(ctx context.Context, _ *ipIn) (*ipOut, error) {
+	a.Get("/whoami", func(ctx context.Context, _ *ipIn) (*ipOut, error) {
 		return &ipOut{IP: CallerOf(ctx).IP}, nil
 	}, WithOperationID("whoami"))
 	return a

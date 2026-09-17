@@ -33,7 +33,7 @@ func fetch(_ context.Context, in *fetchIn) (*fetchIn, error) { return in, nil }
 func askFetch(t *testing.T, path string) fetchIn {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Get(a, "/v1/t/utxos", fetch)
+	a.Get("/v1/t/utxos", fetch)
 	res, err := a.Fiber().Test(httpGet(t, path))
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestAPointerRecordIsAllocatedOnlyWhenNamed(t *testing.T) {
 // readers — so a caller reading the spec writes names that work.
 func TestTheDocumentPublishesEveryNameTheURLCanCarry(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Get(a, "/v1/t/utxos", fetch)
+	a.Get("/v1/t/utxos", fetch)
 	spec, err := json.Marshal(a.OpenAPISpec())
 	if err != nil {
 		t.Fatal(err)

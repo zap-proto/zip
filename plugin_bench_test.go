@@ -37,7 +37,7 @@ func Benchmark_PluginHop(b *testing.B) {
 	// The linked-in baseline answers byte-for-byte what the plugin answers, so
 	// the only difference under test is where the handler runs.
 	linked := zip.New(benchConfig())
-	linked.Get("/v1/demo/version", func(c *zip.Ctx) error {
+	linked.Raw("GET", "/v1/demo/version", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"version": "v1"})
 	})
 

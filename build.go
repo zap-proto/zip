@@ -18,7 +18,14 @@ import (
 // methodAll is the sentinel [App.All] registers under: one entry answering
 // every method, kept as one entry so the program says what was written. The
 // router expands it; [App.Declaration] reads the expansion back off the router.
-const methodAll = "ALL"
+// MethodAll is the method [App.Raw] and [Group.Raw] take to answer a path
+// whatever the verb — the rare case a proxy, a catch-all or a legacy mount
+// needs. Every other method is its own name, as net/http spells it.
+const MethodAll = "ALL"
+
+// methodAll is the internal spelling, kept so the walk and the router read one
+// constant.
+const methodAll = MethodAll
 
 // plan is the walk result the live generation was built from. Each generation
 // RETAINS it, so the reducers serving that generation — the OpenAPI endpoint,

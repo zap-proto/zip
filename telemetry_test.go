@@ -95,7 +95,7 @@ func scrape(t *testing.T, app *zip.App) string {
 func TestReport(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/orders/8a3f", nil)
 	s, app := served(t, req, func(app *zip.App) {
-		app.Get("/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
+		app.Raw("GET", "/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	})
 
 	line := s.find("request")
@@ -142,7 +142,7 @@ func TestReportCarriesTheCaller(t *testing.T) {
 	req.Header.Set("X-Org-Id", "acme")
 	req.Header.Set("X-User-Id", "u-1")
 	s, _ := served(t, req, func(app *zip.App) {
-		app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+		app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	})
 	line := s.find("request")
 	if line == nil {
@@ -156,7 +156,7 @@ func TestReportCarriesTheCaller(t *testing.T) {
 	}
 
 	bare, _ := served(t, httptest.NewRequest(http.MethodGet, "/x", nil), func(app *zip.App) {
-		app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+		app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	})
 	line = bare.find("request")
 	if line == nil {
@@ -180,7 +180,7 @@ func TestReportJoinsAnIncomingTrace(t *testing.T) {
 
 	var onward string
 	s, _ := served(t, req, func(app *zip.App) {
-		app.Get("/x", func(c *zip.Ctx) error {
+		app.Raw("GET", "/x", func(c *zip.Ctx) error {
 			onward = c.Header(zip.HeaderTrace)
 			return c.String(200, "ok")
 		})
@@ -208,7 +208,7 @@ func TestReportJoinsAnIncomingTrace(t *testing.T) {
 // on: a request with no trace context begins one rather than reporting none.
 func TestReportStartsATraceWhenNoneArrives(t *testing.T) {
 	s, _ := served(t, httptest.NewRequest(http.MethodGet, "/x", nil), func(app *zip.App) {
-		app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+		app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	})
 	line := s.find("request")
 	if line == nil {
@@ -226,7 +226,7 @@ func TestReportStartsATraceWhenNoneArrives(t *testing.T) {
 func TestReportCountsWhatMatchedNothing(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/nope", nil)
 	s, app := served(t, req, func(app *zip.App) {
-		app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+		app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	})
 	if s.find("request") == nil {
 		t.Fatal("a request that matched no route was not logged")
@@ -254,7 +254,7 @@ func TestReportLevelsByOutcome(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := served(t, httptest.NewRequest(http.MethodGet, "/x", nil), func(app *zip.App) {
-				app.Get("/x", c.serve)
+				app.Raw("GET", "/x", c.serve)
 			})
 			line := s.find("request")
 			if line == nil {
@@ -280,7 +280,7 @@ func TestReportLevelsByOutcome(t *testing.T) {
 // duration histogram would describe the kubelet rather than the service.
 func TestOpsIsNotTraffic(t *testing.T) {
 	_, app := served(t, httptest.NewRequest(http.MethodGet, "/x", nil), func(app *zip.App) {
-		app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+		app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	})
 	ops := app.Ops()
 	for _, p := range []string{zip.HealthPath, zip.ReadyPath} {
@@ -308,7 +308,7 @@ func TestTelemetryOff(t *testing.T) {
 		DisableStartupMessage: true,
 		Telemetry:             zip.Telemetry{Off: true},
 	})
-	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+	app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
 	if err != nil {
 		t.Fatalf("serving failed: %v", err)
@@ -397,7 +397,7 @@ func TestBoundaryExportsASpan(t *testing.T) {
 		DisableStartupMessage: true,
 		Telemetry:             zip.Telemetry{Spans: addr},
 	})
-	app.Get("/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
+	app.Raw("GET", "/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
@@ -471,7 +471,7 @@ func TestBoundaryExportsALog(t *testing.T) {
 		DisableStartupMessage: true,
 		Telemetry:             zip.Telemetry{Logs: addr},
 	})
-	app.Get("/x", func(c *zip.Ctx) error { return c.String(500, "boom") })
+	app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(500, "boom") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
@@ -532,7 +532,7 @@ func TestTheEnvironmentStatesTheAddress(t *testing.T) {
 		DisableStartupMessage: true,
 		// No Telemetry field at all: the environment is the whole configuration.
 	})
-	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+	app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
@@ -577,7 +577,7 @@ func TestNoAddressIsSilent(t *testing.T) {
 		Logger:                luxlog.NewWriter(s),
 		DisableStartupMessage: true,
 	})
-	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+	app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
@@ -622,7 +622,7 @@ func TestTheCollectorBeingDownCostsNothing(t *testing.T) {
 		DisableStartupMessage: true,
 		Telemetry:             zip.Telemetry{Spans: free(t)},
 	})
-	app.Get("/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
+	app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {

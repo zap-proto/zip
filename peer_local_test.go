@@ -20,7 +20,7 @@ func TestLocalSeparatesHereFromTheSocket(t *testing.T) {
 	dir := sockDir(t)
 	t.Setenv(zip.RuntimeDirEnv, dir)
 	app := zip.New(zip.Config{AppName: "who"})
-	zip.Post[localIn, localOut](app, "/who", func(ctx context.Context, _ *localIn) (*localOut, error) {
+	app.Post("/who", func(ctx context.Context, _ *localIn) (*localOut, error) {
 		return &localOut{Local: zip.Local(ctx), Peer: zip.PeerOf(ctx) != nil}, nil
 	}, zip.WithOperationID("who"))
 	sock := zip.SocketPath("who")

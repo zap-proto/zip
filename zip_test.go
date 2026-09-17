@@ -18,7 +18,7 @@ import (
 // confirm the Sinatra idiom + JSON response work end-to-end.
 func TestBasicRouting(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "test", DisableStartupMessage: true})
-	app.Get("/hello", func(c *zip.Ctx) error {
+	app.Raw("GET", "/hello", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"message": "hi"})
 	})
 
@@ -43,7 +43,7 @@ func TestBasicRouting(t *testing.T) {
 // TestHTTPError checks zip.HTTPError → JSON error response.
 func TestHTTPError(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/boom", func(c *zip.Ctx) error {
+	app.Raw("GET", "/boom", func(c *zip.Ctx) error {
 		return zip.ErrNotFound("nope")
 	})
 	req, _ := http.NewRequest("GET", "/boom", nil)
@@ -70,7 +70,7 @@ func TestTyped(t *testing.T) {
 		OK bool `json:"ok"`
 	}
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	zip.Post(app, "/v1/test", func(ctx context.Context, in *In) (*Out, error) {
+	app.Post("/v1/test", func(ctx context.Context, in *In) (*Out, error) {
 		return &Out{OK: true}, nil
 	})
 
@@ -105,7 +105,7 @@ func TestTyped(t *testing.T) {
 func TestGroup(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	v1 := app.Group("/v1")
-	v1.Get("/ping", func(c *zip.Ctx) error {
+	v1.Raw("GET", "/ping", func(c *zip.Ctx) error {
 		return c.String(200, "pong")
 	})
 	req, _ := http.NewRequest("GET", "/v1/ping", nil)
@@ -130,7 +130,7 @@ func TestOneCtxPerRequest(t *testing.T) {
 	app.Use(zip.H(func(c *zip.Ctx) error { seen = append(seen, c); return c.Continue() }))
 	v1 := app.Group("/v1")
 	v1.Use(zip.H(func(c *zip.Ctx) error { seen = append(seen, c); return c.Continue() }))
-	v1.Get("/ping", func(c *zip.Ctx) error {
+	v1.Raw("GET", "/ping", func(c *zip.Ctx) error {
 		seen = append(seen, c)
 		return c.NoContent(204)
 	})
@@ -175,7 +175,7 @@ func TestSetLogReachesDownstream(t *testing.T) {
 		c.SetLog(scoped)
 		return c.Continue()
 	}))
-	app.Get("/x", func(c *zip.Ctx) error {
+	app.Raw("GET", "/x", func(c *zip.Ctx) error {
 		downstream = c.Log()
 		return c.NoContent(204)
 	})
@@ -226,7 +226,7 @@ func TestServePathAllocsAreChainDepthInvariant(t *testing.T) {
 		for i := 0; i < mw; i++ {
 			app.Use(zip.H(func(c *zip.Ctx) error { return c.Continue() }))
 		}
-		app.Get("/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })
+		app.Raw("GET", "/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })
 		h := app.Fiber().Handler()
 
 		fctx := &fasthttp.RequestCtx{}
@@ -269,7 +269,7 @@ func TestServePathAllocsAreChainDepthInvariant(t *testing.T) {
 // TestIdentityHeaders confirms c.Org/User/Email map to X-* headers.
 func TestIdentityHeaders(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/who", func(c *zip.Ctx) error {
+	app.Raw("GET", "/who", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{
 			"org":  c.Org(),
 			"user": c.User(),

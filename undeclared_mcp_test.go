@@ -22,10 +22,10 @@ type hiddenOut struct {
 // one projection where being callable matters most.
 func TestAnUndeclaredTypedOpIsNotAnMCPTool(t *testing.T) {
 	app := New(Config{AppName: "hide"})
-	Get(app, "/seen", func(ctx context.Context, in *hiddenIn) (*hiddenOut, error) {
+	app.Get("/seen", func(ctx context.Context, in *hiddenIn) (*hiddenOut, error) {
 		return &hiddenOut{OK: true}, nil
 	})
-	Get(Undeclared(app), "/unseen", func(ctx context.Context, in *hiddenIn) (*hiddenOut, error) {
+	app.Undeclared().Get("/unseen", func(ctx context.Context, in *hiddenIn) (*hiddenOut, error) {
 		return &hiddenOut{OK: true}, nil
 	})
 
@@ -52,7 +52,7 @@ func TestAnUndeclaredTypedOpIsNotAnMCPTool(t *testing.T) {
 // The route still SERVES — hiding it from the contract must not unmount it.
 func TestAnUndeclaredOpStillAnswers(t *testing.T) {
 	app := New(Config{AppName: "hide"})
-	Get(Undeclared(app), "/unseen", func(ctx context.Context, in *hiddenIn) (*hiddenOut, error) {
+	app.Undeclared().Get("/unseen", func(ctx context.Context, in *hiddenIn) (*hiddenOut, error) {
 		return &hiddenOut{OK: true}, nil
 	})
 	if app.Declares("GET", "/unseen") {

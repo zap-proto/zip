@@ -27,7 +27,7 @@ func (l *lookupOut) StatusCode() int {
 // Gap 8: an op declares a non-2xx and answers it with its own typed body.
 func TestNonSuccess_TypedBodyOnADeclaredNon2xx(t *testing.T) {
 	app := quiet("svc")
-	Post(app, "/v1/lookup", func(_ context.Context, in *lookupIn) (*lookupOut, error) {
+	app.Post("/v1/lookup", func(_ context.Context, in *lookupIn) (*lookupOut, error) {
 		if in.ID == "known" {
 			return &lookupOut{Found: true}, nil
 		}
@@ -69,7 +69,7 @@ type echoOut struct {
 
 func TestVerbatimBody_NeedsNoRawRequestAccessor(t *testing.T) {
 	app := quiet("svc")
-	Post(app, "/v1/pass", func(_ context.Context, in *json.RawMessage) (*echoOut, error) {
+	app.Post("/v1/pass", func(_ context.Context, in *json.RawMessage) (*echoOut, error) {
 		return &echoOut{Echo: *in}, nil
 	}, WithOperationID("pass"))
 

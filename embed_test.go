@@ -62,7 +62,7 @@ func patchThing(ctx context.Context, in *embedIn) (*embedOut, error) { return em
 // generated SDK would have had no way to send the patch.
 func TestEmbeddedBodyFieldsReachEveryProjection(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	zip.Patch(app, "/v1/things/:name", patchThing)
+	app.Patch("/v1/things/:name", patchThing)
 
 	spec, err := json.Marshal(app.OpenAPISpec())
 	if err != nil {

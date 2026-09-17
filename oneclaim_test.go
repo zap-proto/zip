@@ -22,14 +22,14 @@ import (
 // braidedImpl answers the address.
 func braidedImpl() *App {
 	a := quiet("impl")
-	a.Post("/v1/o11y/roles", func(c *Ctx) error { return c.String(200, "runtime") })
+	a.Raw("POST", "/v1/o11y/roles", func(c *Ctx) error { return c.String(200, "runtime") })
 	return a
 }
 
 // braidedTable declares the same address somewhere else. Two claims.
 func braidedTable() *App {
 	t := quiet("table")
-	Post(t.Group("/v1/o11y"), "/roles", func(_ context.Context, in *roleIn) (*roleOut, error) {
+	t.Group("/v1/o11y").Post("/roles", func(_ context.Context, in *roleIn) (*roleOut, error) {
 		return &roleOut{ID: in.Name}, nil
 	}, WithOperationID("CreateRole"))
 	return t
@@ -61,7 +61,7 @@ func TestDeclaringApartFromTheHandlerIsRefused(t *testing.T) {
 // the address. Nothing to keep in sync, because there is only one thing.
 func TestOneRegistrationDeclaresAndAnswers(t *testing.T) {
 	svc := quiet("o11y")
-	Post(svc.Group("/v1/o11y"), "/roles", func(_ context.Context, in *roleIn) (*roleOut, error) {
+	svc.Group("/v1/o11y").Post("/roles", func(_ context.Context, in *roleIn) (*roleOut, error) {
 		return &roleOut{ID: in.Name}, nil
 	}, WithOperationID("CreateRole"))
 
@@ -89,7 +89,7 @@ func TestOneRegistrationDeclaresAndAnswers(t *testing.T) {
 func TestGroupIsTheOnlyScopeARegistrationNeeds(t *testing.T) {
 	host := quiet("host")
 	host.Group("/v1").Use(service()) // service() declares CreateRole at /roles
-	host.Get("/v1/health", func(c *Ctx) error { return c.String(200, "ok") })
+	host.Raw("GET", "/v1/health", func(c *Ctx) error { return c.String(200, "ok") })
 
 	if err := host.Build(); err != nil {
 		t.Fatalf("build: %v", err)

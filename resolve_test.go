@@ -49,17 +49,17 @@ type resWho struct {
 func resApp(t *testing.T) *App {
 	t.Helper()
 	app := New(Config{AppName: "svc", DisableStartupMessage: true})
-	Get(app, "/v1/users/:id", func(ctx context.Context, in *resGet) (*resUser, error) {
+	app.Get("/v1/users/:id", func(ctx context.Context, in *resGet) (*resUser, error) {
 		if in.ID == "gone" {
 			return nil, errors.New("no such user")
 		}
 		return &resUser{ID: in.ID, Email: in.ID + "@example.com",
 			Boss: &resHum{Name: "ada", Rank: 1}}, nil
 	}, WithOperationID("user"), WithSummary("One user by id"))
-	Post(app, "/v1/users", func(ctx context.Context, in *resMake) (*resUser, error) {
+	app.Post("/v1/users", func(ctx context.Context, in *resMake) (*resUser, error) {
 		return &resUser{ID: "new", Email: in.Email}, nil
 	}, WithOperationID("createUser"))
-	Get(app, "/v1/ambient", func(ctx context.Context, in *resAmb) (*resWho, error) {
+	app.Get("/v1/ambient", func(ctx context.Context, in *resAmb) (*resWho, error) {
 		return &resWho{Org: in.Org}, nil
 	}, WithOperationID("ambient"))
 	if err := app.Build(); err != nil {
@@ -259,7 +259,7 @@ func TestTheCallerReachesTheHandler(t *testing.T) {
 		Org  string `json:"org"`
 		User string `json:"user"`
 	}
-	Get(app, "/v1/whoami", func(ctx context.Context, _ *none) (*who, error) {
+	app.Get("/v1/whoami", func(ctx context.Context, _ *none) (*who, error) {
 		c := CallerOf(ctx)
 		return &who{Org: c.Org, User: c.User}, nil
 	}, WithOperationID("whoami"))
@@ -539,7 +539,7 @@ func foreignApp(t *testing.T, r Resolver) *App {
 	t.Helper()
 	app := New(Config{AppName: "host", DisableStartupMessage: true})
 	// One local op, so the app is a real one; the foreign fields are not in it.
-	Get(app, "/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) {
+	app.Get("/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) {
 		return &resUser{ID: "local"}, nil
 	}, WithOperationID("local"))
 	if err := app.Build(); err != nil {
@@ -662,8 +662,7 @@ func TestAnAbsentForeignFieldIsNullNotAnError(t *testing.T) {
 func TestTheForeignSchemaIsRenderedPerRequest(t *testing.T) {
 	n := 0
 	app := New(Config{AppName: "host", DisableStartupMessage: true})
-	Get(app, "/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) { return nil, nil },
-		WithOperationID("local"))
+	app.Get("/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) { return nil, nil }, WithOperationID("local"))
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}

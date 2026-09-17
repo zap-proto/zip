@@ -12,9 +12,9 @@ import (
 // rather than implying it.
 func TestTransactional_DropIsSymmetricWithInclude(t *testing.T) {
 	keep := quiet("keep")
-	keep.Get("/keep", func(c *Ctx) error { return c.String(200, "keep") })
+	keep.Raw("GET", "/keep", func(c *Ctx) error { return c.String(200, "keep") })
 	doomed := quiet("doomed")
-	doomed.Get("/doomed", func(c *Ctx) error { return c.String(200, "doomed") })
+	doomed.Raw("GET", "/doomed", func(c *Ctx) error { return c.String(200, "doomed") })
 
 	host := quiet("host")
 	host.Use(keep, doomed)
@@ -51,11 +51,11 @@ func TestTransactional_DropCannotProduceAnInvalidProgram(t *testing.T) {
 	guarded := quiet("guarded")
 	guarded.Use(H(func(c *Ctx) error { return c.Continue() }))
 	routes := quiet("routes")
-	routes.Get("/r", func(c *Ctx) error { return c.String(200, "r") })
+	routes.Raw("GET", "/r", func(c *Ctx) error { return c.String(200, "r") })
 	guarded.Use(routes) // the group is legal because routes live beneath it
 
 	spare := quiet("spare")
-	spare.Get("/spare", func(c *Ctx) error { return c.String(200, "spare") })
+	spare.Raw("GET", "/spare", func(c *Ctx) error { return c.String(200, "spare") })
 
 	app := quiet("host")
 	app.Use(guarded, spare)
@@ -83,7 +83,7 @@ func TestTransactional_DropCannotProduceAnInvalidProgram(t *testing.T) {
 // with edits on the hosts themselves.
 func TestTransactional_NoDeadlockAcrossSharedDefinitions(t *testing.T) {
 	shared := quiet("shared")
-	shared.Get("/shared", func(c *Ctx) error { return nil })
+	shared.Raw("GET", "/shared", func(c *Ctx) error { return nil })
 
 	h1, h2 := quiet("h1"), quiet("h2")
 	h1.Group("/a").Use(shared)
@@ -101,13 +101,13 @@ func TestTransactional_NoDeadlockAcrossSharedDefinitions(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			p := quiet("p")
-			p.Get("/p", func(c *Ctx) error { return nil })
+			p.Raw("GET", "/p", func(c *Ctx) error { return nil })
 			_ = hostOf(t, h1).Include(p)
 		}(i)
 		go func(n int) {
 			defer wg.Done()
 			p := quiet("q")
-			p.Get("/q", func(c *Ctx) error { return nil })
+			p.Raw("GET", "/q", func(c *Ctx) error { return nil })
 			_ = hostOf(t, h2).Include(p)
 		}(i)
 		go func(n int) { defer wg.Done(); _ = hostOf(t, h1).Drop(quiet("nothing")) }(i)

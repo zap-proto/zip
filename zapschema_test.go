@@ -85,8 +85,8 @@ func schemaOfApp(t *testing.T, build func(*App)) *Schema {
 // other projection uses.
 func TestZAPSchema_RendersTheIDL(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/height", nop[schEmpty, schHeight])
-		Get(a, "/v1/validators", nop[schEmpty, schValidators])
+		a.Get("/v1/height", nop[schEmpty, schHeight])
+		a.Get("/v1/validators", nop[schEmpty, schValidators])
 	})
 
 	const want = `# Generated from typed ops. Do not edit.
@@ -126,9 +126,9 @@ interface probe {
 // reasoning gets wrong — which is what makes this worth asserting.
 func TestZAPSchema_OffsetsAreTheLayouts(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/n", nop[schEmpty, schNarrow])
-		Get(a, "/v1/v", nop[schEmpty, schValidator])
-		Get(a, "/v1/x", nop[schEmpty, schNested])
+		a.Get("/v1/n", nop[schEmpty, schNarrow])
+		a.Get("/v1/v", nop[schEmpty, schValidator])
+		a.Get("/v1/x", nop[schEmpty, schNested])
 	})
 	if len(s.Structs) == 0 {
 		t.Fatal("nothing to compare")
@@ -173,7 +173,7 @@ func sample(from string) (any, bool) {
 // Aligned, not packed — the first thing a second derivation gets wrong. A bool
 // at 0 puts the word after it at 8.
 func TestZAPSchema_AWordAfterAByteIsAtEight(t *testing.T) {
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/n", nop[schEmpty, schNarrow]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/n", nop[schEmpty, schNarrow]) })
 	st := structNamed(t, s, "schNarrow")
 	if got := st.Fields[1].Offset; got != 8 {
 		t.Fatalf("the word is at @%d, want @8 (aligned)", got)
@@ -186,7 +186,7 @@ func TestZAPSchema_AWordAfterAByteIsAtEight(t *testing.T) {
 // it, so the op is named as needing a generated codec — not as a gap, because
 // nothing about it is unexpressible.
 func TestZAPSchema_AFixedArrayIsInlineAndNeedsACodec(t *testing.T) {
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/v", nop[schEmpty, schValidator]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/v", nop[schEmpty, schValidator]) })
 	st := structNamed(t, s, "schValidator")
 	if got := st.Fields[0].Type; got != "bytes_fixed[20]" {
 		t.Fatalf("[20]byte rendered %q", got)
@@ -210,10 +210,10 @@ func TestZAPSchema_AFixedArrayIsInlineAndNeedsACodec(t *testing.T) {
 // same bytes, which is what makes the committed artifact a diff worth reading.
 func TestZAPSchema_IsDeterministic(t *testing.T) {
 	build := func(a *App) {
-		Get(a, "/v1/height", nop[schEmpty, schHeight])
-		Post(a, "/v1/holder", nop[schHolder, schHeight])
-		Get(a, "/v1/validators", nop[schEmpty, schValidators])
-		Get(a, "/v1/nested", nop[schEmpty, schNested])
+		a.Get("/v1/height", nop[schEmpty, schHeight])
+		a.Post("/v1/holder", nop[schHolder, schHeight])
+		a.Get("/v1/validators", nop[schEmpty, schValidators])
+		a.Get("/v1/nested", nop[schEmpty, schNested])
 	}
 	first := schemaOfApp(t, build).String()
 	for i := 0; i < 8; i++ {
@@ -229,9 +229,9 @@ func TestZAPSchema_IsDeterministic(t *testing.T) {
 // path), or the id its author wrote down. There is no second naming rule.
 func TestZAPSchema_NamesComeFromTheOneIDRule(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/pricing-policy", nop[schEmpty, schHeight])
-		Get(a, "/v1/thing/:id", nop[schEmpty, schHeight])
-		Get(a, "/v1/named", nop[schEmpty, schHeight], WithOperationID("theAuthorsName"))
+		a.Get("/v1/pricing-policy", nop[schEmpty, schHeight])
+		a.Get("/v1/thing/:id", nop[schEmpty, schHeight])
+		a.Get("/v1/named", nop[schEmpty, schHeight], WithOperationID("theAuthorsName"))
 	})
 	// get_pricing-policy folds: the id is what ID gives, the METHOD is what the
 	// lexer accepts, and the difference is recorded rather than hidden.
@@ -253,7 +253,7 @@ func TestZAPSchema_NamesComeFromTheOneIDRule(t *testing.T) {
 // A method name is also what ID() produced, verbatim — proving the rule is
 // CALLED and not re-implemented.
 func TestZAPSchema_MethodNameIsIDVerbatim(t *testing.T) {
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/deep/path/:id", nop[schEmpty, schHeight]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/deep/path/:id", nop[schEmpty, schHeight]) })
 	if len(methods(s)) != 1 {
 		t.Fatalf("methods = %d, want 1", len(methods(s)))
 	}
@@ -268,8 +268,8 @@ func TestZAPSchema_MethodNameIsIDVerbatim(t *testing.T) {
 // of who else is in the room.
 func TestZAPSchema_AnIDTheLexerCannotSpellIsRecorded(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/credit-balance", nop[schEmpty, schHeight])
-		Get(a, "/v1/credit_balance", nop[schEmpty, schNarrow])
+		a.Get("/v1/credit-balance", nop[schEmpty, schHeight])
+		a.Get("/v1/credit_balance", nop[schEmpty, schNarrow])
 	})
 	if len(s.Renamed) != 1 {
 		t.Fatalf("renamed = %+v, want exactly the hyphenated one", s.Renamed)
@@ -308,8 +308,8 @@ func TestZAPSchema_AKeywordIsNotAName(t *testing.T) {
 // by an ordinal — the JSON registry's rule in the IDL's character set.
 func TestZAPSchema_CollidingNamesAreQualified(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/one", nop[schEmpty, struct{ A string }])
-		Get(a, "/v1/two", nop[schEmpty, struct{ B string }])
+		a.Get("/v1/one", nop[schEmpty, struct{ A string }])
+		a.Get("/v1/two", nop[schEmpty, struct{ B string }])
 	})
 	if len(s.Structs) != 2 {
 		t.Fatalf("structs = %d, want 2 distinct anonymous types", len(s.Structs))
@@ -332,7 +332,7 @@ func TestZAPSchema_CollidingNamesAreQualified(t *testing.T) {
 // A void direction is an empty parameter list, not a struct with no fields —
 // zapgen refuses `struct X {}`, and an absence is not a value.
 func TestZAPSchema_VoidDirectionIsAnEmptyList(t *testing.T) {
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/ping", nop[schEmpty, schEmpty]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/ping", nop[schEmpty, schEmpty]) })
 	if len(methods(s)) != 1 {
 		t.Fatalf("methods = %d, want 1", len(methods(s)))
 	}
@@ -356,9 +356,9 @@ func TestZAPSchema_GapsByCause(t *testing.T) {
 		op    string
 		cause string
 	}{
-		{"map", func(a *App) { Get(a, "/v1/m", nop[schEmpty, schMapped]) }, "get_m", CauseMap},
-		{"any", func(a *App) { Get(a, "/v1/a", nop[schEmpty, schAny]) }, "get_a", CauseAny},
-		{"wide array", func(a *App) { Get(a, "/v1/w", nop[schEmpty, schWide]) }, "get_w", CauseUnwirable},
+		{"map", func(a *App) { a.Get("/v1/m", nop[schEmpty, schMapped]) }, "get_m", CauseMap},
+		{"any", func(a *App) { a.Get("/v1/a", nop[schEmpty, schAny]) }, "get_a", CauseAny},
+		{"wide array", func(a *App) { a.Get("/v1/w", nop[schEmpty, schWide]) }, "get_w", CauseUnwirable},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := schemaOfApp(t, c.mount)
@@ -390,7 +390,7 @@ func TestZAPSchema_EveryFailingFieldIsNamed(t *testing.T) {
 	if _, err := LayoutOf(reflect.TypeOf(two{})); err == nil {
 		t.Fatal("the layout must refuse this type, or the diagnosis describes nothing")
 	}
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/two", nop[schEmpty, two]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/two", nop[schEmpty, two]) })
 	causes := map[string]bool{}
 	for _, g := range s.Gaps {
 		causes[g.Cause] = true
@@ -404,9 +404,9 @@ func TestZAPSchema_EveryFailingFieldIsNamed(t *testing.T) {
 // ops is named. A shared blocker is not one problem.
 func TestZAPSchema_ABlockingTypeIsBlamedPerOp(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/one", nop[schEmpty, schMapped])
-		Get(a, "/v1/two", nop[schEmpty, schMapped])
-		Get(a, "/v1/three", nop[schEmpty, schMapped])
+		a.Get("/v1/one", nop[schEmpty, schMapped])
+		a.Get("/v1/two", nop[schEmpty, schMapped])
+		a.Get("/v1/three", nop[schEmpty, schMapped])
 	})
 	ops := map[string]bool{}
 	for _, g := range s.Gaps {
@@ -426,8 +426,8 @@ func TestZAPSchema_ABlockingTypeIsBlamedPerOp(t *testing.T) {
 // loss is recorded, because it measures how much shape the schema can carry.
 func TestZAPSchema_ANestedValueIsOpaque(t *testing.T) {
 	s := schemaOfApp(t, func(a *App) {
-		Get(a, "/v1/x", nop[schEmpty, schNested])
-		Get(a, "/v1/v", nop[schEmpty, schValidators])
+		a.Get("/v1/x", nop[schEmpty, schNested])
+		a.Get("/v1/v", nop[schEmpty, schValidators])
 	})
 	st := structNamed(t, s, "schNested")
 	if got := st.Fields[0].Type; got != "bytes" {
@@ -463,7 +463,7 @@ func TestZAPSchema_ANestedValueIsOpaque(t *testing.T) {
 // same value crosses over JSON and is absent here; the type lays out, encodes and
 // decodes without complaint.
 func TestZAPSchema_AnEmbeddedValueIsDroppedSilently(t *testing.T) {
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/e", nop[schEmpty, schEmbedded]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/e", nop[schEmpty, schEmbedded]) })
 	st := structNamed(t, s, "schEmbedded")
 	if len(st.Fields) != 1 || st.Fields[0].Name != "Extra" {
 		t.Fatalf("fields = %+v, want Extra alone", st.Fields)
@@ -491,7 +491,7 @@ func TestZAPSchema_AnEmptyMessageIsDroppedSilently(t *testing.T) {
 		When time.Time
 		Name string
 	}
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/at", nop[schEmpty, at]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/at", nop[schEmpty, at]) })
 	st := structNamed(t, s, "at")
 	if len(st.Fields) != 2 {
 		t.Fatalf("fields = %+v; the instant still takes a slot", st.Fields)
@@ -515,7 +515,7 @@ func TestZAPSchema_AnEmptyMessageIsDroppedSilently(t *testing.T) {
 // json.RawMessage crosses EXACTLY, as bytes. It is not a gap and not a loss —
 // the shape is simply unstated, which is what the schema is for.
 func TestZAPSchema_RawJSONCrossesAsBytes(t *testing.T) {
-	s := schemaOfApp(t, func(a *App) { Get(a, "/v1/r", nop[schEmpty, schRaw]) })
+	s := schemaOfApp(t, func(a *App) { a.Get("/v1/r", nop[schEmpty, schRaw]) })
 	st := structNamed(t, s, "schRaw")
 	if got := st.Fields[0].Type; got != "bytes" {
 		t.Fatalf("json.RawMessage rendered %q, want bytes", got)
@@ -532,9 +532,9 @@ func TestZAPSchema_RawJSONCrossesAsBytes(t *testing.T) {
 // belongs to itself while an operation belongs to its service.
 func TestZAPSchema_OneInterfacePerApp(t *testing.T) {
 	one, two := New(Config{AppName: "search"}), New(Config{AppName: "ai"})
-	Get(one, "/v1/search/height", nop[schEmpty, schHeight])
-	Get(two, "/v1/ai/height", nop[schEmpty, schHeight])
-	Post(two, "/v1/ai/vals", nop[schEmpty, schValidators])
+	one.Get("/v1/search/height", nop[schEmpty, schHeight])
+	two.Get("/v1/ai/height", nop[schEmpty, schHeight])
+	two.Post("/v1/ai/vals", nop[schEmpty, schValidators])
 
 	s := ZAPSchema("cloud", one, two)
 	if len(s.Interfaces) != 2 {
@@ -565,7 +565,7 @@ func TestZAPSchema_OneInterfacePerApp(t *testing.T) {
 // different claim from "this service could not be expressed".
 func TestZAPSchema_AnEntirelyBlockedAppHasNoInterface(t *testing.T) {
 	a := New(Config{AppName: "blocked"})
-	Get(a, "/v1/m", nop[schEmpty, schMapped])
+	a.Get("/v1/m", nop[schEmpty, schMapped])
 	s := ZAPSchema("cloud", a)
 	if len(s.Interfaces) != 0 {
 		t.Fatalf("interfaces = %+v, want none", s.Interfaces)

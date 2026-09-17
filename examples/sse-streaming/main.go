@@ -31,7 +31,7 @@ import (
 func main() {
 	app := zip.New(zip.Config{AppName: "sse-streaming"})
 
-	app.Get("/v1/stream", func(c *zip.Ctx) error {
+	app.Raw("GET", "/v1/stream", func(c *zip.Ctx) error {
 		c.SetHeader("Content-Type", "text/event-stream")
 		c.SetHeader("Cache-Control", "no-cache")
 		c.SetHeader("Connection", "keep-alive")

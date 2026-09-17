@@ -16,7 +16,7 @@ import (
 // separate func-shaped adapter — one adapter, one path.
 func TestAdaptNetHTTP_HandlerFunc(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/fn", zip.AdaptNetHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	app.Raw("GET", "/fn", zip.AdaptNetHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "from-func "+r.URL.Path)
 	})))
 
@@ -40,7 +40,7 @@ func TestAdaptNetHTTP_SniffsLikeNetHTTP(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a := zip.New(zip.Config{AppName: "sniff", DisableStartupMessage: true})
-			a.Get("/page", zip.AdaptNetHTTP(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+			a.Raw("GET", "/page", zip.AdaptNetHTTP(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 				if c.set != "" {
 					rw.Header().Set("Content-Type", c.set)
 				}
@@ -65,7 +65,7 @@ func TestAdaptNetHTTP_SniffsLikeNetHTTP(t *testing.T) {
 // when it is serving bytes it refuses to characterise.
 func TestAdaptNetHTTP_EmptyTypeSuppressesSniffing(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "nosniff", DisableStartupMessage: true})
-	a.Get("/raw", zip.AdaptNetHTTP(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+	a.Raw("GET", "/raw", zip.AdaptNetHTTP(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Header()["Content-Type"] = nil
 		rw.Header()["Content-Type"] = []string{}
 		_, _ = rw.Write([]byte("<html>not html to us</html>"))

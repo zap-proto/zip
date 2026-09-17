@@ -19,7 +19,7 @@ func TestMultiPrefixScope_OneDefinitionPerPrefixIsFiveOccurrences(t *testing.T) 
 	prefixes := []string{"/v1/iam", "/login/oauth", "/.well-known", "/oidc", "/scim"}
 
 	iam := quiet("iam")
-	iam.Get("/keys", func(c *Ctx) error { return c.String(200, "keys") })
+	iam.Raw("GET", "/keys", func(c *Ctx) error { return c.String(200, "keys") })
 
 	host := quiet("host")
 	for _, p := range prefixes {
@@ -55,7 +55,7 @@ func TestMultiPrefixScope_OneDefinitionPerPrefixIsFiveOccurrences(t *testing.T) 
 func TestMultiPrefixScope_ComposingAtRootKeepsAbsolutePaths(t *testing.T) {
 	iam := quiet("iam")
 	for _, p := range []string{"/v1/iam/keys", "/login/oauth/token", "/.well-known/jwks"} {
-		iam.Get(p, func(c *Ctx) error { return c.String(200, "ok") })
+		iam.Raw("GET", p, func(c *Ctx) error { return c.String(200, "ok") })
 	}
 
 	host := quiet("host")
@@ -75,7 +75,7 @@ func TestMultiPrefixScope_ComposingAtRootKeepsAbsolutePaths(t *testing.T) {
 // copies. A migration that does this silently loses every original address.
 func TestMultiPrefixScope_PrefixingAnAbsoluteDefinitionMovesIt(t *testing.T) {
 	iam := quiet("iam")
-	iam.Get("/v1/iam/keys", func(c *Ctx) error { return c.String(200, "keys") })
+	iam.Raw("GET", "/v1/iam/keys", func(c *Ctx) error { return c.String(200, "keys") })
 
 	host := quiet("host")
 	host.Group("/v1/iam").Use(iam) // the mistake: prefix applied to absolute paths

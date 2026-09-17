@@ -28,7 +28,7 @@ func doorHandler(context.Context, *doorIn) (*doorOut, error) { return &doorOut{t
 // discipline.
 func TestTestSeesTheSameSurfaceServingWould(t *testing.T) {
 	app := New(Config{AppName: "door", DisableStartupMessage: true})
-	Post(app, "/thing", doorHandler)
+	app.Post("/thing", doorHandler)
 
 	req, _ := http.NewRequest(http.MethodPost, "/mcp",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
@@ -54,7 +54,7 @@ func TestTestSeesTheSameSurfaceServingWould(t *testing.T) {
 // collide on their own routes.
 func TestTestPreparesIdempotently(t *testing.T) {
 	app := New(Config{AppName: "door2", DisableStartupMessage: true})
-	Post(app, "/thing", doorHandler)
+	app.Post("/thing", doorHandler)
 
 	for i := 0; i < 3; i++ {
 		req, _ := http.NewRequest(http.MethodPost, "/mcp",

@@ -31,8 +31,8 @@ func echoMember(_ context.Context, in *memberIn) (*memberOut, error) {
 func memberApp(t *testing.T) *zip.App {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Get(a, "/v1/t/things/:owner/:name", echoMember)
-	zip.Patch(a, "/v1/t/things/:owner/:name", echoMember)
+	a.Get("/v1/t/things/:owner/:name", echoMember)
+	a.Patch("/v1/t/things/:owner/:name", echoMember)
 	return a
 }
 
@@ -107,7 +107,7 @@ func TestPathBeatsBodyOnConflict(t *testing.T) {
 // routes.
 func TestNoParamsLeavesBodyIntact(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Post(a, "/v1/t/things", echoMember)
+	a.Post("/v1/t/things", echoMember)
 	code, out := do(t, a, "POST", "/v1/t/things", `{"owner":"acme","name":"widget","note":"n"}`)
 	if code != 200 {
 		t.Fatalf("status = %d, want 200", code)
@@ -128,7 +128,7 @@ func TestAuthorizerSeesPathTarget(t *testing.T) {
 		}
 		return zip.Decision{Effect: zip.Allow}, nil
 	})
-	zip.Patch(a, "/v1/t/things/:owner/:name", echoMember)
+	a.Patch("/v1/t/things/:owner/:name", echoMember)
 	if code, _ := do(t, a, "PATCH", "/v1/t/things/acme/widget", `{"owner":"victim"}`); code != 200 {
 		t.Fatalf("status = %d, want 200", code)
 	}
@@ -212,9 +212,9 @@ func echoCount(_ context.Context, in *countIn) (*countIn, error) { return in, ni
 // where the handler wanted a number.
 func TestOpenAPITypesPathParamsFromTheInput(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Get(a, "/v1/t/counts/:n", echoCount)
+	a.Get("/v1/t/counts/:n", echoCount)
 	// :missing names no field, so nothing types it and the wire carried text.
-	zip.Get(a, "/v1/t/other/:missing", echoCount)
+	a.Get("/v1/t/other/:missing", echoCount)
 
 	params := paramsOf(t, a, "/v1/t/counts/{n}")
 	if len(params) != 2 {
@@ -284,7 +284,7 @@ func TestPathParamsArriveDecoded(t *testing.T) {
 // spellings of one parameter would be two answers to the same question.
 func TestParamReadsWhatTheBinderBinds(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	a.Get("/v1/t/raw/:name", func(c *zip.Ctx) error { return c.String(200, c.Param("name")) })
+	a.Raw("GET", "/v1/t/raw/:name", func(c *zip.Ctx) error { return c.String(200, c.Param("name")) })
 
 	req, _ := http.NewRequest("GET", "/v1/t/raw/caf%C3%A9", nil)
 	resp, err := a.Fiber().Test(req)

@@ -59,7 +59,7 @@ func (usersSubsystem) Mount(app *zip.App, _ Deps) error {
 	users := app.Group("/v1/users")
 
 	// GetUser returns one user, scoped to the caller's org.
-	zip.Get(users, "/:id", func(ctx context.Context, in *GetUserIn) (*User, error) {
+	users.Get("/:id", func(ctx context.Context, in *GetUserIn) (*User, error) {
 		// The gateway's identity reaches a typed handler through the ctx —
 		// c.Org() is the untyped spelling of the same headers.
 		return &User{ID: in.ID, Org: zip.CallerOf(ctx).Org}, nil
@@ -71,7 +71,7 @@ func (usersSubsystem) Mount(app *zip.App, _ Deps) error {
 type healthSubsystem struct{}
 
 func (healthSubsystem) Mount(app *zip.App, _ Deps) error {
-	zip.Get(app, "/healthz", func(context.Context, *Nothing) (*Health, error) {
+	app.Get("/healthz", func(context.Context, *Nothing) (*Health, error) {
 		return &Health{Status: "ok"}, nil
 	})
 	return nil

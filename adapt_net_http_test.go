@@ -66,7 +66,7 @@ func echoHandler() http.Handler {
 // app.All(prefix+"/*", zip.AdaptNetHTTP(h)) — serves the mounted subtree.
 func TestAdaptNetHTTP_NewForm_Serves(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.All("/api/*", zip.AdaptNetHTTP(echoHandler()))
+	app.Raw(zip.MethodAll, "/api/*", zip.AdaptNetHTTP(echoHandler()))
 
 	status, body := call(t, app, "GET", "/api/foo", "")
 	if status != 200 {
@@ -87,8 +87,8 @@ func TestAdaptNetHTTP_StaticRouteWins(t *testing.T) {
 
 	// Wildcard mount FIRST, static route SECOND. Specificity, not order,
 	// must decide.
-	app.All("/v1/commerce/*", zip.AdaptNetHTTP(echoHandler()))
-	app.Get("/v1/commerce/health", func(c *zip.Ctx) error {
+	app.Raw(zip.MethodAll, "/v1/commerce/*", zip.AdaptNetHTTP(echoHandler()))
+	app.Raw("GET", "/v1/commerce/health", func(c *zip.Ctx) error {
 		return c.String(200, "static-health")
 	})
 
@@ -106,7 +106,7 @@ func TestAdaptNetHTTP_StaticRouteWins(t *testing.T) {
 // body and the full subpath + query unchanged through the wildcard mount.
 func TestAdaptNetHTTP_BodyAndPathIntact(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.All("/api/*", zip.AdaptNetHTTP(echoHandler()))
+	app.Raw(zip.MethodAll, "/api/*", zip.AdaptNetHTTP(echoHandler()))
 
 	status, body := call(t, app, "POST", "/api/echo/42?q=hi", "payload-bytes")
 	if status != 200 {

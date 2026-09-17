@@ -78,7 +78,7 @@ func TestDecision_ProjectionParity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var ran bool
 			app := zip.New(zip.Config{AppName: "parity", DisableStartupMessage: true})
-			zip.Post(app, "/v1/act", func(_ context.Context, _ *thingIn) (*actOut, error) {
+			app.Post("/v1/act", func(_ context.Context, _ *thingIn) (*actOut, error) {
 				ran = true
 				return &actOut{OK: true}, nil
 			}, zip.WithOperationID("act"))
@@ -264,7 +264,7 @@ func inGo(t *testing.T, effect string, out *actOut, err error) {
 // decided no" are different answers and a client retries only one of them.
 func TestDecision_AFailedCheckIsNotARefusal(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "broken", DisableStartupMessage: true})
-	zip.Post(app, "/v1/act", func(_ context.Context, _ *thingIn) (*actOut, error) {
+	app.Post("/v1/act", func(_ context.Context, _ *thingIn) (*actOut, error) {
 		return &actOut{OK: true}, nil
 	}, zip.WithOperationID("act"))
 	app.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) {
@@ -292,7 +292,7 @@ func TestDecision_AFailedCheckIsNotARefusal(t *testing.T) {
 func TestDecision_TheDocumentPublishesTheHeldBody(t *testing.T) {
 	responses := func(gated bool) map[string]any {
 		app := zip.New(zip.Config{AppName: "doc", DisableStartupMessage: true})
-		zip.Post(app, "/v1/act", func(_ context.Context, _ *thingIn) (*thingOut, error) {
+		app.Post("/v1/act", func(_ context.Context, _ *thingIn) (*thingOut, error) {
 			return &thingOut{OK: true}, nil
 		}, zip.WithOperationID("act"))
 		if gated {
@@ -327,7 +327,7 @@ func TestDecision_TheDocumentPublishesTheHeldBody(t *testing.T) {
 // seam does not keep.
 func TestDecision_TheDocumentFollowsTheAdoptedRule(t *testing.T) {
 	child := zip.New(zip.Config{AppName: "child", DisableStartupMessage: true})
-	zip.Post(child, "/v1/child/act", func(_ context.Context, _ *thingIn) (*thingOut, error) {
+	child.Post("/v1/child/act", func(_ context.Context, _ *thingIn) (*thingOut, error) {
 		return &thingOut{OK: true}, nil
 	}, zip.WithOperationID("childAct"))
 
@@ -363,7 +363,7 @@ func TestDecision_TheDocumentFollowsTheAdoptedRule(t *testing.T) {
 // about one code cannot both be published, and the op's own is the older claim.
 func TestDecision_ADeclared202IsNotOverwritten(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "queue", DisableStartupMessage: true})
-	zip.Post(app, "/v1/queue", func(_ context.Context, _ *thingIn) (*thingOut, error) {
+	app.Post("/v1/queue", func(_ context.Context, _ *thingIn) (*thingOut, error) {
 		return &thingOut{OK: true}, nil
 	}, zip.WithStatus(202), zip.WithOperationID("queue"))
 	app.Authorize(func(context.Context, zip.Op, any) (zip.Decision, error) {

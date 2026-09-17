@@ -285,7 +285,7 @@ func (a *App) project(mode Projection, dest string) error {
 	return nil
 }
 
-// Undeclared returns a Router whose routes SERVE but do not appear in
+// Undeclared returns a group whose routes SERVE but do not appear in
 // [App.Declaration] — and so in none of the projections built from it: the
 // OpenAPI document, the MCP tool list, the CLI commands, the by-name call
 // plane.
@@ -299,20 +299,13 @@ func (a *App) project(mode Projection, dest string) error {
 // a contract nobody can read.
 //
 // It is deliberately narrow. An address that DOES something and hides is a
-// door nobody can find and nobody reviews, which is why this returns a Router
-// rather than taking a path: the routes that use it are grouped, visible in
-// one place, and read together.
+// door nobody can find and nobody reviews, which is why [Group.Undeclared]
+// returns a group rather than taking a path: the routes that use it are
+// grouped, visible in one place, and read together.
 //
 // The fact rides the route ENTRY (see [App.addRoute]), so it survives
 // composition — a service composed under a host stays undeclared at its new
 // path.
-func Undeclared(on OpTarget) Router {
-	s := on.OpScope()
-	g := s.App.group(here(1), s.Prefix)
-	g.wrap = s.Middleware
-	g.undeclared = true
-	return g
-}
 
 // Declares reports whether the app publishes method+path — whether it appears
 // in [App.Declaration], and so in the projections built from it.

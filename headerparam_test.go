@@ -18,7 +18,7 @@ type tenantOut struct {
 // context slot — and because it declares the header, every projection sees it.
 func TestHeaderParam_DeclaredHeaderBindsAndIsPublished(t *testing.T) {
 	app := quiet("svc")
-	Post(app, "/v1/things", func(_ context.Context, in *tenantIn) (*tenantOut, error) {
+	app.Post("/v1/things", func(_ context.Context, in *tenantIn) (*tenantOut, error) {
 		return &tenantOut{Saw: in.Tenant}, nil
 	}, WithOperationID("things"))
 

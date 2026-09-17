@@ -52,9 +52,9 @@ func echoSearch(_ context.Context, in *searchIn) (*searchOut, error) {
 func searchApp(t *testing.T) *zip.App {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "t", DisableStartupMessage: true})
-	zip.Get(a, "/v1/t/search", echoSearch)
-	zip.Get(a, "/v1/t/orgs/:owner/search", echoSearch)
-	zip.Post(a, "/v1/t/orgs/:owner/search", echoSearch)
+	a.Get("/v1/t/search", echoSearch)
+	a.Get("/v1/t/orgs/:owner/search", echoSearch)
+	a.Post("/v1/t/orgs/:owner/search", echoSearch)
 	return a
 }
 

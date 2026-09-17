@@ -53,13 +53,13 @@ func call2(t *testing.T, a *zip.App, method, path, body string) (int, string) {
 // took the *App only, so an app built on groups had to spell its prefix out per
 // route to have typed ops at all: friction that made the untyped handler, which
 // does inherit the prefix, the path of least resistance.
-func TestOpTarget_GroupPrefixIsPartOfTheOp(t *testing.T) {
+func TestGroup_PrefixIsPartOfTheOp(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "g", DisableStartupMessage: true})
 	v1 := a.Group("/v1")
 	things := v1.Group("/things")
 
-	zip.Get(things, "/:id", echoGroup)
-	zip.Post(v1, "/direct", echoGroup)
+	things.Get("/:id", echoGroup)
+	v1.Post("/direct", echoGroup)
 
 	// The route answers under the composed prefix.
 	if code, body := call2(t, a, "GET", "/v1/things/abc?note=hi", ""); code != 200 ||
@@ -89,11 +89,11 @@ func TestOpTarget_GroupPrefixIsPartOfTheOp(t *testing.T) {
 // A typed op and an untyped one declared on the SAME group land on the same
 // prefix. zip composes the typed op's path itself, so this is the test that says
 // its composition is the router's composition and not a second rule beside it.
-func TestOpTarget_TypedAndUntypedComposeAlike(t *testing.T) {
+func TestGroup_TypedAndUntypedComposeAlike(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "g", DisableStartupMessage: true})
 	g := a.Group("/v1/mix")
-	g.Get("/untyped", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"kind": "untyped"}) })
-	zip.Get(a.Group("/v1/mix"), "/typed", echoGroup)
+	g.Raw("GET", "/untyped", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"kind": "untyped"}) })
+	a.Group("/v1/mix").Get("/typed", echoGroup)
 
 	if code, body := call2(t, a, "GET", "/v1/mix/untyped", ""); code != 200 || !strings.Contains(body, "untyped") {
 		t.Errorf("untyped leaf = %d %s", code, body)
@@ -105,7 +105,7 @@ func TestOpTarget_TypedAndUntypedComposeAlike(t *testing.T) {
 
 // With() middleware composes around a typed op too. Dropping it silently would
 // be a hole rather than an inconvenience: With is where the gates go.
-func TestOpTarget_WithWrapsATypedOp(t *testing.T) {
+func TestGroup_WithWrapsATypedOp(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "g", DisableStartupMessage: true})
 	gate := func(next zip.Handler) zip.Handler {
 		return func(c *zip.Ctx) error {
@@ -116,7 +116,7 @@ func TestOpTarget_WithWrapsATypedOp(t *testing.T) {
 			return next(c)
 		}
 	}
-	zip.Get(a.With(gate), "/v1/gated/:id", echoGroup)
+	a.With(gate).Get("/v1/gated/:id", echoGroup)
 
 	if code, body := call2(t, a, "GET", "/v1/gated/x", ""); code != 403 {
 		t.Fatalf("ungated request = %d %s, want 403 — the middleware did not run", code, body)
@@ -157,31 +157,16 @@ func anyMap2(m map[string]map[string]any) map[string]any {
 	return out
 }
 
-// gateRouter is the shape a decorating Router outside this package has to take:
-// it wraps another Router and overrides OpScope so the gate it installs on every
-// untyped route also reaches a typed op declared through it. Getting this wrong
-// is not an inconvenience — it registers an UNGATED op on a router whose whole
-// purpose is the gate. hanzoai/commerce's Mint is the real one.
-type gateRouter struct {
-	zip.Router // embedded: everything this decorator does not override
-	gate       zip.Middleware
-}
-
-func (g gateRouter) OpScope() zip.OpScope {
-	s := g.Router.OpScope()
-	if s.Middleware == nil {
-		s.Middleware = g.gate
-	} else {
-		s.Middleware = zip.Chain(s.Middleware, g.gate)
-	}
-	return s
-}
-
-// A Router implemented OUTSIDE zip can carry typed ops, and its middleware
-// reaches them. OpTarget is exported for exactly this: sealing it would have
-// made every decorating router in the fleet unable to compile, and the ones that
-// could would have silently dropped their gate.
-func TestOpTarget_AnOutsideDecoratorCanCarryOps(t *testing.T) {
+// A GATE REACHES A TYPED OP. It is middleware on the group the op is declared
+// on, so there is nothing to decorate and nothing to override: the chain is a
+// property of where the route was declared.
+//
+// This is the property that used to need a decorating router implemented outside
+// this package — override OpScope, carry the chain onto the typed op by hand,
+// and get an UNGATED op on a router whose whole purpose is the gate if you got
+// it wrong. hanzoai/commerce's Mint was the real one. With verbs on a concrete
+// group there is no seam left to get wrong.
+func TestGroup_AGateReachesATypedOp(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "g", DisableStartupMessage: true})
 	gate := func(next zip.Handler) zip.Handler {
 		return func(c *zip.Ctx) error {
@@ -191,8 +176,8 @@ func TestOpTarget_AnOutsideDecoratorCanCarryOps(t *testing.T) {
 			return next(c)
 		}
 	}
-	mint := gateRouter{Router: a.Group("/v1/mint"), gate: gate}
-	zip.Post(mint, "/deposit", echoGroup)
+	mint := a.Group("/v1/mint").With(gate)
+	mint.Post("/deposit", echoGroup)
 
 	if cmds := a.Commands(); len(cmds) != 1 || cmds[0].Path != "/v1/mint/deposit" {
 		t.Fatalf("commands = %+v, want one op at /v1/mint/deposit", cmds)

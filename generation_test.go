@@ -17,7 +17,7 @@ import (
 // pointer moves, so a failed build costs the live system nothing.
 func TestGeneration_RefusedIncludeLeavesTheOldOneServing(t *testing.T) {
 	good := quiet("good")
-	good.Get("/v1/good", func(c *Ctx) error { return c.String(200, "good") })
+	good.Raw("GET", "/v1/good", func(c *Ctx) error { return c.String(200, "good") })
 
 	host := quiet("host")
 	host.Use(good)
@@ -30,7 +30,7 @@ func TestGeneration_RefusedIncludeLeavesTheOldOneServing(t *testing.T) {
 
 	// A plugin that claims an address the live set already holds.
 	bad := quiet("bad")
-	bad.Get("/v1/good", func(c *Ctx) error { return c.String(200, "bad") })
+	bad.Raw("GET", "/v1/good", func(c *Ctx) error { return c.String(200, "bad") })
 
 	err := hostOf(t, host).Include(bad)
 	if err == nil {
@@ -61,13 +61,13 @@ func TestGeneration_RefusedIncludeLeavesTheOldOneServing(t *testing.T) {
 // previous generation served still serves.
 func TestGeneration_IncludeAdvancesAndServes(t *testing.T) {
 	host := quiet("host")
-	host.Get("/v1/host", func(c *Ctx) error { return c.String(200, "host") })
+	host.Raw("GET", "/v1/host", func(c *Ctx) error { return c.String(200, "host") })
 	if err := build(host); err != nil {
 		t.Fatalf("generation 0: %v", err)
 	}
 
 	later := quiet("later")
-	later.Get("/v1/later", func(c *Ctx) error { return c.String(200, "later") })
+	later.Raw("GET", "/v1/later", func(c *Ctx) error { return c.String(200, "later") })
 	if err := hostOf(t, host).Include(later); err != nil {
 		t.Fatalf("Include: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestGeneration_IncludeAdvancesAndServes(t *testing.T) {
 func TestGeneration_DropStopsServingEveryOccurrence(t *testing.T) {
 	billing := unnamedApp() // no declared id, so it may occur twice
 	host := quiet("host")
-	host.Get("/v1/keep", func(c *Ctx) error { return c.String(200, "keep") })
+	host.Raw("GET", "/v1/keep", func(c *Ctx) error { return c.String(200, "keep") })
 	host.Group("/a").Use(billing)
 	host.Group("/b").Use(billing)
 	if err := build(host); err != nil {
@@ -161,7 +161,7 @@ func TestGeneration_DropStopsServingEveryOccurrence(t *testing.T) {
 // does. There is one transaction path, not two.
 func TestGeneration_DropOfNothingIsANoOpGeneration(t *testing.T) {
 	host := quiet("host")
-	host.Get("/x", func(c *Ctx) error { return c.String(200, "x") })
+	host.Raw("GET", "/x", func(c *Ctx) error { return c.String(200, "x") })
 	if err := build(host); err != nil {
 		t.Fatalf("generation 0: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestGeneration_FrozenDefinitionRefusesDirectEdits(t *testing.T) {
 			}
 		}
 	}()
-	child.Get("/sneak", func(c *Ctx) error { return nil })
+	child.Raw("GET", "/sneak", func(c *Ctx) error { return nil })
 }
 
 // TestGeneration_RequestsArePinned. The handler resolves the generation once,
@@ -207,7 +207,7 @@ func TestGeneration_RequestsArePinned(t *testing.T) {
 	host := quiet("host")
 	started := make(chan struct{})
 	release := make(chan struct{})
-	host.Get("/slow", func(c *Ctx) error {
+	host.Raw("GET", "/slow", func(c *Ctx) error {
 		close(started)
 		<-release
 		return c.String(200, "generation 0")
@@ -226,7 +226,7 @@ func TestGeneration_RequestsArePinned(t *testing.T) {
 
 	// Swap generations while the request is in flight.
 	later := quiet("later")
-	later.Get("/v1/later", func(c *Ctx) error { return nil })
+	later.Raw("GET", "/v1/later", func(c *Ctx) error { return nil })
 	if err := hostOf(t, host).Include(later); err != nil {
 		t.Fatalf("Include during an in-flight request: %v", err)
 	}

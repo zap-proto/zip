@@ -42,8 +42,8 @@ func hit(t *testing.T, app *zip.App, path string) string {
 // static route must still win.
 func TestSpecificity_StaticBeatsEarlierWildcard(t *testing.T) {
 	app := specApp()
-	app.Get("/v1/iam/*", mark("wildcard"))
-	app.Get("/v1/iam/keys", mark("static"))
+	app.Raw("GET", "/v1/iam/*", mark("wildcard"))
+	app.Raw("GET", "/v1/iam/keys", mark("static"))
 
 	if got := hit(t, app, "/v1/iam/keys"); !strings.Contains(got, "static") {
 		t.Fatalf("/v1/iam/keys hit %s, want static", got)
@@ -56,9 +56,9 @@ func TestSpecificity_StaticBeatsEarlierWildcard(t *testing.T) {
 // Full ladder registered most-generic-first: static beats :param beats *.
 func TestSpecificity_Ladder(t *testing.T) {
 	app := specApp()
-	app.Get("/users/*", mark("wildcard"))
-	app.Get("/users/:id", mark("param"))
-	app.Get("/users/me", mark("static"))
+	app.Raw("GET", "/users/*", mark("wildcard"))
+	app.Raw("GET", "/users/:id", mark("param"))
+	app.Raw("GET", "/users/me", mark("static"))
 
 	if got := hit(t, app, "/users/me"); !strings.Contains(got, "static") {
 		t.Fatalf("/users/me hit %s, want static", got)
@@ -74,8 +74,8 @@ func TestSpecificity_Ladder(t *testing.T) {
 // A deeper static pattern beats a shallower wildcard registered before it.
 func TestSpecificity_DeeperStaticBeatsShallowWildcard(t *testing.T) {
 	app := specApp()
-	app.Get("/a/*", mark("wildcard"))
-	app.Get("/a/b/c", mark("deep-static"))
+	app.Raw("GET", "/a/*", mark("wildcard"))
+	app.Raw("GET", "/a/b/c", mark("deep-static"))
 
 	if got := hit(t, app, "/a/b/c"); !strings.Contains(got, "deep-static") {
 		t.Fatalf("/a/b/c hit %s, want deep-static", got)
@@ -102,8 +102,8 @@ func TestSpecificity_DeeperStaticBeatsShallowWildcard(t *testing.T) {
 // claimants named, instead of one per build.
 func TestSpecificity_AmbiguousConflictRefusedAtBuild(t *testing.T) {
 	app := specApp()
-	app.Get("/x/:id", mark("id"))
-	app.Get("/x/:name", mark("name")) // no longer panics HERE
+	app.Raw("GET", "/x/:id", mark("id"))
+	app.Raw("GET", "/x/:name", mark("name")) // no longer panics HERE
 
 	defer func() {
 		r := recover()
@@ -121,8 +121,8 @@ func TestSpecificity_AmbiguousConflictRefusedAtBuild(t *testing.T) {
 // Same pattern, different methods: no conflict — method stacks are independent.
 func TestSpecificity_MethodsIndependent(t *testing.T) {
 	app := specApp()
-	app.Get("/y/:id", mark("get"))
-	app.Post("/y/:id", mark("post")) // must not panic
+	app.Raw("GET", "/y/:id", mark("get"))
+	app.Raw("POST", "/y/:id", mark("post")) // must not panic
 	if got := hit(t, app, "/y/1"); !strings.Contains(got, "get") {
 		t.Fatalf("/y/1 hit %s, want get", got)
 	}
@@ -136,7 +136,7 @@ func TestSpecificity_MiddlewareOrderPreserved(t *testing.T) {
 	var order []string
 	app.Use(zip.H(func(c *zip.Ctx) error { order = append(order, "mw1"); return c.Next() }))
 	app.Use(zip.H(func(c *zip.Ctx) error { order = append(order, "mw2"); return c.Next() }))
-	app.Get("/z", func(c *zip.Ctx) error {
+	app.Raw("GET", "/z", func(c *zip.Ctx) error {
 		order = append(order, "handler")
 		return c.JSON(200, map[string]string{"via": "z"})
 	})

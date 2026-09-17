@@ -159,7 +159,7 @@ func refusal(err error) *HTTPError {
 //	oauth.Post("/v1/oauth/introspect", introspect)
 //	oauth.Post("/v1/oauth/revoke", revoke)
 //
-// It returns a Router, so it takes typed ops the same way — zip.Post(oauth, …)
+// It returns a group, so it takes typed ops the same way — oauth.Post(…)
 // — and nests: a Group of it is still OAuth's. The vocabulary rides the route
 // ENTRY from here (see [App.addRoute]), which is what makes it survive
 // composition: a service composed under a host answers the same way at its new
@@ -169,13 +169,6 @@ func refusal(err error) *HTTPError {
 // It covers the whole address and not just the handler, because the refusals
 // that must obey RFC 6749 include the ones the handler never sees — a body over
 // the limit, a panic recovered above it, a gate refusing in front of it.
-func OAuth(on OpTarget) Router {
-	s := on.OpScope()
-	g := s.App.group(here(1), s.Prefix)
-	g.wrap = s.Middleware
-	g.oauth = true
-	return g
-}
 
 // composeOAuth reduces a walk to the addresses whose refusals speak RFC 6749,
 // in the absolute spelling the router matched on — the same projection the

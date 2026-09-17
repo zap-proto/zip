@@ -16,7 +16,7 @@ import (
 // silently discarded. No error, no panic, no CORS headers on any response.
 func TestFiberEscape_ForeignRegistrationIsRefusedNotDiscarded(t *testing.T) {
 	app := quiet("host")
-	app.Get("/live", func(c *Ctx) error { return c.String(200, "live") })
+	app.Raw("GET", "/live", func(c *Ctx) error { return c.String(200, "live") })
 	h, err := host2(app)
 	if err != nil {
 		t.Fatalf("host: %v", err)
@@ -39,7 +39,7 @@ func TestFiberEscape_ForeignRegistrationIsRefusedNotDiscarded(t *testing.T) {
 		}
 	}()
 	later := quiet("later")
-	later.Get("/later", func(c *Ctx) error { return nil })
+	later.Raw("GET", "/later", func(c *Ctx) error { return nil })
 	_ = h.Include(later)
 }
 
@@ -47,15 +47,14 @@ func TestFiberEscape_ForeignRegistrationIsRefusedNotDiscarded(t *testing.T) {
 // ordinary composition all rebuild without tripping it.
 func TestFiberEscape_OrdinaryCompositionDoesNotTripTheGuard(t *testing.T) {
 	app := quiet("host")
-	Get(app, "/v1/thing", func(ctx1 context.Context, in *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil },
-		WithOperationID("thing"))
+	app.Get("/v1/thing", func(ctx1 context.Context, in *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil }, WithOperationID("thing"))
 	h, err := host2(app)
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
 	for i := 0; i < 3; i++ {
 		p := quiet("p" + itoa(i))
-		p.Get("/p"+itoa(i), func(c *Ctx) error { return nil })
+		p.Raw("GET", "/p"+itoa(i), func(c *Ctx) error { return nil })
 		if err := h.Include(p); err != nil {
 			t.Fatalf("Include %d: %v", i, err)
 		}

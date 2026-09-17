@@ -51,7 +51,7 @@ func identApp(t *testing.T, cfg MCPConfig) *App {
 	t.Helper()
 	cfg.Source = identSource{}
 	app := New(Config{AppName: "ident", DisableStartupMessage: true, MCP: cfg})
-	Get(app, "/v1/ping", func(context.Context, *struct{}) (*struct {
+	app.Get("/v1/ping", func(context.Context, *struct{}) (*struct {
 		Pong bool `json:"pong"`
 	}, error) {
 		return &struct {
@@ -89,7 +89,7 @@ func TestMCP_ZapDoorWithAPerCallerHalfRefusesWithoutIdentify(t *testing.T) {
 func TestMCP_ZapDoorWithoutASourceNeedsNoIdentify(t *testing.T) {
 	app := quiet("plain")
 	app.cfg.MCP.Addr = filepath.Join(sockDir(t), "m.sock")
-	Get(app, "/v1/ping", func(context.Context, *struct{}) (*struct{}, error) {
+	app.Get("/v1/ping", func(context.Context, *struct{}) (*struct{}, error) {
 		return &struct{}{}, nil
 	}, WithOperationID("ping"))
 	if err := app.checkMCP(); err != nil {

@@ -40,7 +40,7 @@ func TestHereRunsTheOpWithoutTheSocket(t *testing.T) {
 
 	var ran atomic.Int64
 	app := zip.New(zip.Config{AppName: "calc"})
-	zip.Post[addIn, addOut](app, "/add", func(_ context.Context, in *addIn) (*addOut, error) {
+	app.Post("/add", func(_ context.Context, in *addIn) (*addOut, error) {
 		ran.Add(1)
 		return &addOut{Sum: in.A + in.B}, nil
 	}, zip.WithOperationID("add"))
@@ -108,7 +108,7 @@ func TestHereRunsTheOpWithoutTheSocket(t *testing.T) {
 // reached — a name is a name, not a transport.
 func TestHereRefusesAnUnknownOp(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "calc"})
-	zip.Post[addIn, addOut](app, "/add", func(_ context.Context, in *addIn) (*addOut, error) {
+	app.Post("/add", func(_ context.Context, in *addIn) (*addOut, error) {
 		return &addOut{Sum: in.A + in.B}, nil
 	}, zip.WithOperationID("add"))
 
@@ -129,7 +129,7 @@ func TestServingFollowsTheListener(t *testing.T) {
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	app := zip.New(zip.Config{AppName: "meter"})
-	zip.Post[addIn, addOut](app, "/add", func(_ context.Context, in *addIn) (*addOut, error) {
+	app.Post("/add", func(_ context.Context, in *addIn) (*addOut, error) {
 		return &addOut{Sum: in.A + in.B}, nil
 	}, zip.WithOperationID("add"))
 
@@ -159,7 +159,7 @@ func TestHereValidatesLikeTheWire(t *testing.T) {
 		Subject string `json:"subject" validate:"required"`
 	}
 	app := zip.New(zip.Config{AppName: "till"})
-	zip.Post[payIn, addOut](app, "/pay", func(_ context.Context, _ *payIn) (*addOut, error) {
+	app.Post("/pay", func(_ context.Context, _ *payIn) (*addOut, error) {
 		return &addOut{Sum: 1}, nil
 	}, zip.WithOperationID("pay"))
 

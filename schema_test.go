@@ -64,10 +64,10 @@ func ok[T any](_ context.Context, _ *T) (*schemaOut, error) { return &schemaOut{
 func schemaApp(t *testing.T) *zip.App {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "schema", DisableStartupMessage: true})
-	zip.Post(a, "/v1/s/tree", ok[treeNode])
-	zip.Post(a, "/v1/s/mutual", ok[mutualA])
-	zip.Post(a, "/v1/s/person", ok[person])
-	zip.Post(a, "/v1/s/collide", ok[collideIn])
+	a.Post("/v1/s/tree", ok[treeNode])
+	a.Post("/v1/s/mutual", ok[mutualA])
+	a.Post("/v1/s/person", ok[person])
+	a.Post("/v1/s/collide", ok[collideIn])
 	return a
 }
 
@@ -199,7 +199,7 @@ func TestSchema_RecursiveSpecMarshals(t *testing.T) {
 // registry is what a schema NEEDS, not a wrapper every schema pays for.
 func TestSchema_MCPToolSchemaCarriesNoUnusedDefs(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "schema", DisableStartupMessage: true})
-	zip.Post(a, "/v1/s/flat", ok[addr])
+	a.Post("/v1/s/flat", ok[addr])
 	tools := a.MCPTools()
 	if len(tools) != 1 {
 		t.Fatalf("tools = %v, want 1", tools)

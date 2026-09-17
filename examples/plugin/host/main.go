@@ -28,7 +28,7 @@ type Nothing struct{}
 // deployment decision and nothing more.
 func health() *zip.App {
 	a := zip.New(zip.Config{AppName: "health", DisableStartupMessage: true})
-	zip.Get(a, "/health", func(context.Context, *Nothing) (*Health, error) {
+	a.Get("/health", func(context.Context, *Nothing) (*Health, error) {
 		return &Health{Status: "ok"}, nil
 	})
 	return a

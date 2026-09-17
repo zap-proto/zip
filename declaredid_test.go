@@ -30,7 +30,7 @@ type roleOut struct {
 // service is the o11y shape: a definition that declares its own published ids.
 func service() *App {
 	s := quiet("o11y")
-	Post(s, "/roles", func(_ context.Context, in *roleIn) (*roleOut, error) {
+	s.Post("/roles", func(_ context.Context, in *roleIn) (*roleOut, error) {
 		return &roleOut{ID: in.Name}, nil
 	}, WithOperationID("CreateRole"))
 	return s
@@ -89,7 +89,7 @@ func TestDeclaredOperationIDSurvivesComposition(t *testing.T) {
 // function of mount order.
 func TestUndeclaredOperationIDComesFromTheAbsolutePath(t *testing.T) {
 	anon := quiet("anon")
-	Get(anon, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+	anon.Get("/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 		return &invoiceOut{ID: in.ID}, nil
 	})
 

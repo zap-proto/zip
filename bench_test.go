@@ -78,7 +78,7 @@ func Benchmark_ZipTax(b *testing.B) {
 	za := zip.New(benchConfig())
 	fa := fiber.New()
 	for _, r := range zipTaxRoutes {
-		za.Get(r.route, func(c *zip.Ctx) error { return c.NoContent(204) })
+		za.Raw("GET", r.route, func(c *zip.Ctx) error { return c.NoContent(204) })
 		fa.Get(r.route, func(c fiber.Ctx) error { c.Status(204); return nil })
 	}
 	zh := za.Fiber().Handler()
@@ -122,7 +122,7 @@ func Benchmark_ChainTax(b *testing.B) {
 			za.Use(zip.H(func(c *zip.Ctx) error { return c.Continue() }))
 			fa.Use(func(c fiber.Ctx) error { return c.Next() })
 		}
-		za.Get("/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })
+		za.Raw("GET", "/v1/health", func(c *zip.Ctx) error { return c.NoContent(204) })
 		fa.Get("/v1/health", func(c fiber.Ctx) error { c.Status(204); return nil })
 
 		for name, h := range map[string]fasthttp.RequestHandler{
@@ -175,16 +175,15 @@ func makeChatResponse(model string) chatResponse {
 func Benchmark_TypedRoute(b *testing.B) {
 	// Generic typed route.
 	ta := zip.New(benchConfig())
-	zip.Post[chatRequest, chatResponse](ta, "/v1/chat",
-		func(_ context.Context, in *chatRequest) (*chatResponse, error) {
-			out := makeChatResponse(in.Model)
-			return &out, nil
-		})
+	ta.Post("/v1/chat", func(_ context.Context, in *chatRequest) (*chatResponse, error) {
+		out := makeChatResponse(in.Model)
+		return &out, nil
+	})
 	th := ta.Fiber().Handler()
 
 	// Hand-written zip handler — same work, no generics.
 	ha := zip.New(benchConfig())
-	ha.Post("/v1/chat", func(c *zip.Ctx) error {
+	ha.Raw("POST", "/v1/chat", func(c *zip.Ctx) error {
 		var in chatRequest
 		if err := c.Bind(&in); err != nil {
 			return err

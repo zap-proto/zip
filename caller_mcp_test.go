@@ -38,7 +38,7 @@ func TestCallerReachesTheHandlerOverMCP(t *testing.T) {
 	}
 
 	app := New(Config{AppName: "svc", DisableStartupMessage: true})
-	Get(app, "/v1/who", func(ctx context.Context, _ *in) (*out, error) {
+	app.Get("/v1/who", func(ctx context.Context, _ *in) (*out, error) {
 		c := CallerOf(ctx)
 		return &out{Org: c.Org, User: c.User}, nil
 	}, WithOperationID("who"))

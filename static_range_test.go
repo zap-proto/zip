@@ -21,7 +21,7 @@ import (
 
 func rangeApp(assets fs.FS) *zip.App {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
-	app.Get("/assets/*", zip.Static(assets))
+	app.Raw("GET", "/assets/*", zip.Static(assets))
 	return app
 }
 

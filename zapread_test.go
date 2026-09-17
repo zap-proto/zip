@@ -334,9 +334,9 @@ type rtRange struct {
 // would show up here as a difference.
 func TestReadZAP_ProjectsBackToTheSameSchema(t *testing.T) {
 	a := New(Config{AppName: "probe"})
-	Get(a, "/v1/height", nop[rtHeight, rtHeight])
-	Post(a, "/v1/range", nop[rtRange, rtRange])
-	Delete(a, "/v1/range", nop[rtRange, rtRange])
+	a.Get("/v1/height", nop[rtHeight, rtHeight])
+	a.Post("/v1/range", nop[rtRange, rtRange])
+	a.Delete("/v1/range", nop[rtRange, rtRange])
 
 	first := ZAPSchema("probe", a).String()
 

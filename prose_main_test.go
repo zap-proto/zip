@@ -105,7 +105,7 @@ func Hello(context.Context, *Empty) (*Greeting, error) {
 
 func main() {
 	app := zip.New(zip.Config{AppName: "prose", DisableStartupMessage: true})
-	zip.Get(app, "/v1/hello", Hello)
+	app.Get("/v1/hello", Hello)
 	if done, err := app.Described(); done && err != nil {
 		os.Exit(1)
 	}

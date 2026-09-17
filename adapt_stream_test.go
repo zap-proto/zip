@@ -37,7 +37,7 @@ func serveStream(t *testing.T, app *App) string {
 func streamApp(t *testing.T, h http.HandlerFunc) string {
 	t.Helper()
 	app := New(Config{DisableStartupMessage: true})
-	app.Group("/legacy").All("/*", AdaptNetHTTP(h))
+	app.Group("/legacy").Raw(MethodAll, "/*", AdaptNetHTTP(h))
 	return serveStream(t, app)
 }
 

@@ -33,7 +33,7 @@ func TestChain_NestsLeftToRight(t *testing.T) {
 	app := mwApp()
 	var rec []string
 	app.With(order(&rec, "a"), order(&rec, "b"), order(&rec, "c")).
-		Get("/x", func(c *zip.Ctx) error {
+		Raw("GET", "/x", func(c *zip.Ctx) error {
 			rec = append(rec, "handler")
 			return c.String(200, "ok")
 		})
@@ -52,7 +52,7 @@ func TestChain_Value(t *testing.T) {
 	app := mwApp()
 	var rec []string
 	pipeline := zip.Chain(order(&rec, "outer"), order(&rec, "inner"))
-	app.With(pipeline).Get("/y", func(c *zip.Ctx) error {
+	app.With(pipeline).Raw("GET", "/y", func(c *zip.Ctx) error {
 		rec = append(rec, "handler")
 		return c.String(200, "ok")
 	})
@@ -102,7 +102,7 @@ func TestWith_CloudRateLimitCSRF_Order(t *testing.T) {
 	app := mwApp()
 	var rec []string
 	app.With(rateLimit(&rec, false), requireCSRF(&rec)).
-		Post("/v1/keys", func(c *zip.Ctx) error {
+		Raw("POST", "/v1/keys", func(c *zip.Ctx) error {
 			rec = append(rec, "mintkey")
 			return c.String(200, "minted")
 		})
@@ -119,7 +119,7 @@ func TestWith_CloudRateLimit_ShortCircuits(t *testing.T) {
 	app := mwApp()
 	var rec []string
 	app.With(rateLimit(&rec, true), requireCSRF(&rec)).
-		Post("/v1/keys", func(c *zip.Ctx) error {
+		Raw("POST", "/v1/keys", func(c *zip.Ctx) error {
 			rec = append(rec, "mintkey")
 			return c.String(200, "minted")
 		})
@@ -140,7 +140,7 @@ func TestWith_CoexistsWithUse(t *testing.T) {
 	app := mwApp()
 	var rec []string
 	app.Use(zip.H(func(c *zip.Ctx) error { rec = append(rec, "use"); return c.Next() }))
-	app.With(order(&rec, "with")).Get("/z", func(c *zip.Ctx) error {
+	app.With(order(&rec, "with")).Raw("GET", "/z", func(c *zip.Ctx) error {
 		rec = append(rec, "handler")
 		return c.String(200, "ok")
 	})
@@ -156,8 +156,8 @@ func TestWith_CoexistsWithUse(t *testing.T) {
 func TestWith_SpecificityPreserved(t *testing.T) {
 	app := mwApp()
 	var rec []string
-	app.With(order(&rec, "mw")).Get("/api/*", func(c *zip.Ctx) error { return c.String(200, "wild") })
-	app.Get("/api/health", func(c *zip.Ctx) error { return c.String(200, "health") })
+	app.With(order(&rec, "mw")).Raw("GET", "/api/*", func(c *zip.Ctx) error { return c.String(200, "wild") })
+	app.Raw("GET", "/api/health", func(c *zip.Ctx) error { return c.String(200, "health") })
 
 	if resp, body := doGet(t, app, "/api/health"); resp.StatusCode != 200 || body != "health" {
 		t.Fatalf("/api/health: status=%d body=%q, want the specific route (not the With-wrapped wildcard)", resp.StatusCode, body)

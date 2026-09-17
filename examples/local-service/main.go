@@ -75,7 +75,7 @@ func (s *Store) Add(ctx context.Context, in *AddIn) (*Note, error) {
 // OpenAPI document can be written by a build step that has none.
 func New(s *Store) *zip.App {
 	app := zip.New(zip.Config{AppName: "notes"})
-	zip.Post(app, "/v1/notes", s.Add)
+	app.Post("/v1/notes", s.Add)
 	return app
 }
 

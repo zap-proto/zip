@@ -17,7 +17,7 @@ func TestHeaderReadsTheRequestAndSaysNothingWhenThereIsNone(t *testing.T) {
 	type out struct {
 		Auth string `json:"auth"`
 	}
-	Get(app, "/v1/echo", func(ctx context.Context, _ *none) (*out, error) {
+	app.Get("/v1/echo", func(ctx context.Context, _ *none) (*out, error) {
 		return &out{Auth: Header(ctx, "Authorization")}, nil
 	}, WithOperationID("echo"))
 	if err := app.Build(); err != nil {

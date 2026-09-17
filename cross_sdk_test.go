@@ -35,7 +35,7 @@ func crossApp() *zip.App {
 		Example:  []byte(`{"id": "acc_1"}`),
 		Response: []byte(`{"id": "acc_1", "balance": 1000, "active": true}`),
 	})
-	zip.Post(app, "/v1/account", getAccount)
+	app.Post("/v1/account", getAccount)
 	return app
 }
 

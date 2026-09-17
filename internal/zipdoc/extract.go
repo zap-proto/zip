@@ -282,8 +282,8 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 	return op, true, nil
 }
 
-// raw reads one router.Get("/path", handler) — a registration the wire keeps
-// UNTYPED — into a prose-only Op.
+// raw reads one group.Raw(method, "/path", handler) — a registration the wire
+// keeps UNTYPED — into a prose-only Op.
 //
 // Some routes cannot become typed ops and it is the wire, not the author, that
 // says so: an OIDC redirect, a JWKS document, a SCIM body governed by RFC 7643, a
@@ -305,20 +305,23 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 // day this shipped.
 func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types.Object]string) (Op, bool) {
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok || len(call.Args) < 2 {
+	if !ok || sel.Sel.Name != "Raw" || len(call.Args) < 3 {
 		return Op{}, false
 	}
-	method, ok := verbs[sel.Sel.Name]
-	if !ok {
+	// Raw NAMES ITS METHOD, so the method is an argument rather than the method
+	// name — http.MethodGet and "GET" are the same constant and both read here.
+	mlit := info.Types[call.Args[0]].Value
+	if mlit == nil || mlit.Kind() != constant.String {
 		return Op{}, false
 	}
+	method := strings.ToUpper(constant.StringVal(mlit))
 	// The RECEIVER decides: a *zip.App or anything satisfying zip.Router is a
 	// route table. Matching on the method name alone would claim every Get in
 	// every package in the fleet.
-	if !isZipRouter(info.Types[sel.X].Type) {
+	if !isRouteTable(info.Types[sel.X].Type) {
 		return Op{}, false
 	}
-	lit := info.Types[call.Args[0]].Value
+	lit := info.Types[call.Args[1]].Value
 	if lit == nil || lit.Kind() != constant.String {
 		return Op{}, false
 	}
@@ -341,7 +344,7 @@ func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types
 		}
 		prefix = ""
 	}
-	doc := e.handlerDoc(info, call, call.Args[1])
+	doc := e.handlerDoc(info, call, call.Args[2])
 	prose, example, response, derr := splitDoc(doc)
 	if derr != nil || strings.TrimSpace(prose) == "" {
 		return Op{}, false
@@ -356,7 +359,7 @@ func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types
 	}, true
 }
 
-// alias reads one zip.Alias(router.Get, canonical, legacy, handler) into TWO
+// alias reads one group.Alias(method, canonical, legacy, handler) into TWO
 // prose-only Ops carrying the same sentence.
 //
 // Both addresses serve one handler, so both mean the same thing and both must say
@@ -368,24 +371,19 @@ func (e *extractor) raw(info *types.Info, call *ast.CallExpr, prefixes map[types
 // router.Get(path, handler) calls, which is why zip owns Alias: this matcher can
 // only recognise a function whose identity it knows.
 func (e *extractor) alias(info *types.Info, call *ast.CallExpr, prefixes map[types.Object]string) []Op {
-	id := calleeIdent(call.Fun)
-	if id == nil || len(call.Args) < 4 {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Alias" || len(call.Args) < 4 {
 		return nil
 	}
-	fn, _ := info.Uses[id].(*types.Func)
-	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != ZipPkg || fn.Name() != "Alias" {
+	if !isRouteTable(info.Types[sel.X].Type) {
 		return nil
 	}
-	// The registrar is a METHOD VALUE — `r.Get` — so it names both the verb and
-	// the router the paths hang off.
-	sel, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
-	if !ok {
+	// Alias NAMES ITS METHOD, the same shape as Raw.
+	mlit := info.Types[call.Args[0]].Value
+	if mlit == nil || mlit.Kind() != constant.String {
 		return nil
 	}
-	method, ok := verbs[sel.Sel.Name]
-	if !ok || !isZipRouter(info.Types[sel.X].Type) {
-		return nil
-	}
+	method := strings.ToUpper(constant.StringVal(mlit))
 	prefix, err := routerPrefix(info, prefixes, sel.X)
 	if err != nil {
 		prefix = ""
@@ -417,20 +415,11 @@ func (e *extractor) alias(info *types.Info, call *ast.CallExpr, prefixes map[typ
 	return out
 }
 
-// isZipRouter reports whether t is a route table this pass may read: *zip.App,
-// *zip.Scope, or any type zip.Router names (a group, an app, whatever a host hands down).
-func isZipRouter(t types.Type) bool {
-	if t == nil {
-		return false
-	}
-	if isZipApp(t) || isZipScope(t) {
-		return true
-	}
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil {
-		return false
-	}
-	return named.Obj().Pkg().Path() == ZipPkg && named.Obj().Name() == "Router"
+// isRouteTable reports whether t is a place routes are declared: *zip.App or
+// *zip.Group. Those are the only two, which is the point of the router having
+// no interface — there is nothing else a host can hand down.
+func isRouteTable(t types.Type) bool {
+	return t != nil && (isZipApp(t) || isZipGroup(t))
 }
 
 // groupPrefixes maps each variable that holds a router to the path prefix it was
@@ -478,13 +467,16 @@ func groupCallPrefix(info *types.Info, known map[types.Object]string, e ast.Expr
 	}
 
 	// Unwrap fluent chaining wrappers:
+	// A group's metadata and gating methods all answer the same group, so a
+	// prefix reads THROUGH them: users.Group("/mint").Use(gate).Tag("mint") is
+	// still /mint. OAuth and Undeclared return a group at the same prefix too.
 	switch sel.Sel.Name {
-	case "Use", "Tag", "WithTags", "Name", "With":
+	case "Use", "With", "Tag", "Defaults", "OAuth", "Undeclared":
 		return groupCallPrefix(info, known, sel.X)
 	}
 
 	switch sel.Sel.Name {
-	case "Group", "GroupScope", "Scope":
+	case "Group":
 		if len(call.Args) >= 1 {
 			lit := info.Types[call.Args[0]].Value
 			if lit != nil && lit.Kind() == constant.String {
@@ -534,7 +526,7 @@ func routerPrefix(info *types.Info, prefixes map[types.Object]string, arg ast.Ex
 	if p, ok := groupCallPrefix(info, prefixes, arg); ok {
 		return p, nil
 	}
-	if isZipScope(info.Types[arg].Type) {
+	if isZipGroup(info.Types[arg].Type) {
 		return "", nil
 	}
 	return "", fmt.Errorf("cannot resolve the path prefix of the router this op registers on, so its doc comment " +
@@ -556,7 +548,7 @@ func isZipApp(t types.Type) bool {
 }
 
 // isZipScope reports whether t is *zip.Scope or *zip.Group.
-func isZipScope(t types.Type) bool {
+func isZipGroup(t types.Type) bool {
 	if t == nil {
 		return false
 	}
@@ -568,7 +560,7 @@ func isZipScope(t types.Type) bool {
 	if !ok || named.Obj().Pkg() == nil {
 		return false
 	}
-	return named.Obj().Pkg().Path() == ZipPkg && (named.Obj().Name() == "Scope" || named.Obj().Name() == "Group")
+	return named.Obj().Pkg().Path() == ZipPkg && named.Obj().Name() == "Group"
 }
 
 // joinPath composes a prefix with a leaf the way the router does, so the key this

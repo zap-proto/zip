@@ -110,8 +110,8 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 		// Nothing declared: the prefix and everything under it, which is what a
 		// bare Proxy has always registered.
 		p := trimPrefix(prefix)
-		r.All(p, proxy)
-		r.All(p+"/*", proxy)
+		r.raw(here(1), methodAll, p, []Handler{proxy})
+		r.raw(here(1), methodAll, p+"/*", []Handler{proxy})
 		return r, nil
 	}
 	// Declared: exactly the addresses the remote says it answers, so an
@@ -127,7 +127,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 				prefix, rt.Method, rt.Pattern)
 		}
 		if rt.Op == "" {
-			r.method(rt.Method, rt.Pattern, []Handler{proxy})
+			r.raw(here(1), rt.Method, rt.Pattern, []Handler{proxy})
 			continue
 		}
 		r.addRoute(here(1), route{

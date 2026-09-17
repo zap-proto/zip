@@ -20,7 +20,7 @@ import (
 // handler/JSON path as HTTP.
 func TestListen_ZAP(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "zaptest", DisableStartupMessage: true})
-	app.Get("/v1/health", func(c *zip.Ctx) error {
+	app.Raw("GET", "/v1/health", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"status": "ok", "transport": "zap"})
 	})
 
@@ -58,7 +58,7 @@ func TestListen_ZAP(t *testing.T) {
 // scheme selecting each. This is the headline of "one verb, transport is a value".
 func TestListen_DualTransport(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "dual", DisableStartupMessage: true})
-	app.Get("/v1/health", func(c *zip.Ctx) error {
+	app.Raw("GET", "/v1/health", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"status": "ok"})
 	})
 
@@ -109,7 +109,7 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 
 	// Control: no ReadBufferSize -> fasthttp's 4 KiB default -> 431.
 	ctrl := zip.New(zip.Config{AppName: "ctrl", DisableStartupMessage: true})
-	ctrl.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	ctrl.Raw("GET", "/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
 	ctrlAddr := freeAddr(t)
 	go func() { _ = ctrl.Listen("http://" + ctrlAddr) }()
 	defer func() { _ = ctrl.Shutdown() }()
@@ -120,7 +120,7 @@ func TestHTTPTransport_ReadBufferSize_Raises431Ceiling(t *testing.T) {
 
 	// Fixed: ReadBufferSize 32 KiB -> the SAME 9 KiB header is accepted.
 	fixed := zip.New(zip.Config{AppName: "fixed", DisableStartupMessage: true, ReadBufferSize: 32768})
-	fixed.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	fixed.Raw("GET", "/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
 	fixedAddr := freeAddr(t)
 	go func() { _ = fixed.Listen("http://" + fixedAddr) }()
 	defer func() { _ = fixed.Shutdown() }()
@@ -142,7 +142,7 @@ func TestHTTPTransport_BodyLimitReachesTheSocket(t *testing.T) {
 	}
 	serve := func(name string, limit int) string {
 		app := zip.New(zip.Config{AppName: name, DisableStartupMessage: true, BodyLimit: limit})
-		app.Post("/v1/echo", func(c *zip.Ctx) error { return c.JSON(200, map[string]int{"n": len(c.Body())}) })
+		app.Raw("POST", "/v1/echo", func(c *zip.Ctx) error { return c.JSON(200, map[string]int{"n": len(c.Body())}) })
 		addr := freeAddr(t)
 		go func() { _ = app.Listen("http://" + addr) }()
 		t.Cleanup(func() { _ = app.Shutdown() })
@@ -194,7 +194,7 @@ func TestHTTPTransport_ServerHeaderCoversPreRoutingErrors(t *testing.T) {
 
 	// Branded: the pre-routing 431 carries Server: <brand>, never the framework.
 	brand := zip.New(zip.Config{AppName: "brand", DisableStartupMessage: true, ServerHeader: "hanzo"})
-	brand.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	brand.Raw("GET", "/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
 	brandAddr := freeAddr(t)
 	go func() { _ = brand.Listen("http://" + brandAddr) }()
 	defer func() { _ = brand.Shutdown() }()
@@ -215,7 +215,7 @@ func TestHTTPTransport_ServerHeaderCoversPreRoutingErrors(t *testing.T) {
 
 	// Suppressed: ServerHeader "-" emits NO Server header on the pre-routing error.
 	quiet := zip.New(zip.Config{AppName: "quiet", DisableStartupMessage: true, ServerHeader: "-"})
-	quiet.Get("/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
+	quiet.Raw("GET", "/v1/health", func(c *zip.Ctx) error { return c.JSON(200, map[string]string{"ok": "1"}) })
 	quietAddr := freeAddr(t)
 	go func() { _ = quiet.Listen("http://" + quietAddr) }()
 	defer func() { _ = quiet.Shutdown() }()

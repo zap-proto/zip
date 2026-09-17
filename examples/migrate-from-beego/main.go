@@ -54,10 +54,10 @@ func main() {
 	app := zip.New(zip.Config{AppName: "migrate-from-beego"})
 
 	// New native zip routes, typed:
-	zip.Get(app, "/v1/iam/healthz", healthz)
+	app.Get("/v1/iam/healthz", healthz)
 
 	// Legacy beego app under /legacy/iam — one adapted wildcard route:
-	app.Group("/legacy/iam").All("/*", zip.AdaptNetHTTP(beegoStub{}))
+	app.Group("/legacy/iam").Raw(zip.MethodAll, "/*", zip.AdaptNetHTTP(beegoStub{}))
 
 	log.Fatal(app.Listen("http://:8080"))
 }

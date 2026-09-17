@@ -62,7 +62,7 @@ func sourceApp(t *testing.T, src Source) *App {
 		c.SetContext(context.WithValue(c.Context(), orgKey{}, c.Org()))
 		return c.Continue()
 	}))
-	Get(app, "/ping", ping)
+	app.Get("/ping", ping)
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestSourceCallRunsAndIsScopedToTheCaller(t *testing.T) {
 // per-caller path runs and the served bytes are exactly the rendered array.
 func TestNoSourceIsTheOldDoor(t *testing.T) {
 	app := New(Config{AppName: "plain"})
-	Get(app, "/ping", ping)
+	app.Get("/ping", ping)
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}

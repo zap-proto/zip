@@ -14,7 +14,7 @@ import (
 
 // Register wires the service.
 func Register(app *zip.App) {
-	zip.Post(app, "/v1/workers", ListWorkers)
+	app.Post("/v1/workers", ListWorkers)
 }
 
 // ListWorkers returns every worker in the org, newest first.

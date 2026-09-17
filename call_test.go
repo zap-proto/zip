@@ -47,7 +47,7 @@ type retireIn struct {
 func flagsApp(t *testing.T) *zip.App {
 	t.Helper()
 	app := zip.New(zip.Config{AppName: "flags", DisableStartupMessage: true})
-	zip.Post(app, "/v1/flags/bool", func(ctx context.Context, in *boolIn) (*boolOut, error) {
+	app.Post("/v1/flags/bool", func(ctx context.Context, in *boolIn) (*boolOut, error) {
 		if in.Flag == "explode" {
 			return nil, zip.ErrForbidden("flag is sealed")
 		}
@@ -61,7 +61,7 @@ func flagsApp(t *testing.T) *zip.App {
 
 	// A void op: the handler returns a nil *Out, which must survive the crossing
 	// as a nil *Out and a nil error rather than becoming a decode failure.
-	zip.Post(app, "/v1/flags/retire", func(_ context.Context, _ *retireIn) (*boolOut, error) {
+	app.Post("/v1/flags/retire", func(_ context.Context, _ *retireIn) (*boolOut, error) {
 		return nil, nil
 	}, zip.WithOperationID("flags_retire"), zip.WithSummary("Retire a flag"))
 	return app
@@ -302,7 +302,7 @@ func TestCall_ForwardsIdentityWithoutMintingIt(t *testing.T) {
 
 	// An aggregator: an untyped handler that calls the plugin with c.Forward().
 	agg := zip.New(zip.Config{AppName: "aggregator", DisableStartupMessage: true})
-	agg.Post("/v1/agg/eval", func(rc *zip.Ctx) error {
+	agg.Raw("POST", "/v1/agg/eval", func(rc *zip.Ctx) error {
 		o, cerr := zip.Call[boolIn, boolOut](rc.Forward(), c, "flags_bool", &boolIn{Flag: "beta"})
 		if cerr != nil {
 			return cerr

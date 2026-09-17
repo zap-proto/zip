@@ -38,7 +38,7 @@ func guarded(name string) *App {
 		}
 		return c.Continue()
 	}))
-	a.Get("/thing", func(c *Ctx) error { return c.String(200, name+" thing") })
+	a.Raw("GET", "/thing", func(c *Ctx) error { return c.String(200, name+" thing") })
 	return a
 }
 
@@ -52,9 +52,9 @@ func guarded(name string) *App {
 // on the host's router, gates every route in the host binary.
 func TestWire_IncludedMiddlewareStaysInsideItsDefinition(t *testing.T) {
 	root := quiet("host")
-	root.Get("/before", func(c *Ctx) error { return c.String(200, "before") })
+	root.Raw("GET", "/before", func(c *Ctx) error { return c.String(200, "before") })
 	root.Use(guarded("iam"))
-	root.Get("/after", func(c *Ctx) error { return c.String(200, "after") })
+	root.Raw("GET", "/after", func(c *Ctx) error { return c.String(200, "after") })
 
 	// The guard DID come across: the definition's own route is gated.
 	if code, _ := wireGET(t, root, "/thing"); code != 401 {
@@ -84,8 +84,8 @@ func TestWire_GroupIsLexicalScope(t *testing.T) {
 		}
 		return c.Continue()
 	}))
-	v1.Get("/x", func(c *Ctx) error { return c.String(200, "v1 x") })
-	root.Get("/open", func(c *Ctx) error { return c.String(200, "open") })
+	v1.Raw("GET", "/x", func(c *Ctx) error { return c.String(200, "v1 x") })
+	root.Raw("GET", "/open", func(c *Ctx) error { return c.String(200, "open") })
 
 	if code, _ := wireGET(t, root, "/v1/x"); code != 401 {
 		t.Errorf("group route answered %d without the key — the group's Use did not apply", code)
@@ -120,7 +120,7 @@ func TestWire_DiamondServesBothOccurrences(t *testing.T) {
 // semantics of an occurrence, not an approximation of it.
 func TestWire_DifferentGuardsPerOccurrence(t *testing.T) {
 	shared := quiet("shared")
-	shared.Get("/who", func(c *Ctx) error { return c.String(200, "shared") })
+	shared.Raw("GET", "/who", func(c *Ctx) error { return c.String(200, "shared") })
 
 	need := func(h string) Handler {
 		return func(c *Ctx) error {
@@ -172,7 +172,7 @@ func TestWire_OneCtxAcrossAnInclusionBoundary(t *testing.T) {
 	var seen []*Ctx
 	inner := quiet("inner")
 	inner.Use(H(func(c *Ctx) error { seen = append(seen, c); return c.Continue() }))
-	inner.Get("/deep", func(c *Ctx) error {
+	inner.Raw("GET", "/deep", func(c *Ctx) error {
 		seen = append(seen, c)
 		return c.NoContent(204)
 	})
@@ -207,8 +207,7 @@ func TestWire_IncludedControlPlaneIsNotAdopted(t *testing.T) {
 	}
 
 	host := quiet("host")
-	Get(host, "/own", func(context.Context, *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil },
-		WithOperationID("hostOwn"))
+	host.Get("/own", func(context.Context, *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil }, WithOperationID("hostOwn"))
 	host.Group("/v1").Use(child)
 	if err := host.Build(); err != nil {
 		t.Fatalf("Build: %v", err)

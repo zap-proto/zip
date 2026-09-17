@@ -290,7 +290,7 @@ func codeOf(h Handler) uintptr { return reflect.ValueOf(h).Pointer() }
 // elsewhere.
 //
 // Use returns the App so registrations chain.
-func (a *App) Use(cs ...Component) Router {
+func (a *App) Use(cs ...Component) *App {
 	site := here(1)
 	for _, c := range cs {
 		switch v := c.(type) {
@@ -332,18 +332,10 @@ func (a *App) Use(cs ...Component) Router {
 //	app.Group("/v1").Use(billing)
 //	app.Group("/admin").Use(billing)
 //
-// The return type is [Router], not *App, even though what comes back IS an
-// *App. Go has no return-type covariance, so a concrete return here forces
-// EVERY implementor to hand back an *App — and a decorator's group must stay
-// decorated, which means returning itself around the group, not the bare group.
-// v1.18 had this right; narrowing it in v1.19 is what made hanzoai/commerce's
-// mintRouter and hanzoai/cloud's scope unimplementable, the same way
-// `Fiber() *fiber.App` did. An abstraction that only its own package can
-// implement is not one.
-func (a *App) Group(prefix string, handlers ...Handler) Router {
-	return a.group(here(1), prefix, handlers...)
-}
-
+// It returns the concrete [Group]. There is no router interface to implement
+// and no decorator to keep decorated: a subsystem is handed a group bounded at
+// its own prefix, with no method that reaches above it, so what a host gives
+// out is exactly what it gets back.
 // group is the concrete constructor. Callers INSIDE the package that need the
 // *App itself — wrapRouter.Group, which has to reach g.wrap to carry a scoped
 // With down — use this and skip the interface round-trip, so widening the

@@ -262,11 +262,11 @@ func TestExtract_MalformedExampleIsAnError(t *testing.T) {
 	}
 }
 
-// TestExtract_ScopeRegistrationsLiftDocs asserts that concrete scope method registrations
-// (e.g. scope.Post) lift the exact same doc comments and field descriptions as package-level
-// registrations (zip.Post).
-func TestExtract_ScopeRegistrationsLiftDocs(t *testing.T) {
-	p := load(t, "scopedoc")
+// A group's verb method and the app's own lift the SAME prose: description,
+// example, response and every field description. Two shapes, one extraction —
+// which is the only reason a service may be written in either.
+func TestExtract_BothTablesLiftTheSameDocs(t *testing.T) {
+	p := load(t, "tables")
 	if len(p.Ops) != 2 {
 		t.Fatalf("ops = %d, want 2", len(p.Ops))
 	}
@@ -313,8 +313,8 @@ func TestExtract_ScopeRegistrationsLiftDocs(t *testing.T) {
 // hid the registration from this pass: the chain's outer call is what the walk
 // sees, and a nested prefix left uncomposed names a route the router does not
 // serve.
-func TestExtract_ScopeComposes(t *testing.T) {
-	p := load(t, "scoped")
+func TestExtract_NestedGroupComposes(t *testing.T) {
+	p := load(t, "nested")
 	if len(p.Ops) != 3 {
 		var keys []string
 		for _, o := range p.Ops {

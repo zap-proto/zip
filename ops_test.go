@@ -22,7 +22,7 @@ func TestOpsSurfaceIsASecondListener(t *testing.T) {
 		DisableStartupMessage: true,
 		OpsAddr:               "http://127.0.0.1:" + port,
 	})
-	zip.Get(app, "/v1/opsy/thing", func(ctx context.Context, in *askIn) (*askOut, error) {
+	app.Get("/v1/opsy/thing", func(ctx context.Context, in *askIn) (*askOut, error) {
 		return &askOut{Org: "x"}, nil
 	}, zip.WithOperationID("opsy_thing"))
 
@@ -103,7 +103,7 @@ func TestEmptyOpsAddrBindsNothing(t *testing.T) {
 	unclaimed := freePort(t)
 
 	app := zip.New(zip.Config{AppName: "quiet", DisableStartupMessage: true})
-	zip.Get(app, "/v1/quiet/thing", func(ctx context.Context, in *askIn) (*askOut, error) {
+	app.Get("/v1/quiet/thing", func(ctx context.Context, in *askIn) (*askOut, error) {
 		return &askOut{Org: "x"}, nil
 	}, zip.WithOperationID("quiet_thing"))
 
@@ -127,10 +127,10 @@ func TestOnlyThePrimaryAppOwnsTheOpsListener(t *testing.T) {
 		DisableStartupMessage: true,
 		OpsAddr:               "http://127.0.0.1:" + freePort(t),
 	})
-	zip.Post(app.Peer(), "/v1/twoapps/peer", func(ctx context.Context, in *askIn) (*askOut, error) {
+	app.Peer().Post("/v1/twoapps/peer", func(ctx context.Context, in *askIn) (*askOut, error) {
 		return &askOut{Org: "peer"}, nil
 	}, zip.WithOperationID("twoapps_peer"))
-	zip.Get(app, "/v1/twoapps/edge", func(ctx context.Context, in *askIn) (*askOut, error) {
+	app.Get("/v1/twoapps/edge", func(ctx context.Context, in *askIn) (*askOut, error) {
 		return &askOut{Org: "edge"}, nil
 	}, zip.WithOperationID("twoapps_edge"))
 
@@ -160,7 +160,7 @@ func TestOnlyThePrimaryAppOwnsTheOpsListener(t *testing.T) {
 // plugin declaring /metrics would claim it for the whole composition.
 func TestOpsPathsAreNotDeclared(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "d", DisableStartupMessage: true})
-	app.Get("/v1/d/x", func(c *zip.Ctx) error { return nil })
+	app.Raw("GET", "/v1/d/x", func(c *zip.Ctx) error { return nil })
 	for _, r := range app.Ops().Declaration().Routes {
 		if r.Pattern == zip.MetricsPath || r.Pattern == zip.HealthPath || r.Pattern == zip.ReadyPath {
 			t.Fatalf("the ops app declared its own control plane: %v", r)

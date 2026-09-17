@@ -28,10 +28,10 @@ type gqlMakeIn struct {
 func gqlApp(t *testing.T) *App {
 	t.Helper()
 	app := New(Config{AppName: "svc", DisableStartupMessage: true})
-	Get(app, "/v1/users/:id", func(ctx context.Context, _ *gqlGetIn) (*gqlUser, error) {
+	app.Get("/v1/users/:id", func(ctx context.Context, _ *gqlGetIn) (*gqlUser, error) {
 		return &gqlUser{}, nil
 	}, WithOperationID("user"), WithSummary("One user by id"))
-	Post(app, "/v1/users", func(ctx context.Context, _ *gqlMakeIn) (*gqlUser, error) {
+	app.Post("/v1/users", func(ctx context.Context, _ *gqlMakeIn) (*gqlUser, error) {
 		return &gqlUser{}, nil
 	}, WithOperationID("createUser"))
 	if err := app.Build(); err != nil {
@@ -110,8 +110,7 @@ func TestASelfReferentialTypeTerminates(t *testing.T) {
 		Next *node  `json:"next"`
 	}
 	app := New(Config{AppName: "svc", DisableStartupMessage: true})
-	Get(app, "/v1/tree", func(ctx context.Context, _ *gqlGetIn) (*node, error) { return nil, nil },
-		WithOperationID("tree"))
+	app.Get("/v1/tree", func(ctx context.Context, _ *gqlGetIn) (*node, error) { return nil, nil }, WithOperationID("tree"))
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -132,8 +131,7 @@ func TestAnUndescribableFieldIsNotGivenAnInventedShape(t *testing.T) {
 		Meta map[string]any `json:"meta"`
 	}
 	app := New(Config{AppName: "svc", DisableStartupMessage: true})
-	Get(app, "/v1/blob", func(ctx context.Context, _ *gqlGetIn) (*blob, error) { return nil, nil },
-		WithOperationID("blob"))
+	app.Get("/v1/blob", func(ctx context.Context, _ *gqlGetIn) (*blob, error) { return nil, nil }, WithOperationID("blob"))
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}

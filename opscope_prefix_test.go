@@ -20,7 +20,7 @@ func prefixHandler(context.Context, *prefixIn) (*prefixOut, error) { return &pre
 func TestTypedOpOnGroupIsServedAtTheComposedAddress(t *testing.T) {
 	app := New(Config{DisableStartupMessage: true})
 	billing := app.Group("/v1").Group("/billing")
-	Post(billing, "/deposit", prefixHandler)
+	billing.Post("/deposit", prefixHandler)
 
 	var patterns []string
 	for _, r := range app.Declaration().Routes {
@@ -55,13 +55,13 @@ func TestTypedOpOnGroupIsServedAtTheComposedAddress(t *testing.T) {
 // composition, not from the router it registered on.
 func TestOpScopePrefixIsNotAnAbsoluteAddress(t *testing.T) {
 	app := New(Config{DisableStartupMessage: true})
-	if got := app.OpScope().Prefix; got != "" {
+	if got := app.opScope().Prefix; got != "" {
 		t.Errorf("root scope prefix = %q, want empty", got)
 	}
 
 	// A group knows the leaf it was declared with, not where it will be served.
 	billing := app.Group("/v1").Group("/billing")
-	Post(billing, "/deposit", prefixHandler)
+	billing.Post("/deposit", prefixHandler)
 
 	// …and the served address is nonetheless correct, because composition — not
 	// the scope — is what resolves it.

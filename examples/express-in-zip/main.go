@@ -79,7 +79,7 @@ func setup() (*zip.App, error) {
 	app := zip.New(zip.Config{AppName: "express-in-zip"})
 	app.Use(middleware.Recover(), middleware.RequestID())
 	legacy := stripPrefix("/legacy", h)
-	app.All("/legacy/*", func(c *zip.Ctx) error { return legacy(c.Fiber()) })
+	app.Raw(zip.MethodAll, "/legacy/*", func(c *zip.Ctx) error { return legacy(c.Fiber()) })
 
 	// 5. Unified multi-language runner, as a TYPED op: :lang selects the
 	//    backend and the body carries the source. Because it is an op, "run
@@ -93,7 +93,7 @@ func setup() (*zip.App, error) {
 	if err := runner.Register("js", rt.Engine()); err != nil {
 		return nil, err
 	}
-	zip.Post(app, "/runtime/:lang", runSource(runner))
+	app.Post("/runtime/:lang", runSource(runner))
 
 	return app, nil
 }

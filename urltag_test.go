@@ -41,7 +41,7 @@ func putScript(_ context.Context, in *scriptIn) (*scriptOut, error) {
 
 func scriptApp() *zip.App {
 	a := zip.New(zip.Config{AppName: "workers", DisableStartupMessage: true})
-	zip.Put(a, "/v1/workers/scripts/:script", putScript)
+	a.Put("/v1/workers/scripts/:script", putScript)
 	return a
 }
 
@@ -139,7 +139,7 @@ func TestURLTag_OptOutIsNotAQueryParameter(t *testing.T) {
 		Secret string `json:"secret" url:"-"`
 	}
 	a := zip.New(zip.Config{AppName: "workers2", DisableStartupMessage: true})
-	zip.Get(a, "/v1/workers/scripts", func(_ context.Context, in *listIn) (*scriptOut, error) {
+	a.Get("/v1/workers/scripts", func(_ context.Context, in *listIn) (*scriptOut, error) {
 		return &scriptOut{Name: in.Query + in.Secret}, nil
 	})
 

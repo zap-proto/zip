@@ -26,7 +26,7 @@ func (c *createOut) StatusCode() int {
 // selects per request, and BOTH reach the document.
 func TestMultiStatus_BothCodesAreDeclaredAndSelectable(t *testing.T) {
 	app := quiet("svc")
-	Post(app, "/v1/things", func(_ context.Context, in *createIn) (*createOut, error) {
+	app.Post("/v1/things", func(_ context.Context, in *createIn) (*createOut, error) {
 		return &createOut{ID: in.Name, Existed: in.Name == "old"}, nil
 	}, WithStatus(201, 200), WithOperationID("create"))
 
@@ -58,7 +58,7 @@ func (sneakOut) StatusCode() int { return 202 }
 // sends another.
 func TestMultiStatus_UndeclaredCodeIsRefused(t *testing.T) {
 	app := quiet("svc")
-	Post(app, "/v1/sneak", func(_ context.Context, in *createIn) (*sneakOut, error) {
+	app.Post("/v1/sneak", func(_ context.Context, in *createIn) (*sneakOut, error) {
 		return &sneakOut{}, nil
 	}, WithStatus(200), WithOperationID("sneak"))
 

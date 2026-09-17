@@ -17,7 +17,7 @@ func TestMountedChildSeesTheCallersHost(t *testing.T) {
 	seen := make(chan string, 4)
 
 	child := zip.New(zip.Config{AppName: "child", DisableStartupMessage: true})
-	child.Get("/v1/child/who", func(c *zip.Ctx) error {
+	child.Raw("GET", "/v1/child/who", func(c *zip.Ctx) error {
 		seen <- c.Host()
 		return c.String(200, "ok")
 	})
@@ -35,7 +35,7 @@ func TestMountedChildSeesTheCallersHost(t *testing.T) {
 
 	// First establish what the HOST sees: if the harness does not deliver a Host,
 	// the child cannot be blamed for not receiving one.
-	host.Get("/echo-host", func(c *zip.Ctx) error { return c.String(200, "["+c.Host()+"]") })
+	host.Raw("GET", "/echo-host", func(c *zip.Ctx) error { return c.String(200, "["+c.Host()+"]") })
 	er := httptest.NewRequest(http.MethodGet, "/echo-host", nil)
 	er.Host = "lux.id"
 	eresp, eerr := host.Test(er)

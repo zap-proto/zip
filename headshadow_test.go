@@ -5,8 +5,8 @@ import "testing"
 // Does the HEAD filter distinguish a SHADOW from a declared door?
 func TestHeadShadow_ExplicitHeadSurvivesTheFilter(t *testing.T) {
 	a := quiet("svc")
-	a.Get("/thing", func(c *Ctx) error { return nil })  // fiber shadows this with HEAD
-	a.Head("/probe", func(c *Ctx) error { return nil }) // an explicitly declared door
+	a.Raw("GET", "/thing", func(c *Ctx) error { return nil })  // fiber shadows this with HEAD
+	a.Raw("HEAD", "/probe", func(c *Ctx) error { return nil }) // an explicitly declared door
 
 	d := a.Declaration()
 	var gotGet, gotHead bool

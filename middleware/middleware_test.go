@@ -65,7 +65,7 @@ func ride(t *testing.T, h zip.Handler, origin string) *http.Response {
 	t.Helper()
 	a := zip.New(zip.Config{AppName: "cors", DisableStartupMessage: true})
 	a.Use(h)
-	a.Get("/x", func(c *zip.Ctx) error { return c.String(http.StatusOK, "ok") })
+	a.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(http.StatusOK, "ok") })
 	if err := a.Build(); err != nil {
 		t.Fatalf("build: %v", err)
 	}

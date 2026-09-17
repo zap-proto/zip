@@ -61,8 +61,8 @@ func sdkGetValidators(_ context.Context, in *ValidatorsIn) (*Validators, error) 
 
 func sdkApp() *zip.App {
 	app := zip.New(zip.Config{AppName: "platform", DisableStartupMessage: true})
-	zip.Get(app, "/v1/platform/height", sdkGetHeight)
-	zip.Post(app, "/v1/platform/validators", sdkGetValidators)
+	app.Get("/v1/platform/height", sdkGetHeight)
+	app.Post("/v1/platform/validators", sdkGetValidators)
 	return app
 }
 
@@ -194,8 +194,8 @@ func main() {
 	defer os.Remove(sock)
 
 	app := zip.New(zip.Config{AppName: "platform", DisableStartupMessage: true})
-	zip.Get(app, "/v1/platform/height", getHeight)
-	zip.Post(app, "/v1/platform/validators", getValidators)
+	app.Get("/v1/platform/height", getHeight)
+	app.Post("/v1/platform/validators", getValidators)
 	if _, err := zip.Serve(app, sock); err != nil {
 		fail("serve: %v", err)
 	}
@@ -288,10 +288,8 @@ func TestSDK_IsDeterministic(t *testing.T) {
 	// downstream on a change nobody made.
 	coded := func() *zip.App {
 		app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-		zip.Post(app, "/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil },
-			zip.WithOperationID("get_tx"))
-		zip.Post(app, "/v1/ided", func(_ context.Context, in *Ided) (*Ided, error) { return in, nil },
-			zip.WithOperationID("get_ided"))
+		app.Post("/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil }, zip.WithOperationID("get_tx"))
+		app.Post("/v1/ided", func(_ context.Context, in *Ided) (*Ided, error) { return in, nil }, zip.WithOperationID("get_ided"))
 		return app
 	}
 	for _, build := range []struct {
@@ -353,7 +351,7 @@ func TestSDK_WidthsAreExact(t *testing.T) {
 		F float64 `json:"f"`
 	}
 	app := zip.New(zip.Config{AppName: "w", DisableStartupMessage: true})
-	zip.Post(app, "/v1/w", func(_ context.Context, in *widths) (*widths, error) { return in, nil })
+	app.Post("/v1/w", func(_ context.Context, in *widths) (*widths, error) { return in, nil })
 
 	sdk, err := app.SDK("w")
 	if err != nil {
@@ -395,10 +393,10 @@ func TestSDK_GapsAreNotSilent(t *testing.T) {
 		cause string
 	}{
 		{"map", func(a *zip.App) {
-			zip.Post(a, "/v1/a", func(_ context.Context, in *ledger) (*ledger, error) { return in, nil })
+			a.Post("/v1/a", func(_ context.Context, in *ledger) (*ledger, error) { return in, nil })
 		}, zip.CauseMap},
 		{"any", func(a *zip.App) {
-			zip.Post(a, "/v1/a", func(_ context.Context, in *loose) (*loose, error) { return in, nil })
+			a.Post("/v1/a", func(_ context.Context, in *loose) (*loose, error) { return in, nil })
 		}, zip.CauseAny},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -432,7 +430,7 @@ func TestSDK_AWholeAppStillGeneratesAroundAGap(t *testing.T) {
 		Balance map[string]int `json:"balance"`
 	}
 	app := sdkApp()
-	zip.Post(app, "/v1/platform/ledger", func(_ context.Context, in *ledger) (*ledger, error) { return in, nil })
+	app.Post("/v1/platform/ledger", func(_ context.Context, in *ledger) (*ledger, error) { return in, nil })
 
 	sdk, err := app.SDK("platform")
 	if err != nil {
@@ -463,7 +461,7 @@ func TestSDK_AnIdCrossesOnTheCodecTheSDKWrites(t *testing.T) {
 		Height uint64 `json:"height"`
 	}
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-	zip.Get(app, "/v1/p/tx", func(context.Context, *struct{}) (*Tx, error) { return &Tx{}, nil })
+	app.Get("/v1/p/tx", func(context.Context, *struct{}) (*Tx, error) { return &Tx{}, nil })
 
 	sdk, err := app.SDK("p")
 	if err != nil {
@@ -509,7 +507,7 @@ func TestSDK_OneOperationOneMethodName(t *testing.T) {
 		{"nodeID", "NodeID"},
 	} {
 		app := zip.New(zip.Config{AppName: "n", DisableStartupMessage: true})
-		zip.Get(app, "/v1/n", sdkGetHeight, zip.WithOperationID(tc.id))
+		app.Get("/v1/n", sdkGetHeight, zip.WithOperationID(tc.id))
 		sdk, err := app.SDK("n")
 		if err != nil {
 			t.Fatalf("%s: %v", tc.id, err)
@@ -543,10 +541,8 @@ func TestSDK_AnEmbeddedUnnameableTypeIsAGapAndNotASyntaxError(t *testing.T) {
 		Name    string `json:"name"`
 	}
 	app := zip.New(zip.Config{AppName: "x", DisableStartupMessage: true})
-	zip.Get(app, "/v1/asset", func(_ context.Context, in *asset) (*asset, error) { return in, nil },
-		zip.WithOperationID("x_asset"))
-	zip.Get(app, "/v1/height", func(_ context.Context, in *Height) (*Height, error) { return in, nil },
-		zip.WithOperationID("x_height"))
+	app.Get("/v1/asset", func(_ context.Context, in *asset) (*asset, error) { return in, nil }, zip.WithOperationID("x_asset"))
+	app.Get("/v1/height", func(_ context.Context, in *Height) (*Height, error) { return in, nil }, zip.WithOperationID("x_height"))
 
 	sdk, err := app.SDK("x")
 	if err != nil {
@@ -580,8 +576,7 @@ func TestSDK_ANestedRefusalRefusesTheOp(t *testing.T) {
 		Items []inner `json:"items"`
 	}
 	app := zip.New(zip.Config{AppName: "n", DisableStartupMessage: true})
-	zip.Post(app, "/v1/outer", func(_ context.Context, in *outer) (*outer, error) { return in, nil },
-		zip.WithOperationID("n_outer"))
+	app.Post("/v1/outer", func(_ context.Context, in *outer) (*outer, error) { return in, nil }, zip.WithOperationID("n_outer"))
 
 	sdk, err := app.SDK("n")
 	if err != nil {
@@ -608,10 +603,8 @@ func TestSDK_EveryOpRefusedIsAnOpReported(t *testing.T) {
 		ID any `json:"id"`
 	}
 	app := zip.New(zip.Config{AppName: "s", DisableStartupMessage: true})
-	zip.Get(app, "/v1/one", func(_ context.Context, in *shared) (*shared, error) { return in, nil },
-		zip.WithOperationID("s_one"))
-	zip.Get(app, "/v1/two", func(_ context.Context, in *shared) (*shared, error) { return in, nil },
-		zip.WithOperationID("s_two"))
+	app.Get("/v1/one", func(_ context.Context, in *shared) (*shared, error) { return in, nil }, zip.WithOperationID("s_one"))
+	app.Get("/v1/two", func(_ context.Context, in *shared) (*shared, error) { return in, nil }, zip.WithOperationID("s_two"))
 
 	sdk, err := app.SDK("s")
 	if err != nil {

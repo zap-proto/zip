@@ -28,7 +28,7 @@ func main() {
 	app := zip.New(zip.Config{AppName: "websocket"})
 	app.Use(middleware.Recover(), middleware.RequestID())
 
-	app.Get("/ws", wsx.Upgrade(func(c *wsx.Conn) error {
+	app.Raw("GET", "/ws", wsx.Upgrade(func(c *wsx.Conn) error {
 		log.Printf("ws connection from %s", c.RemoteAddr())
 		for {
 			mt, msg, err := c.ReadMessage()

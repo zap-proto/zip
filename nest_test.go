@@ -35,10 +35,10 @@ func childApp(t *testing.T, name string, guard zip.Handler) *zip.App {
 	if guard != nil {
 		c.Use(guard)
 	}
-	zip.Get(c, "/v1/"+name+"/users/:id", func(_ context.Context, in *userIn) (*userOut, error) {
+	c.Get("/v1/"+name+"/users/:id", func(_ context.Context, in *userIn) (*userOut, error) {
 		return &userOut{ID: in.ID, Name: name + " says hello"}, nil
 	}, zip.WithOperationID(name+"_get_user"), zip.WithSummary("Read one user by id"))
-	c.Get("/v1/"+name+"/raw", func(x *zip.Ctx) error { return x.String(200, "raw "+name) })
+	c.Raw("GET", "/v1/"+name+"/raw", func(x *zip.Ctx) error { return x.String(200, "raw "+name) })
 	return c
 }
 
@@ -149,7 +149,7 @@ func TestNest_OneComposeFourProjections(t *testing.T) {
 // The wildcard this replaces swallowed the whole subtree.
 func TestNest_ServesWithoutSwallowing(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	host.Get("/v1/iam/not-the-childs", func(x *zip.Ctx) error { return x.String(200, "host") })
+	host.Raw("GET", "/v1/iam/not-the-childs", func(x *zip.Ctx) error { return x.String(200, "host") })
 	host.Use(childApp(t, "iam", nil))
 
 	if code, b := probe(t, host, "/v1/iam/users/u-9"); code != 200 || !strings.Contains(b, "u-9") {
@@ -180,7 +180,7 @@ func TestNest_MiddlewareStaysInsideTheChild(t *testing.T) {
 		return x.Continue()
 	}
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	host.Get("/v1/public", func(x *zip.Ctx) error { return x.String(200, "public") })
+	host.Raw("GET", "/v1/public", func(x *zip.Ctx) error { return x.String(200, "public") })
 	host.Use(childApp(t, "iam", guard))
 
 	// The guard DID come across: the child's own route is gated.
@@ -241,11 +241,9 @@ func TestNest_SameNameDifferentShape(t *testing.T) {
 	// path is impossible in one package, so the shapes come in as distinct Go
 	// types whose SCHEMA name is what must not clash. Alias them to one name.
 	a := zip.New(zip.Config{AppName: "iam", DisableStartupMessage: true})
-	zip.Post(a, "/v1/iam/apps", func(_ context.Context, in *appAlpha) (*appAlpha, error) { return in, nil },
-		zip.WithOperationID("iam_apps"))
+	a.Post("/v1/iam/apps", func(_ context.Context, in *appAlpha) (*appAlpha, error) { return in, nil }, zip.WithOperationID("iam_apps"))
 	b := zip.New(zip.Config{AppName: "hire", DisableStartupMessage: true})
-	zip.Post(b, "/v1/hire/apps", func(_ context.Context, in *appBeta) (*appBeta, error) { return in, nil },
-		zip.WithOperationID("hire_apps"))
+	b.Post("/v1/hire/apps", func(_ context.Context, in *appBeta) (*appBeta, error) { return in, nil }, zip.WithOperationID("hire_apps"))
 
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	host.Use(a, b)
@@ -273,7 +271,7 @@ func TestNest_SameNameDifferentShape(t *testing.T) {
 // refused one.
 func TestNest_CollidingAddressRefusesEverything(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
-	host.Get("/v1/iam/raw", func(x *zip.Ctx) error { return x.String(200, "host owns this") })
+	host.Raw("GET", "/v1/iam/raw", func(x *zip.Ctx) error { return x.String(200, "host owns this") })
 
 	host.Use(childApp(t, "iam", nil))
 	err := host.Build()
@@ -318,7 +316,7 @@ func TestNest_SiblingsCollide(t *testing.T) {
 // which is the exact defect this composition removes.
 func TestCompose_RefusedAfterTheAppIsBuilt(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	zip.Get(host, "/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil })
+	host.Get("/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil })
 	if err := host.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -343,7 +341,7 @@ func TestCompose_RefusedAfterTheAppIsBuilt(t *testing.T) {
 // with nothing composed names its types exactly as it did before Origin existed.
 func TestNest_UngraftedDocumentIsUnchanged(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "solo", DisableStartupMessage: true})
-	zip.Post(a, "/v1/x", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
+	a.Post("/v1/x", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
 	schemas := a.OpenAPISpec()["components"].(map[string]any)["schemas"].(map[string]any)
 	if _, ok := schemas["userIn"]; !ok {
 		t.Errorf("an ungrafted app's type was qualified: %v", keysOf(schemas))
@@ -364,9 +362,9 @@ func TestNest_UngraftedDocumentIsUnchanged(t *testing.T) {
 func TestNest_AGroupDoesNotEraseTheAuthor(t *testing.T) {
 	child := zip.New(zip.Config{AppName: "iam", DisableStartupMessage: true})
 	g := child.Group("/v1/iam")
-	zip.Post(g, "/users", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
+	g.Post("/users", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
 	// Two levels down: a group inside a group still credits the app.
-	zip.Post(g.Group("/deep"), "/x", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
+	g.Group("/deep").Post("/x", func(_ context.Context, in *userIn) (*userOut, error) { return &userOut{}, nil })
 
 	host := zip.New(zip.Config{AppName: "cloud", DisableStartupMessage: true})
 	host.Use(child)
@@ -391,8 +389,7 @@ func TestNest_AGroupDoesNotEraseTheAuthor(t *testing.T) {
 // composition's document.
 func TestNest_ChildControlPlaneIsNotAdopted(t *testing.T) {
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
-	zip.Get(host, "/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil },
-		zip.WithOperationID("host_own"))
+	host.Get("/v1/own", func(context.Context, *userIn) (*userOut, error) { return &userOut{}, nil }, zip.WithOperationID("host_own"))
 	child := childApp(t, "iam", nil)
 	if err := child.Build(); err != nil {
 		t.Fatalf("Build: %v", err)

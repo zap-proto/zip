@@ -22,7 +22,7 @@ func TestListenZAP_Streams(t *testing.T) {
 	release := make(chan struct{}, n)
 
 	app := zip.New(zip.Config{AppName: "streamer", DisableStartupMessage: true})
-	app.Get("/events", func(c *zip.Ctx) error {
+	app.Raw("GET", "/events", func(c *zip.Ctx) error {
 		return c.SendStreamWriter(func(w *bufio.Writer) {
 			for i := 0; i < n; i++ {
 				<-release

@@ -1,4 +1,4 @@
-package scopedoc
+package tables
 
 import (
 	"context"
@@ -41,12 +41,12 @@ func LegacyCreate(_ context.Context, in *ItemIn) (*ItemOut, error) {
 }
 
 func Register(app *zip.App) {
-	// Legacy package-level registration
-	zip.Post(app.Group("/v1"), "/legacy/items", LegacyCreate)
+	// At the root, where the app itself is the table.
+	app.Post("/v1/legacy/items", LegacyCreate)
 
-	// New concrete-scope method registration with fluent chaining
-	v1 := app.Scope("/v1").Tag("catalog")
-	items := v1.Scope("/items")
+	// On a group, with a metadata chain after the declaration.
+	v1 := app.Group("/v1").Tag("catalog")
+	items := v1.Group("/items")
 	items.Post("/", (&API{}).CreateItem).
 		ID("items.create").
 		Summary("Create an item")

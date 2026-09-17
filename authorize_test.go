@@ -25,7 +25,7 @@ func TestAuthorizer_GatesDecodedInputAcrossRESTandMCP(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "authztest", DisableStartupMessage: true})
 
 	var handlerRan bool
-	zip.Post(app, "/v1/things", func(_ context.Context, in *thingIn) (*thingOut, error) {
+	app.Post("/v1/things", func(_ context.Context, in *thingIn) (*thingOut, error) {
 		handlerRan = true
 		return &thingOut{OK: true}, nil
 	}, zip.WithOperationID("createThing"))
@@ -114,7 +114,7 @@ func TestAuthorizer_GatesDecodedInputAcrossRESTandMCP(t *testing.T) {
 func TestAuthorizer_NilIsOpen(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	var ran bool
-	zip.Post(app, "/v1/open", func(_ context.Context, _ *thingIn) (*thingOut, error) {
+	app.Post("/v1/open", func(_ context.Context, _ *thingIn) (*thingOut, error) {
 		ran = true
 		return &thingOut{OK: true}, nil
 	})
@@ -175,10 +175,9 @@ func groupedOps(t *testing.T, gateFirst bool) {
 		}
 	}
 	// The three ways a path gets its prefix. All three are ONE app's ops.
-	zip.Post(app, "/root", make("root"), zip.WithOperationID("root"))
-	zip.Post(app.Group("/v1"), "/grouped", make("grouped"), zip.WithOperationID("grouped"))
-	zip.Post(app.With(func(next zip.Handler) zip.Handler { return next }).Group("/v2"),
-		"/scoped", make("scoped"), zip.WithOperationID("scoped"))
+	app.Post("/root", make("root"), zip.WithOperationID("root"))
+	app.Group("/v1").Post("/grouped", make("grouped"), zip.WithOperationID("grouped"))
+	app.With(func(next zip.Handler) zip.Handler { return next }).Group("/v2").Post("/scoped", make("scoped"), zip.WithOperationID("scoped"))
 
 	if !gateFirst {
 		gate()

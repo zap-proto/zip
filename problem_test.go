@@ -38,19 +38,19 @@ func refusalApp(t *testing.T) *zip.App {
 	t.Helper()
 	app := zip.New(zip.Config{AppName: "refusals", DisableStartupMessage: true})
 	app.Use(middleware.Recover())
-	app.Get("/thing/:id", func(c *zip.Ctx) error { return c.JSON(200, map[string]any{"ok": true}) })
-	app.Put("/thing/:id", func(c *zip.Ctx) error { return c.JSON(200, map[string]any{"ok": true}) })
-	app.Get("/panic", func(c *zip.Ctx) error { panic("nil map write") })
-	app.Get("/capped", func(c *zip.Ctx) error {
+	app.Raw("GET", "/thing/:id", func(c *zip.Ctx) error { return c.JSON(200, map[string]any{"ok": true}) })
+	app.Raw("PUT", "/thing/:id", func(c *zip.Ctx) error { return c.JSON(200, map[string]any{"ok": true}) })
+	app.Raw("GET", "/panic", func(c *zip.Ctx) error { panic("nil map write") })
+	app.Raw("GET", "/capped", func(c *zip.Ctx) error {
 		return zip.ErrPaymentRequired("spend cap exceeded").
 			With(map[string]any{"cap": 5000, "spent": 5127})
 	})
 
-	oauth := zip.OAuth(app)
-	oauth.Post("/v1/oauth/token", func(c *zip.Ctx) error {
+	oauth := app.OAuth()
+	oauth.Raw("POST", "/v1/oauth/token", func(c *zip.Ctx) error {
 		return &zip.HTTPError{Status: 400, Code: "invalid_grant", Msg: "code already redeemed"}
 	})
-	oauth.Post("/v1/oauth/introspect", func(c *zip.Ctx) error { panic("store closed") })
+	oauth.Raw("POST", "/v1/oauth/introspect", func(c *zip.Ctx) error { panic("store closed") })
 	return app
 }
 
@@ -225,8 +225,8 @@ func TestAWrongVerbAtAnOAuthAddressIsTheRouterRefusing(t *testing.T) {
 // path it did not know it would have.
 func TestTheVocabularySurvivesComposition(t *testing.T) {
 	auth := zip.New(zip.Config{AppName: "auth", DisableStartupMessage: true})
-	oauth := zip.OAuth(auth)
-	oauth.Post("/token", func(c *zip.Ctx) error { return zip.ErrUnauthorized("bad secret") })
+	oauth := auth.OAuth()
+	oauth.Raw("POST", "/token", func(c *zip.Ctx) error { return zip.ErrUnauthorized("bad secret") })
 
 	host := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
 	host.Group("/v1/iam/oauth").Use(auth)
@@ -247,7 +247,7 @@ func TestTheVocabularySurvivesComposition(t *testing.T) {
 // nesting, and just as invisible until a client breaks.
 func TestAGroupOfTheOAuthRouterIsStillOAuth(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "nested-oauth", DisableStartupMessage: true})
-	zip.OAuth(app).Group("/v1/oauth").Post("/revoke", func(c *zip.Ctx) error {
+	app.OAuth().Group("/v1/oauth").Raw("POST", "/revoke", func(c *zip.Ctx) error {
 		return zip.ErrBadRequest("token is required")
 	})
 
@@ -272,7 +272,7 @@ func TestOAuthTakesTypedOpsToo(t *testing.T) {
 	type out struct {
 		Active bool `json:"active"`
 	}
-	zip.Post(zip.OAuth(app), "/v1/oauth/revoke", func(_ context.Context, i *in) (*out, error) {
+	app.OAuth().Post("/v1/oauth/revoke", func(_ context.Context, i *in) (*out, error) {
 		return nil, zip.ErrBadRequest("token is required")
 	})
 
@@ -340,8 +340,8 @@ func TestTheDocumentDeclaresTheRefusal(t *testing.T) {
 	}
 	ok := func(context.Context, *in) (*out, error) { return &out{OK: true}, nil }
 	app := zip.New(zip.Config{AppName: "declared", DisableStartupMessage: true})
-	zip.Post(app, "/v1/things", ok)
-	zip.Post(zip.OAuth(app), "/v1/oauth/token", ok)
+	app.Post("/v1/things", ok)
+	app.OAuth().Post("/v1/oauth/token", ok)
 
 	raw, err := json.Marshal(app.OpenAPISpec())
 	if err != nil {
@@ -393,8 +393,8 @@ func TestTheDocumentDeclaresTheRefusal(t *testing.T) {
 func TestTwoAddressesRefuseIdentically(t *testing.T) {
 	a := zip.New(zip.Config{AppName: "same", DisableStartupMessage: true})
 	deny := func(c *zip.Ctx) error { return zip.ErrNotFound("no such thing") }
-	a.Get("/thing/real", deny)
-	a.Get("/quite/another", deny)
+	a.Raw("GET", "/thing/real", deny)
+	a.Raw("GET", "/quite/another", deny)
 	if err := a.Build(); err != nil {
 		t.Fatal(err)
 	}

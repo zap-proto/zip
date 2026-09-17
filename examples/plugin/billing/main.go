@@ -46,8 +46,8 @@ type Charge struct {
 func main() {
 	app := zip.New(zip.Config{AppName: "billing"})
 
-	zip.Get(app, "/v1/billing/invoices", listInvoices)
-	zip.Post(app, "/v1/billing/charge", charge)
+	app.Get("/v1/billing/invoices", listInvoices)
+	app.Post("/v1/billing/charge", charge)
 
 	// zip.Addr returns the socket a host asked this process to serve on, and
 	// falls back to the argument when it is run directly. That fallback is the

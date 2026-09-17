@@ -20,7 +20,7 @@ func TestProxy_OverUnixSocket(t *testing.T) {
 	sock := filepath.Join(sockDir(t), "billing.sock")
 
 	plugin := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
-	plugin.Get("/v1/billing/invoices", func(c *zip.Ctx) error {
+	plugin.Raw("GET", "/v1/billing/invoices", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "over-uds"})
 	})
 	go func() { _ = plugin.Listen(sock) }() // bare path => zap scheme, unix network
@@ -61,10 +61,10 @@ func waitSocket(t *testing.T, path string) {
 // serves its routes as if they were local. Nothing is shared but the address.
 func TestProxy_OverZAP(t *testing.T) {
 	plugin := zip.New(zip.Config{AppName: "billing", DisableStartupMessage: true})
-	plugin.Get("/v1/billing/invoices", func(c *zip.Ctx) error {
+	plugin.Raw("GET", "/v1/billing/invoices", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "billing-plugin"})
 	})
-	plugin.Post("/v1/billing/charge", func(c *zip.Ctx) error {
+	plugin.Raw("POST", "/v1/billing/charge", func(c *zip.Ctx) error {
 		return c.JSON(201, map[string]string{"echo": string(c.Body())})
 	})
 
@@ -102,7 +102,7 @@ func TestProxy_OverZAP(t *testing.T) {
 // would silently shadow the host's own routes.
 func TestProxy_StaticBeatsRemoteProxy(t *testing.T) {
 	plugin := zip.New(zip.Config{AppName: "plug", DisableStartupMessage: true})
-	plugin.Get("/v1/billing/*", func(c *zip.Ctx) error {
+	plugin.Raw("GET", "/v1/billing/*", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "plugin"})
 	})
 
@@ -114,7 +114,7 @@ func TestProxy_StaticBeatsRemoteProxy(t *testing.T) {
 	core := zip.New(zip.Config{AppName: "core", DisableStartupMessage: true})
 	core.Use(must(zip.Proxy("/v1/billing", pluginAddr)))
 	// Registered AFTER the mount, and still wins for its exact path.
-	core.Get("/v1/billing/health", func(c *zip.Ctx) error {
+	core.Raw("GET", "/v1/billing/health", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"servedBy": "core"})
 	})
 

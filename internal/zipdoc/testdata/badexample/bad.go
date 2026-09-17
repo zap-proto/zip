@@ -20,7 +20,7 @@ type Out struct {
 }
 
 // Register wires the one broken operation.
-func Register(app *zip.App) { zip.Post(app, "/v1/things", Create) }
+func Register(app *zip.App) { app.Post("/v1/things", Create) }
 
 // Create makes a thing.
 //

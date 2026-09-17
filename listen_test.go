@@ -13,7 +13,7 @@ import (
 func TestListenIsServePlusWait(t *testing.T) {
 	sock := filepath.Join(sockDir(t), "a.sock")
 	app := quiet("svc")
-	app.Get("/x", func(c *Ctx) error { return c.String(200, "x") })
+	app.Raw("GET", "/x", func(c *Ctx) error { return c.String(200, "x") })
 
 	done := make(chan error, 1)
 	go func() { done <- app.Listen(sock) }()
@@ -47,7 +47,7 @@ func TestListenIsServePlusWait(t *testing.T) {
 func TestServeYieldsAHandleListenDoesNot(t *testing.T) {
 	sock := filepath.Join(sockDir(t), "b.sock")
 	app := quiet("svc")
-	app.Get("/x", func(c *Ctx) error { return c.String(200, "x") })
+	app.Raw("GET", "/x", func(c *Ctx) error { return c.String(200, "x") })
 
 	h, err := Serve(app, sock)
 	if err != nil {
@@ -57,7 +57,7 @@ func TestServeYieldsAHandleListenDoesNot(t *testing.T) {
 	waitBound(t, sock)
 
 	later := quiet("later")
-	later.Get("/later", func(c *Ctx) error { return nil })
+	later.Raw("GET", "/later", func(c *Ctx) error { return nil })
 	if err := h.Include(later); err != nil {
 		t.Fatalf("Include on a served program: %v", err)
 	}

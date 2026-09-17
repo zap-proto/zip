@@ -41,9 +41,9 @@ func redGuard(next Handler) Handler {
 // no live generation, so nothing ever forces it to rebuild.
 func TestRed_DropNeverMovesTheVersionCounter(t *testing.T) {
 	child := quiet("child")
-	child.Get("/keep", redOK)
-	sub := child.Group("/sub").(*App) // Drop takes the concrete child
-	sub.Get("/gone", redOK)
+	child.Raw("GET", "/keep", redOK)
+	sub := child.Group("/sub").on // Drop takes the concrete child
+	sub.Raw("GET", "/gone", redOK)
 
 	host := quiet("host")
 	host.Use(child)
@@ -93,7 +93,7 @@ func TestRed_DropNeverMovesTheVersionCounter(t *testing.T) {
 // Run with -race; the detector is the assertion.
 func TestRed_TheSealIsNotEnforcedUnderConcurrency(t *testing.T) {
 	host := quiet("host")
-	host.Get("/ok", redOK)
+	host.Raw("GET", "/ok", redOK)
 	if err := build(host); err != nil {
 		t.Fatalf("generation 0: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestRed_TheSealIsNotEnforcedUnderConcurrency(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
 			c := quiet("c")
-			c.Get("/red/"+itoa(i), redOK)
+			c.Raw("GET", "/red/"+itoa(i), redOK)
 			_ = hostOf(t, host).Include(c)
 		}
 	}()
@@ -139,13 +139,13 @@ func TestRed_TheSealIsNotEnforcedUnderConcurrency(t *testing.T) {
 // still be serving somewhere else.
 func TestRed_RefusedIncludeStillAdoptsTheChildsTeardown(t *testing.T) {
 	host := quiet("host")
-	host.Get("/v1/x", redOK)
+	host.Raw("GET", "/v1/x", redOK)
 	if err := build(host); err != nil {
 		t.Fatalf("generation 0: %v", err)
 	}
 
 	bad := quiet("bad")
-	bad.Get("/v1/x", redOK) // collides with the live set: Include must refuse
+	bad.Raw("GET", "/v1/x", redOK) // collides with the live set: Include must refuse
 	var torn atomic.Bool
 	bad.OnShutdown(func(context.Context) error { torn.Store(true); return nil })
 
@@ -199,7 +199,7 @@ func TestRed_AnUnknownMethodIsRefusedAtTheBoundary(t *testing.T) {
 	}
 	// And the host is not poisoned: a later valid composition still builds.
 	ok := quiet("ok")
-	ok.Get("/fine", redOK)
+	ok.Raw("GET", "/fine", redOK)
 	host.Use(ok)
 	if err := build(host); err != nil {
 		t.Fatalf("the host was bricked by a refused declaration: %v", err)
@@ -208,7 +208,7 @@ func TestRed_AnUnknownMethodIsRefusedAtTheBoundary(t *testing.T) {
 
 func TestRed_MethodCaseIsNormalisedBeforeTheConflictCheck(t *testing.T) {
 	host := quiet("host")
-	host.Get("/v1/thing", func(c *Ctx) error { return c.String(200, "host") })
+	host.Raw("GET", "/v1/thing", func(c *Ctx) error { return c.String(200, "host") })
 
 	remote, err := remoteApp(host, "/v1", "http://127.0.0.1:9", Declaration{
 		Name:   "remote",
@@ -262,8 +262,8 @@ func TestRed_ABuildErrorPanicsRatherThanEmptyingEveryProjection(t *testing.T) {
 	// here precisely because a sentinel can be ignored, and a caller ignoring it
 	// is the failure this exists to stop.
 	a := billingApp() // one typed op: GET /invoices/:id
-	a.Get("/healthz", redOK)
-	a.Get("/healthz", redOK) // the whole defect needed exactly this one line
+	a.Raw("GET", "/healthz", redOK)
+	a.Raw("GET", "/healthz", redOK) // the whole defect needed exactly this one line
 
 	if err := build(a); err == nil {
 		t.Fatal("setup: the duplicate was not detected at all")
@@ -318,10 +318,10 @@ func TestRed_AllCollidesWithAConcreteMethod(t *testing.T) {
 	// answering better — and the ledger's strongest case was mounts and plugin
 	// prefixes, every one of which registers as methodAll.
 	gateway := quiet("gateway")
-	gateway.All("/v1/thing", func(c *Ctx) error { return c.String(200, "gateway") })
+	gateway.Raw(MethodAll, "/v1/thing", func(c *Ctx) error { return c.String(200, "gateway") })
 
 	owner := quiet("owner")
-	owner.Get("/v1/thing", func(c *Ctx) error { return c.String(200, "owner") })
+	owner.Raw("GET", "/v1/thing", func(c *Ctx) error { return c.String(200, "owner") })
 
 	host := quiet("host")
 	host.Use(gateway, owner)
@@ -352,7 +352,7 @@ func TestRed_AMiddlewareOnlyDefinitionIsRefusedAtSeal(t *testing.T) {
 	sec.Use(H(redGuard(redOK))) // a guard, and nothing to guard
 
 	host := quiet("host")
-	host.Get("/private", redOK)
+	host.Raw("GET", "/private", redOK)
 	host.Use(sec)
 
 	err := build(host)
@@ -368,7 +368,7 @@ func TestRed_AMiddlewareOnlyDefinitionIsRefusedAtSeal(t *testing.T) {
 	// The correct spelling still works: give the definition the routes it guards.
 	ok := quiet("ok")
 	ok.Use(H(redGuard(redOK)))
-	ok.Get("/guarded", redOK)
+	ok.Raw("GET", "/guarded", redOK)
 	host2 := quiet("host2")
 	host2.Use(ok)
 	if err := build(host2); err != nil {
@@ -389,9 +389,9 @@ func TestRed_IncludeIsAHostVerbSoTheNoOpIsUnaskable(t *testing.T) {
 	// App.Include to call on a group, and host.Include edits the host's own
 	// program. All that machinery is gone.
 	host := quiet("host")
-	host.Get("/live", redOK)
+	host.Raw("GET", "/live", redOK)
 	v1 := host.Group("/v1") // Router now, not *App — the abstraction survives
-	v1.Get("/x", redOK)
+	v1.Raw("GET", "/x", redOK)
 
 	h, err := host2(host)
 	if err != nil {
@@ -399,7 +399,7 @@ func TestRed_IncludeIsAHostVerbSoTheNoOpIsUnaskable(t *testing.T) {
 	}
 
 	later := quiet("later")
-	later.Get("/later", redOK)
+	later.Raw("GET", "/later", redOK)
 	if err := h.Include(later); err != nil {
 		t.Fatalf("Include: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestRed_IncludeIsAHostVerbSoTheNoOpIsUnaskable(t *testing.T) {
 			t.Errorf("panic does not name the freeze: %v", r)
 		}
 	}()
-	v1.Get("/sneak", redOK)
+	v1.Raw("GET", "/sneak", redOK)
 }
 
 func TestRed_ANilHandlerIsAcceptedAtBoot(t *testing.T) {
@@ -428,7 +428,7 @@ func TestRed_ANilHandlerIsAcceptedAtBoot(t *testing.T) {
 	accepted := false
 	func() {
 		defer func() { _ = recover() }()
-		app.Get("/x", uninitialised)
+		app.Raw("GET", "/x", uninitialised)
 		accepted = true
 	}()
 
@@ -455,9 +455,9 @@ func TestRed_ANilHandlerIsAcceptedAtBoot(t *testing.T) {
 func TestRed_AScopedWithIsLostByANestedGroup(t *testing.T) {
 	app := quiet("host")
 	v1 := app.With(redGuard).Group("/v1")
-	v1.Get("/direct", redOK)
+	v1.Raw("GET", "/direct", redOK)
 	sub := v1.Group("/sub")
-	sub.Get("/nested", redOK)
+	sub.Raw("GET", "/nested", redOK)
 
 	if err := build(app); err != nil {
 		t.Fatalf("build: %v", err)
@@ -487,7 +487,7 @@ func TestRed_WithUseRefusesToComposeADefinitionUngated(t *testing.T) {
 	// other hosts may compose the same one), so it refuses and says what to do
 	// instead. Silence was the only unacceptable answer.
 	child := quiet("child")
-	child.Get("/child/x", redOK)
+	child.Raw("GET", "/child/x", redOK)
 
 	app := quiet("host")
 	defer func() {
@@ -504,7 +504,7 @@ func TestRed_WithUseRefusesToComposeADefinitionUngated(t *testing.T) {
 
 func TestRed_CleanDescendAncestorAliasing(t *testing.T) {
 	shared := quiet("shared")
-	shared.Get("/shared", redOK)
+	shared.Raw("GET", "/shared", redOK)
 
 	left := quiet("left")
 	left.Group("/l").Use(shared)

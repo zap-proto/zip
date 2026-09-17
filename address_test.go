@@ -136,8 +136,8 @@ func TestTemplateAndIDSpellAWildcardTheSameWay(t *testing.T) {
 func TestTheSpecSpellsAWildcardTheDocumentsWay(t *testing.T) {
 	app := New(Config{AppName: "spelling", DisableStartupMessage: true})
 	g := app.Group("/v1/probe")
-	Get(g, "/*", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
-	Get(g, "/traces/:traceId", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
+	g.Get("/*", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
+	g.Get("/traces/:traceId", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
 
 	// Read it the way a consumer does — through JSON — rather than by asserting a
 	// Go type onto it. A wrong assertion yields nil, and nil has no keys, so the
@@ -186,7 +186,7 @@ type wildcardIn struct {
 
 func TestAWildcardIsDECLAREDAndNotJustSpelled(t *testing.T) {
 	app := New(Config{AppName: "declared", DisableStartupMessage: true})
-	Get(app.Group("/v1/probe"), "/*", func(context.Context, *wildcardIn) (*struct{}, error) { return nil, nil })
+	app.Group("/v1/probe").Get("/*", func(context.Context, *wildcardIn) (*struct{}, error) { return nil, nil })
 
 	raw, err := json.Marshal(app.OpenAPISpec())
 	if err != nil {
@@ -295,7 +295,7 @@ type plusIn struct {
 // one wrong character.
 func TestAPlusWildcardIsDeclaredToo(t *testing.T) {
 	app := New(Config{AppName: "plus", DisableStartupMessage: true})
-	Get(app.Group("/v1/secrets"), "/+", func(context.Context, *plusIn) (*struct{}, error) { return nil, nil })
+	app.Group("/v1/secrets").Get("/+", func(context.Context, *plusIn) (*struct{}, error) { return nil, nil })
 
 	raw, err := json.Marshal(app.OpenAPISpec())
 	if err != nil {

@@ -43,7 +43,7 @@ a legacy adapter on a wildcard route:
 
 ```go
 gin := buildExistingGinApp()
-app.All("/legacy/gin/*", zip.AdaptNetHTTP(gin))
+app.Raw(zip.MethodAll, "/legacy/gin/*", zip.AdaptNetHTTP(gin))
 ```
 
 ## From chi
@@ -56,7 +56,7 @@ chiRouter := chi.NewRouter()
 chiRouter.Get("/users", listUsers)
 
 app := zip.New(zip.Config{})
-app.All("/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
+app.Raw(zip.MethodAll, "/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
 ```
 
 Common mappings:
@@ -82,7 +82,7 @@ beeApp := web.NewHttpServer()
 // ... existing beego config
 
 app := zip.New(zip.Config{})
-app.All("/legacy/iam/*", zip.AdaptNetHTTP(beeApp.Handlers))
+app.Raw(zip.MethodAll, "/legacy/iam/*", zip.AdaptNetHTTP(beeApp.Handlers))
 ```
 
 Notes:
@@ -100,7 +100,7 @@ The zero-config path: any `http.Handler` works.
 existing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("hello"))
 })
-app.All("/legacy/*", zip.AdaptNetHTTP(existing))
+app.Raw(zip.MethodAll, "/legacy/*", zip.AdaptNetHTTP(existing))
 ```
 
 For middleware that takes `func(http.Handler) http.Handler`:
@@ -121,7 +121,7 @@ Once a route's traffic warrants it, rewrite from the adapter to native zip:
 
 ```go
 // before
-app.All("/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
+app.Raw(zip.MethodAll, "/legacy/chi/*", zip.AdaptNetHTTP(chiRouter))
 
 // after (per-route migration)
 v1 := app.Group("/v1")

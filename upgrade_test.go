@@ -34,7 +34,7 @@ func box(t *testing.T) string {
 	sock := dir + "/box.sock"
 
 	child := zip.New(zip.Config{AppName: "box", DisableStartupMessage: true})
-	child.Get("/v1/box/ws", wsx.Upgrade(func(c *wsx.Conn) error {
+	child.Raw("GET", "/v1/box/ws", wsx.Upgrade(func(c *wsx.Conn) error {
 		for {
 			typ, msg, err := c.ReadMessage()
 			if err != nil {
@@ -46,7 +46,7 @@ func box(t *testing.T) string {
 		}
 	}))
 	// Refused BEFORE the upgrade, which is how an unticketed terminal is refused.
-	child.Get("/v1/box/shut", func(c *zip.Ctx) error {
+	child.Raw("GET", "/v1/box/shut", func(c *zip.Ctx) error {
 		return zip.ErrUnauthorized("no ticket")
 	})
 	go func() { _ = child.Listen(sock) }()

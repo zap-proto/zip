@@ -35,7 +35,7 @@ func dropApp(t *testing.T) *zip.App {
 		Fields:      map[string]string{"dropIn.reason": "Why it is being deleted."},
 		Example:     json.RawMessage(`{"id":"t_1","reason":"expired"}`),
 	})
-	zip.Delete(a, "/v1/drop/things/:id", drop)
+	a.Delete("/v1/drop/things/:id", drop)
 	return a
 }
 
@@ -132,8 +132,8 @@ func TestBodyless_FlagsAreWhatTheURLCanCarry(t *testing.T) {
 		Filters map[string]string `json:"filters"`
 	}
 	a := zip.New(zip.Config{AppName: "wide", DisableStartupMessage: true})
-	zip.Delete(a, "/v1/wide/things/:id", func(_ context.Context, in *wideIn) (*wideIn, error) { return in, nil })
-	zip.Post(a, "/v1/wide/things", func(_ context.Context, in *wideIn) (*wideIn, error) { return in, nil })
+	a.Delete("/v1/wide/things/:id", func(_ context.Context, in *wideIn) (*wideIn, error) { return in, nil })
+	a.Post("/v1/wide/things", func(_ context.Context, in *wideIn) (*wideIn, error) { return in, nil })
 
 	byName := map[string][]string{}
 	for _, c := range a.Commands() {
@@ -161,7 +161,7 @@ type verifyOut struct {
 
 func verifyApp() *zip.App {
 	a := zip.New(zip.Config{AppName: "verify", DisableStartupMessage: true})
-	zip.Post(a, "/v1/drop/things/:id/verify", func(_ context.Context, in *verifyIn) (*verifyOut, error) {
+	a.Post("/v1/drop/things/:id/verify", func(_ context.Context, in *verifyIn) (*verifyOut, error) {
 		return &verifyOut{Verified: in.ID == "t_1"}, nil
 	})
 	return a

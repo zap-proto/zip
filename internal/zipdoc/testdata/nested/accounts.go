@@ -1,8 +1,8 @@
-// Package scoped registers through a scope: the verb methods are generic
+// Package nested registers through a group: the verb methods are generic
 // methods on a concrete type, so the declarations carry no type arguments and
 // the handler is the bound method. zipdoc has to read that shape, because it is
 // the shape a service is written in.
-package scoped
+package nested
 
 import (
 	"context"
@@ -52,13 +52,13 @@ func (a *API) Balance(ctx context.Context, in *struct{}) (*Ledger, error) {
 
 // Register declares the accounts surface.
 func Register(app *zip.App, api *API) {
-	accounts := app.Scope("/v1/accounts").Tag("accounts")
+	accounts := app.Group("/v1/accounts").Tag("accounts")
 
 	// A metadata chain follows the declaration; the registration is the inner
 	// call, and zipdoc has to find it there.
 	accounts.Post("/open", api.Open).ID("accounts.open").Summary("Open an account")
 	accounts.Get("/:id", api.Read)
 
-	// A nested scope composes its prefix.
-	accounts.Scope("/:id").Get("/ledger", api.Balance)
+	// A nested group composes its prefix.
+	accounts.Group("/:id").Get("/ledger", api.Balance)
 }

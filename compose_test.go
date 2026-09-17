@@ -35,7 +35,7 @@ type invoiceOut struct {
 // so this definition may be included exactly ONCE in any one program.
 func billingApp() *App {
 	b := quiet("billing")
-	Get(b, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+	b.Get("/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 		return &invoiceOut{ID: in.ID, Total: 42}, nil
 	}, WithOperationID("listInvoices"))
 	return b
@@ -57,7 +57,7 @@ func billingApp() *App {
 // get_invoices_by_id, and under /admin it is get_admin_invoices_by_id.
 func unnamedApp() *App {
 	b := quiet("billing")
-	Get(b, "/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+	b.Get("/invoices/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 		return &invoiceOut{ID: in.ID, Total: 42}, nil
 	})
 	return b
@@ -107,13 +107,13 @@ func kinds(a *App) []string {
 // what runs, not about how the framework stored it.
 func TestWalk_OrderIsProgramOrder(t *testing.T) {
 	users := quiet("users")
-	users.Get("/users", func(c *Ctx) error { return nil })
+	users.Raw("GET", "/users", func(c *Ctx) error { return nil })
 
 	root := quiet("root")
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // requestID
 	root.Use(users)
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // authz
-	root.Get("/late", func(c *Ctx) error { return nil })
+	root.Raw("GET", "/late", func(c *Ctx) error { return nil })
 
 	want := []string{"mw", "app:users@", "GET /users", "mw", "GET /late"}
 	got := kinds(root)
@@ -128,8 +128,8 @@ func TestWalk_OrderIsProgramOrder(t *testing.T) {
 // every downstream artifact churns for no semantic reason.
 func TestWalk_AppendIsStable(t *testing.T) {
 	a, b := quiet("a"), quiet("b")
-	a.Get("/a", func(c *Ctx) error { return nil })
-	b.Get("/b", func(c *Ctx) error { return nil })
+	a.Raw("GET", "/a", func(c *Ctx) error { return nil })
+	b.Raw("GET", "/b", func(c *Ctx) error { return nil })
 
 	root := quiet("root")
 	root.Use(a)
@@ -202,7 +202,7 @@ func TestSnapshot_ParentMiddlewareAfterInclusionDoesNotReachTheSubtree(t *testin
 	root := quiet("root")
 	v1 := root.Group("/v1")
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // written AFTER v1 was included
-	v1.Get("/x", func(c *Ctx) error { return nil })         // written after that
+	v1.Raw("GET", "/x", func(c *Ctx) error { return nil })  // written after that
 
 	switch n := mwAt(root, "/v1/x"); n {
 	case -1:
@@ -222,8 +222,8 @@ func TestSnapshot_LateSubtreeRegistrationInheritsTheAnchoredStack(t *testing.T) 
 	root.Use(H(func(c *Ctx) error { return c.Continue() })) // anchored before v1
 	v1 := root.Group("/v1")
 	v1.Use(H(func(c *Ctx) error { return c.Continue() })) // the group's own
-	root.Get("/other", func(c *Ctx) error { return nil })
-	v1.Get("/late", func(c *Ctx) error { return nil }) // written last, still in v1
+	root.Raw("GET", "/other", func(c *Ctx) error { return nil })
+	v1.Raw("GET", "/late", func(c *Ctx) error { return nil }) // written last, still in v1
 
 	if n := mwAt(root, "/v1/late"); n != 2 {
 		t.Fatalf("/v1/late sees %d middleware, want 2 (root's, anchored, + the group's)", n)
@@ -441,7 +441,7 @@ func TestFreeze_MutateAfterBuildPanics_IncludeAfterBuildSucceeds(t *testing.T) {
 				}
 			}
 		}()
-		child.Get("/sneak", func(c *Ctx) error { return nil })
+		child.Raw("GET", "/sneak", func(c *Ctx) error { return nil })
 	}()
 
 	// Proxy-after-seal: allowed. A second host includes the same sealed
@@ -487,12 +487,12 @@ func TestFreeze_ReadingDoesNotFreeze(t *testing.T) {
 // line order and means nothing.
 func TestConflicts_AllOfThemAtOnceWithBothPartiesNamed(t *testing.T) {
 	iam := quiet("iam")
-	iam.Get("/users", func(c *Ctx) error { return nil })
-	iam.Get("/tokens", func(c *Ctx) error { return nil })
+	iam.Raw("GET", "/users", func(c *Ctx) error { return nil })
+	iam.Raw("GET", "/tokens", func(c *Ctx) error { return nil })
 
 	billing := quiet("billing")
-	billing.Get("/users", func(c *Ctx) error { return nil })  // collides
-	billing.Get("/tokens", func(c *Ctx) error { return nil }) // collides too
+	billing.Raw("GET", "/users", func(c *Ctx) error { return nil })  // collides
+	billing.Raw("GET", "/tokens", func(c *Ctx) error { return nil }) // collides too
 
 	root := quiet("root")
 	root.Use(iam)
@@ -521,7 +521,7 @@ func TestConflicts_AllOfThemAtOnceWithBothPartiesNamed(t *testing.T) {
 // inclusion.
 func TestConflicts_NamesTheCompositionPath(t *testing.T) {
 	leaf := quiet("leaf")
-	leaf.Get("/x", func(c *Ctx) error { return nil })
+	leaf.Raw("GET", "/x", func(c *Ctx) error { return nil })
 
 	root := quiet("root")
 	root.Group("/v1").Use(leaf)
@@ -553,7 +553,7 @@ func TestUse_ATerminalHandlerIsRefusedOnTheAppBeingServed(t *testing.T) {
 	assets := fstest.MapFS{"main.css": &fstest.MapFile{Data: []byte("body{}")}}
 
 	root := quiet("root")
-	root.Get("/x", func(c *Ctx) error { return nil })
+	root.Raw("GET", "/x", func(c *Ctx) error { return nil })
 	root.Use(Static(assets)) // depth 0 — the app being served
 
 	err := build(root)
@@ -569,7 +569,7 @@ func TestUse_ATerminalHandlerIsRefusedOnTheAppBeingServed(t *testing.T) {
 
 	// The blessed spelling is untouched: registered AT an address, it serves.
 	fine := quiet("fine")
-	fine.Get("/assets/*", Static(assets))
+	fine.Raw("GET", "/assets/*", Static(assets))
 	if err := build(fine); err != nil {
 		t.Fatalf("a leaf registered at its address was refused: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestUse_ATerminalHandlerIsRefusedOnTheAppBeingServed(t *testing.T) {
 func TestUse_ATerminalHandlerIsRefusedInsideAnIncludedDefinition(t *testing.T) {
 	ui := quiet("ui")
 	ui.Use(Static(fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>")}}))
-	ui.Get("/health", func(c *Ctx) error { return nil }) // routes, so it is not merely inert
+	ui.Raw("GET", "/health", func(c *Ctx) error { return nil }) // routes, so it is not merely inert
 
 	root := quiet("root")
 	root.Group("/app").Use(ui)
@@ -612,14 +612,14 @@ func TestUse_ATerminalHandlerIsRefusedInsideAnIncludedDefinition(t *testing.T) {
 // could know which, and only one of them is refused.
 func TestUse_TerminalityIsADeclaredPropertyNotAName(t *testing.T) {
 	wraps := quiet("wraps")
-	wraps.Get("/x", func(c *Ctx) error { return nil })
+	wraps.Raw("GET", "/x", func(c *Ctx) error { return nil })
 	wraps.Use(AdaptNetHTTPMiddleware(func(next http.Handler) http.Handler { return next }))
 	if err := build(wraps); err != nil {
 		t.Fatalf("a net/http MIDDLEWARE adapter was refused in Use position: %v", err)
 	}
 
 	answers := quiet("answers")
-	answers.Get("/x", func(c *Ctx) error { return nil })
+	answers.Raw("GET", "/x", func(c *Ctx) error { return nil })
 	answers.Use(AdaptNetHTTP(http.NotFoundHandler()))
 	err := build(answers)
 	if err == nil {
@@ -632,7 +632,7 @@ func TestUse_TerminalityIsADeclaredPropertyNotAName(t *testing.T) {
 	// And it is not zip's own three: anyone's leaf constructor says so the same
 	// way, which is why Terminal is exported. (wsx.Upgrade is one of these.)
 	mine := quiet("mine")
-	mine.Get("/x", func(c *Ctx) error { return nil })
+	mine.Raw("GET", "/x", func(c *Ctx) error { return nil })
 	mine.Use(Terminal("spa.Shell", func(c *Ctx) error { return c.String(200, "<html>") }))
 	err = build(mine)
 	if err == nil {
@@ -646,7 +646,7 @@ func TestUse_TerminalityIsADeclaredPropertyNotAName(t *testing.T) {
 	// terminality is what the constructor said, never what the handler looks
 	// like or where it came from.
 	plain := quiet("plain")
-	plain.Get("/x", func(c *Ctx) error { return nil })
+	plain.Raw("GET", "/x", func(c *Ctx) error { return nil })
 	plain.Use(H(func(c *Ctx) error { return c.String(200, "<html>") }))
 	if err := build(plain); err != nil {
 		t.Fatalf("an undeclared handler was refused in Use position: %v", err)
@@ -670,7 +670,7 @@ func TestInert_TheServedAppsMiddlewareIsGlobalAndSoIsNeverInert(t *testing.T) {
 	root := quiet("root") // no routes of its own, ever
 	root.Use(H(func(c *Ctx) error { ran++; return c.Continue() }))
 	child := quiet("child")
-	child.Get("/x", func(c *Ctx) error { return c.String(200, "ok") })
+	child.Raw("GET", "/x", func(c *Ctx) error { return c.String(200, "ok") })
 	root.Use(child)
 
 	if err := build(root); err != nil {
@@ -748,8 +748,8 @@ func TestH_IsNeededOnlyForABareClosureAtUse(t *testing.T) {
 	app.Use(recoverish())
 
 	// 3. Route methods still take ...Handler, so an inline closure is fine.
-	app.Get("/x", func(c *Ctx) error { return nil })
-	app.With(func(next Handler) Handler { return next }).Post("/y", func(c *Ctx) error { return nil })
+	app.Raw("GET", "/x", func(c *Ctx) error { return nil })
+	app.With(func(next Handler) Handler { return next }).Raw("POST", "/y", func(c *Ctx) error { return nil })
 
 	// 4. Only the bare closure at Use needs it. The commented line below is the
 	//    compile error this test exists to describe:
@@ -777,13 +777,13 @@ func TestCompose_DocumentIsTheUnion(t *testing.T) {
 
 	child := quiet("iam")
 	for i := 0; i < childOps; i++ {
-		Get(child, "/v1/iam/r"+itoa(i), func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+		child.Get("/v1/iam/r"+itoa(i), func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 			return &invoiceOut{}, nil
 		}, WithOperationID("iam_r"+itoa(i)))
 	}
 	host := quiet("host")
 	for i := 0; i < own; i++ {
-		Get(host, "/v1/host/r"+itoa(i), func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+		host.Get("/v1/host/r"+itoa(i), func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 			return &invoiceOut{}, nil
 		}, WithOperationID("host_r"+itoa(i)))
 	}

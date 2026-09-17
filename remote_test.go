@@ -19,10 +19,10 @@ import (
 func remoteService(t *testing.T) (string, Declaration) {
 	t.Helper()
 	svc := quiet("ledger")
-	Get(svc, "/v1/ledger/entries/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
+	svc.Get("/v1/ledger/entries/:id", func(_ context.Context, in *invoiceIn) (*invoiceOut, error) {
 		return &invoiceOut{ID: in.ID, Total: 7}, nil
 	}, WithOperationID("getEntry"))
-	svc.Get("/v1/ledger/raw", func(c *Ctx) error { return c.String(200, "raw ledger") })
+	svc.Raw("GET", "/v1/ledger/raw", func(c *Ctx) error { return c.String(200, "raw ledger") })
 
 	sock := filepath.Join(sockDir(t), "ledger.sock")
 	go func() { _ = svc.Listen(sock) }()

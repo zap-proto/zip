@@ -42,11 +42,11 @@ func TestMCPTools_AreTheRegistryProjected(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "market", DisableStartupMessage: true})
 	// Documented the canonical way: a doc comment, no WithSummary.
-	zip.Post(app, "/v1/market/quote", func(_ context.Context, _ *quoteIn) (*quoteOut, error) {
+	app.Post("/v1/market/quote", func(_ context.Context, _ *quoteIn) (*quoteOut, error) {
 		return &quoteOut{Cents: 1200}, nil
 	}, zip.WithOperationID("market_quote"))
 	// Undocumented: WithSummary still names it.
-	zip.Post(app, "/v1/market/fill", func(_ context.Context, _ *fillIn) (*fillOut, error) {
+	app.Post("/v1/market/fill", func(_ context.Context, _ *fillIn) (*fillOut, error) {
 		return &fillOut{Filled: true}, nil
 	}, zip.WithOperationID("market_fill"), zip.WithSummary("Fill a resting order"))
 

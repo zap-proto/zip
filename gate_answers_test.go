@@ -24,7 +24,7 @@ func TestUse_MiddlewareMayAnswer(t *testing.T) {
 		}
 		return c.Next()
 	}))
-	app.Get("/thing", func(c *Ctx) error { return c.String(200, "served") })
+	app.Raw("GET", "/thing", func(c *Ctx) error { return c.String(200, "served") })
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build refused a gate that answers: %v", err)
 	}

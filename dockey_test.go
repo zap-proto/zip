@@ -52,13 +52,13 @@ func TestProseIsFiledUnderItsPackage(t *testing.T) {
 	zip.Describe(zip.DocKey("some/other/chain", "GET", "/height"), zip.Doc{Description: "A different chain's height."})
 
 	a := zip.New(zip.Config{AppName: "a", DisableStartupMessage: true})
-	zip.Get(a, "/height", aHeight)
+	a.Get("/height", aHeight)
 	if got := descriptionOf(t, a, "/height"); got != "The height this package means." {
 		t.Errorf("got %q, want this package's own sentence", got)
 	}
 
 	b := zip.New(zip.Config{AppName: "b", DisableStartupMessage: true})
-	zip.Get(b, "/height", bHeight)
+	b.Get("/height", bHeight)
 	if got := descriptionOf(t, b, "/height"); got != "The height this package means." {
 		t.Errorf("got %q — a handler declared here must read this package's key", got)
 	}
@@ -71,14 +71,14 @@ func TestAnUnqualifiedKeyIsStillRead(t *testing.T) {
 	zip.Describe("GET /legacy", zip.Doc{Description: "Filed the old way."})
 
 	a := zip.New(zip.Config{AppName: "legacy", DisableStartupMessage: true})
-	zip.Get(a, "/legacy", aHeight)
+	a.Get("/legacy", aHeight)
 	if got := descriptionOf(t, a, "/legacy"); got != "Filed the old way." {
 		t.Errorf("got %q, want the unqualified entry", got)
 	}
 
 	zip.Describe(zip.DocKey("github.com/zap-proto/zip_test", "GET", "/legacy"), zip.Doc{Description: "Filed under its package."})
 	b := zip.New(zip.Config{AppName: "legacy2", DisableStartupMessage: true})
-	zip.Get(b, "/legacy", aHeight)
+	b.Get("/legacy", aHeight)
 	if got := descriptionOf(t, b, "/legacy"); got != "Filed under its package." {
 		t.Errorf("got %q, want the qualified entry to win", got)
 	}

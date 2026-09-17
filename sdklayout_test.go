@@ -74,8 +74,7 @@ type Ided struct {
 // here is a second wire.
 func TestSDK_TheLayoutIsTheOneZipEmits(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-	zip.Post(app, "/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil },
-		zip.WithOperationID("get_tx"))
+	app.Post("/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil }, zip.WithOperationID("get_tx"))
 
 	sdk, err := app.SDK("p")
 	if err != nil {
@@ -139,10 +138,8 @@ func TestSDK_OnlyTheTreesThatNeedOneStateTheirWire(t *testing.T) {
 		L []plainLeaf `json:"l"`
 	}
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-	zip.Post(app, "/v1/wrap", func(_ context.Context, in *wrap) (*wrap, error) { return in, nil },
-		zip.WithOperationID("get_wrap"))
-	zip.Post(app, "/v1/plain", func(_ context.Context, in *plain) (*plain, error) { return in, nil },
-		zip.WithOperationID("get_plain"))
+	app.Post("/v1/wrap", func(_ context.Context, in *wrap) (*wrap, error) { return in, nil }, zip.WithOperationID("get_wrap"))
+	app.Post("/v1/plain", func(_ context.Context, in *plain) (*plain, error) { return in, nil }, zip.WithOperationID("get_plain"))
 
 	sdk, err := app.SDK("p")
 	if err != nil {
@@ -185,10 +182,8 @@ func TestSDK_TheTwoCodecsWriteTheSameBytes(t *testing.T) {
 		t.Skip("compiles a module with the go toolchain")
 	}
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-	zip.Post(app, "/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil },
-		zip.WithOperationID("get_tx"))
-	zip.Post(app, "/v1/ided", func(_ context.Context, in *Ided) (*Ided, error) { return in, nil },
-		zip.WithOperationID("get_ided"))
+	app.Post("/v1/tx", func(_ context.Context, in *Tx) (*Tx, error) { return in, nil }, zip.WithOperationID("get_tx"))
+	app.Post("/v1/ided", func(_ context.Context, in *Ided) (*Ided, error) { return in, nil }, zip.WithOperationID("get_ided"))
 
 	sdk, err := app.SDK("p")
 	if err != nil {
@@ -419,10 +414,8 @@ func main() {
 
 	// And over a real socket, against a service holding the declared types.
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-	zip.Post(app, "/v1/tx", func(_ context.Context, in *svc.Tx) (*svc.Tx, error) { return in, nil },
-		zip.WithOperationID("get_tx"))
-	zip.Post(app, "/v1/ided", func(_ context.Context, in *svc.Ided) (*svc.Ided, error) { return in, nil },
-		zip.WithOperationID("get_ided"))
+	app.Post("/v1/tx", func(_ context.Context, in *svc.Tx) (*svc.Tx, error) { return in, nil }, zip.WithOperationID("get_tx"))
+	app.Post("/v1/ided", func(_ context.Context, in *svc.Ided) (*svc.Ided, error) { return in, nil }, zip.WithOperationID("get_ided"))
 
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("sdkwire-%d.sock", os.Getpid()))
 	defer os.Remove(sock)
@@ -490,8 +483,7 @@ func TestSDK_AValueWithNoSlotsIsStillWrittenInline(t *testing.T) {
 		Name string    `json:"name"`
 	}
 	app := zip.New(zip.Config{AppName: "p", DisableStartupMessage: true})
-	zip.Post(app, "/v1/stamped", func(_ context.Context, in *stamped) (*stamped, error) { return in, nil },
-		zip.WithOperationID("get_stamped"))
+	app.Post("/v1/stamped", func(_ context.Context, in *stamped) (*stamped, error) { return in, nil }, zip.WithOperationID("get_stamped"))
 
 	sdk, err := app.SDK("p")
 	if err != nil {

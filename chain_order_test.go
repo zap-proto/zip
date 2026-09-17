@@ -14,7 +14,7 @@ import (
 func TestRouteChainOrder(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	var order []string
-	app.Get("/x",
+	app.Raw("GET", "/x",
 		func(c *zip.Ctx) error { order = append(order, "mw1"); return c.Next() },
 		func(c *zip.Ctx) error { order = append(order, "mw2"); return c.Next() },
 		func(c *zip.Ctx) error { order = append(order, "handler"); return c.NoContent(204) },
@@ -32,7 +32,7 @@ func TestRouteChainOrder(t *testing.T) {
 func TestRouteChainGateStops(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	reached := false
-	app.Get("/x",
+	app.Raw("GET", "/x",
 		func(c *zip.Ctx) error { return c.NoContent(401) }, // gate: no Next
 		func(c *zip.Ctx) error { reached = true; return c.NoContent(200) },
 	)
@@ -50,7 +50,7 @@ func TestRouteChainGateStops(t *testing.T) {
 func TestEmptyLeafIsGroupRoot(t *testing.T) {
 	app := zip.New(zip.Config{DisableStartupMessage: true})
 	g := app.Group("/tm")
-	g.Get("", func(c *zip.Ctx) error { return c.NoContent(204) })
+	g.Raw("GET", "", func(c *zip.Ctx) error { return c.NoContent(204) })
 	resp, err := app.Fiber().Test(httptest.NewRequest(http.MethodGet, "/tm", nil))
 	if err != nil {
 		t.Fatalf("Test: %v", err)

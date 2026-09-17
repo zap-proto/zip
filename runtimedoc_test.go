@@ -54,7 +54,7 @@ func TestRuntimeDoc_GenerationRetainsItsWalkResult(t *testing.T) {
 // Concurrent readers of the live generation while it is being replaced.
 func TestRuntimeDoc_NoLocksOnTheHotPath(t *testing.T) {
 	a := quiet("host")
-	a.Get("/x", func(c *Ctx) error { return c.String(200, "x") })
+	a.Raw("GET", "/x", func(c *Ctx) error { return c.String(200, "x") })
 	h, err := host2(a)
 	if err != nil {
 		t.Fatalf("host: %v", err)
@@ -68,7 +68,7 @@ func TestRuntimeDoc_NoLocksOnTheHotPath(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		p := quiet("p")
-		p.Get("/p", func(c *Ctx) error { return nil })
+		p.Raw("GET", "/p", func(c *Ctx) error { return nil })
 		_ = h.Include(p)
 	}()
 	wg.Wait()
@@ -79,8 +79,8 @@ func TestRuntimeDoc_NoLocksOnTheHotPath(t *testing.T) {
 // can emit an empty document and exit 0."
 func TestRuntimeDoc_ProjectionsPanicRatherThanEmit(t *testing.T) {
 	a := quiet("broken")
-	a.Get("/dup", func(c *Ctx) error { return nil })
-	a.Get("/dup", func(c *Ctx) error { return nil })
+	a.Raw("GET", "/dup", func(c *Ctx) error { return nil })
+	a.Raw("GET", "/dup", func(c *Ctx) error { return nil })
 
 	for name, fn := range map[string]func(){
 		"Registry":    func() { _ = a.Registry() },
@@ -108,11 +108,9 @@ func TestRuntimeDoc_DerivedValidationCatchesIDCollisions(t *testing.T) {
 	// Two DIFFERENT definitions, different paths (no address conflict), both
 	// declaring the same operation id, composed at the same prefix.
 	one := quiet("one")
-	Get(one, "/a", func(ctx1 context.Context, in *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil },
-		WithOperationID("shared"))
+	one.Get("/a", func(ctx1 context.Context, in *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil }, WithOperationID("shared"))
 	two := quiet("two")
-	Get(two, "/b", func(ctx1 context.Context, in *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil },
-		WithOperationID("shared"))
+	two.Get("/b", func(ctx1 context.Context, in *invoiceIn) (*invoiceOut, error) { return &invoiceOut{}, nil }, WithOperationID("shared"))
 
 	host := quiet("host")
 	host.Use(one, two)

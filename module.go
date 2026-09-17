@@ -197,7 +197,7 @@ func (a *App) Module(methodPath, runtimeName, modulePath string) error {
 		}
 		return c.Bytes(resp.Status, resp.Body)
 	}
-	a.method(method, path, []Handler{handler})
+	a.raw(here(1), method, path, []Handler{handler})
 
 	// Release the module's resources on shutdown. Runs as a teardown hook,
 	// i.e. AFTER in-flight requests drain, so a module stays live for any

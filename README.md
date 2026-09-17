@@ -97,7 +97,7 @@ func (s *Store) Add(ctx context.Context, in *AddIn) (*Note, error) {
 // OpenAPI document can be written by a build step that has none.
 func New(s *Store) *zip.App {
 	app := zip.New(zip.Config{AppName: "notes"})
-	zip.Post(app, "/v1/notes", s.Add)
+	app.Post("/v1/notes", s.Add)
 	return app
 }
 
@@ -199,13 +199,13 @@ The `/v1/notes` entry, with its examples removed:
 
 ## Projections
 
-Everything below starts from the one declaration `zip.Post(app, "/v1/notes", s.Add)`.
+Everything below starts from the one declaration `app.Post("/v1/notes", s.Add)`.
 
 ### REST
 
 | | |
 |---|---|
-| Declare | `zip.Get`, `zip.Post`, `zip.Put`, `zip.Patch`, `zip.Delete`, called as `zip.Post[In, Out](on, path, fn, opts...)`. `on` is the `*zip.App`, `app.Group("/v1")` or `app.With(middleware...)`. |
+| Declare | `Get`, `Post`, `Put`, `Patch`, `Delete` on an `*App` or a `*Group`, called as `g.Post(path, fn, opts...)` — `In` and `Out` are inferred from the handler. A route that is not a typed operation uses `Raw(method, path, handlers...)`. |
 | Input | The JSON body (GET, HEAD and DELETE have none), then fields tagged `header:"X-Name"`, then the query string, then path parameters. The URL wins. `validate:"required"` refuses a request without the field. |
 | Options | `zip.WithOperationID`, `zip.WithSummary`, `zip.WithTags`, `zip.WithStatus(201)`, `zip.WithResponseHeader`. |
 | Untyped routes | `app.Get(path, func(c *zip.Ctx) error)` registers a route with no operation, so it is in none of the projections below. Use it for streams, protocol upgrades and non-JSON bodies. |

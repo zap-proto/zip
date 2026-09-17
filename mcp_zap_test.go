@@ -28,7 +28,7 @@ import (
 func mcpApp(t *testing.T) *App {
 	t.Helper()
 	app := quiet("tools")
-	Get(app, "/v1/answer", func(ctx context.Context, in *struct {
+	app.Get("/v1/answer", func(ctx context.Context, in *struct {
 		Q string `json:"q"`
 	}) (*struct {
 		A string `json:"a"`
@@ -37,7 +37,7 @@ func mcpApp(t *testing.T) *App {
 			A string `json:"a"`
 		}{A: "42:" + in.Q}, nil
 	}, WithOperationID("answer"))
-	Post(app, "/v1/refuse", func(ctx context.Context, in *struct{}) (*struct{}, error) {
+	app.Post("/v1/refuse", func(ctx context.Context, in *struct{}) (*struct{}, error) {
 		return nil, ErrForbidden("not for you")
 	}, WithOperationID("refuse"))
 	return app
@@ -164,7 +164,7 @@ func TestMCP_ServesOverZapWithNoHTTPListener(t *testing.T) {
 func TestMCP_ZapCallerComesFromTheContext(t *testing.T) {
 	seen := make(chan Caller, 1)
 	app := quiet("tools")
-	Get(app, "/v1/whoami", func(ctx context.Context, in *struct{}) (*struct {
+	app.Get("/v1/whoami", func(ctx context.Context, in *struct{}) (*struct {
 		Org string `json:"org"`
 	}, error) {
 		seen <- CallerOf(ctx)

@@ -37,7 +37,7 @@ type told struct {
 func resultApp(t *testing.T, seen *[]told) *zip.App {
 	t.Helper()
 	app := zip.New(zip.Config{AppName: "restest", DisableStartupMessage: true})
-	zip.Post(app, "/v1/things", func(_ context.Context, in *resIn) (*resOut, error) {
+	app.Post("/v1/things", func(_ context.Context, in *resIn) (*resOut, error) {
 		if in.Fail {
 			return nil, errors.New("the handler said no")
 		}
@@ -121,7 +121,7 @@ func TestOnResult_IsToldWhenTheRuleRefuses(t *testing.T) {
 	var seen []told
 	app := zip.New(zip.Config{AppName: "restest2", DisableStartupMessage: true})
 	var ran bool
-	zip.Post(app, "/v1/things", func(_ context.Context, in *resIn) (*resOut, error) {
+	app.Post("/v1/things", func(_ context.Context, in *resIn) (*resOut, error) {
 		ran = true
 		return &resOut{OK: true}, nil
 	}, zip.WithOperationID("createThing"))
@@ -156,7 +156,7 @@ func TestOnResult_IsToldWhenTheRuleRefuses(t *testing.T) {
 // declares none.
 func TestOnResult_NilIsSilent(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "restest3", DisableStartupMessage: true})
-	zip.Post(app, "/v1/things", func(_ context.Context, in *resIn) (*resOut, error) {
+	app.Post("/v1/things", func(_ context.Context, in *resIn) (*resOut, error) {
 		return &resOut{OK: true}, nil
 	}, zip.WithOperationID("createThing"))
 	if err := app.Build(); err != nil {

@@ -57,7 +57,7 @@ func BenchmarkJSONEdge(b *testing.B) {
 		AppName:               "bench",
 		DisableStartupMessage: true,
 	})
-	app.Post("/v1/chat", func(c *zip.Ctx) error {
+	app.Raw("POST", "/v1/chat", func(c *zip.Ctx) error {
 		var in chatRequest
 		if err := c.Bind(&in); err != nil {
 			return err
@@ -106,7 +106,7 @@ func BenchmarkJSONMarshalOnly(b *testing.B) {
 		FinishReason:     "stop",
 		Latency:          73.2,
 	}
-	app.Get("/marshal", func(c *zip.Ctx) error { return c.JSON(200, &out) })
+	app.Raw("GET", "/marshal", func(c *zip.Ctx) error { return c.JSON(200, &out) })
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -127,7 +127,7 @@ func BenchmarkJSONUnmarshalOnly(b *testing.B) {
 		AppName:               "bench-unmarshal",
 		DisableStartupMessage: true,
 	})
-	app.Post("/unmarshal", func(c *zip.Ctx) error {
+	app.Raw("POST", "/unmarshal", func(c *zip.Ctx) error {
 		var in chatRequest
 		if err := c.Bind(&in); err != nil {
 			return err

@@ -46,7 +46,7 @@ func TestQueryWritesWhatTheBinderReads(t *testing.T) {
 
 	a := zip.New(zip.Config{AppName: "page", DisableStartupMessage: true})
 	var got *pageIn
-	zip.Get(a, "/v1/page/things", func(_ context.Context, in *pageIn) (*pageIn, error) {
+	a.Get("/v1/page/things", func(_ context.Context, in *pageIn) (*pageIn, error) {
 		got = in
 		return in, nil
 	})

@@ -29,7 +29,7 @@ type whoOut struct {
 func whoApp(t *testing.T) *zip.App {
 	t.Helper()
 	app := zip.New(zip.Config{AppName: "who"})
-	zip.Post[whoIn, whoOut](app, "/v1/who", func(ctx context.Context, _ *whoIn) (*whoOut, error) {
+	app.Post("/v1/who", func(ctx context.Context, _ *whoIn) (*whoOut, error) {
 		c := zip.CallerOf(ctx)
 		return &whoOut{
 			Org: c.Org, Project: c.Project, User: c.User, Name: c.Name,
@@ -117,7 +117,7 @@ func TestForwardedIdentityCrossesWhole(t *testing.T) {
 	callee := dialWho(t)
 
 	front := zip.New(zip.Config{AppName: "front"})
-	front.Get("/ask", func(c *zip.Ctx) error {
+	front.Raw("GET", "/ask", func(c *zip.Ctx) error {
 		out, err := zip.Call[whoIn, whoOut](c.Forward(), callee, "who_ask", &whoIn{})
 		if err != nil {
 			return err

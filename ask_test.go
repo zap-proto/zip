@@ -23,7 +23,7 @@ func TestAskReachesAPeerByNameAndCarriesTheCaller(t *testing.T) {
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	peer := zip.New(zip.Config{AppName: "ledger", DisableStartupMessage: true})
-	zip.Post(peer, "/v1/ledger/whoami", func(ctx context.Context, in *askIn) (*askOut, error) {
+	peer.Post("/v1/ledger/whoami", func(ctx context.Context, in *askIn) (*askOut, error) {
 		org, ok := zip.Tenant(ctx)
 		if !ok {
 			return nil, zip.Errorf(403, "no tenant")
@@ -62,7 +62,7 @@ func TestAskReusesOneConnPerPeer(t *testing.T) {
 	t.Setenv(zip.RuntimeDirEnv, dir)
 
 	peer := zip.New(zip.Config{AppName: "reuse", DisableStartupMessage: true})
-	zip.Post(peer, "/v1/reuse/ping", func(ctx context.Context, in *askIn) (*askOut, error) {
+	peer.Post("/v1/reuse/ping", func(ctx context.Context, in *askIn) (*askOut, error) {
 		return &askOut{Org: "ok"}, nil
 	}, zip.WithOperationID("reuse_ping"))
 	go func() { _ = peer.Listen(zip.SocketPath("reuse")) }()

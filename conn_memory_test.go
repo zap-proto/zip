@@ -56,7 +56,7 @@ func TestConnMemory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var holding atomic.Int64
-	app.Get("/hold", func(c *zip.Ctx) error {
+	app.Raw("GET", "/hold", func(c *zip.Ctx) error {
 		holding.Add(1)
 		defer holding.Add(-1)
 		<-ctx.Done()

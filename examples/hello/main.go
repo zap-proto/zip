@@ -39,8 +39,8 @@ func main() {
 	app := zip.New(zip.Config{AppName: "hello"})
 	app.Use(middleware.Recover(), middleware.RequestID())
 
-	zip.Get(app, "/hello", hello)
-	zip.Get(app, "/health", health)
+	app.Get("/hello", hello)
+	app.Get("/health", health)
 
 	log.Fatal(app.Listen("http://:8080"))
 }

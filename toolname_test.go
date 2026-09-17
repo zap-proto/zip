@@ -62,8 +62,8 @@ func TestToolNames_OnePluginDefinitionIsOneTool(t *testing.T) {
 	host.Group("/v1").Use(shared)
 	host.Group("/admin").Use(shared)
 	// Give the host a route so the composition is buildable.
-	host.Get("/health", func(c *Ctx) error { return nil })
-	shared.Get("/x", func(c *Ctx) error { return nil })
+	host.Raw("GET", "/health", func(c *Ctx) error { return nil })
+	shared.Raw("GET", "/x", func(c *Ctx) error { return nil })
 	if err := host.Build(); err != nil {
 		t.Fatalf("build: %v", err)
 	}

@@ -98,34 +98,6 @@ type registeredOp struct {
 // ZAP, and there is still exactly one handler core underneath both.
 type decoder func([]byte, any) error
 
-// Get registers a GET typed handler at path, on the App or on any Router of it
-// — a Group's prefix is part of the op's path, so a group-structured app
-// declares typed ops without spelling its prefix out per route.
-func Get[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(0, on, "GET", path, fn, opts...)
-}
-
-// Post registers a POST typed handler at path.
-func Post[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(0, on, "POST", path, fn, opts...)
-}
-
-// Put registers a PUT typed handler at path.
-func Put[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(0, on, "PUT", path, fn, opts...)
-}
-
-// Patch registers a PATCH typed handler at path.
-func Patch[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(0, on, "PATCH", path, fn, opts...)
-}
-
-// Delete registers a DELETE typed handler at path. A DELETE addresses what it
-// deletes with its URL and carries no request body — see [hasBody].
-func Delete[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(0, on, "DELETE", path, fn, opts...)
-}
-
 // OpOption configures a typed handler registration (OpenAPI metadata).
 type OpOption func(*registeredOp)
 
@@ -641,8 +613,8 @@ var mainPath = sync.OnceValue(func() string {
 // here through [Scope.declare]. Get it wrong and every conflict, cycle and
 // post-seal write in a scoped service cites a line in some caller far above the
 // registration. TestSite_IsTheWrittenLine holds the count.
-func registerTyped[In, Out any](depth int, on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) *registeredOp {
-	scope := on.OpScope()
+func registerTyped[In, Out any](depth int, on *App, method, path string, fn TypedHandler[In, Out], opts ...OpOption) *registeredOp {
+	scope := on.opScope()
 	app := scope.App
 	// The op's path is the WHOLE path — the group's prefix composed with the
 	// leaf, exactly as the router composes it. Every projection keys on

@@ -22,7 +22,7 @@ func (r *reportOut) ResponseHeaders() map[string]string {
 // both land in the document because both are part of the contract.
 func TestResponseHeader_SetAndPublished(t *testing.T) {
 	app := quiet("svc")
-	Get(app, "/v1/report", func(_ context.Context, _ *reportIn) (*reportOut, error) {
+	app.Get("/v1/report", func(_ context.Context, _ *reportIn) (*reportOut, error) {
 		return &reportOut{Body: "ok"}, nil
 	}, WithOperationID("report"), WithResponseHeader("Cache-Control", "Set-Cookie"))
 
@@ -58,7 +58,7 @@ func (sneakHdrOut) ResponseHeaders() map[string]string {
 // Undeclared is refused, not written — same rule an undeclared status obeys.
 func TestResponseHeader_UndeclaredIsRefused(t *testing.T) {
 	app := quiet("svc")
-	Get(app, "/v1/sneak", func(_ context.Context, _ *reportIn) (*sneakHdrOut, error) {
+	app.Get("/v1/sneak", func(_ context.Context, _ *reportIn) (*sneakHdrOut, error) {
 		return &sneakHdrOut{}, nil
 	}, WithOperationID("sneakhdr"))
 
@@ -84,7 +84,7 @@ func TestResponseHeader_UndeclaredIsRefused(t *testing.T) {
 // not silent.
 func TestResponseHeader_NotWrittenOverMCP(t *testing.T) {
 	app := quiet("svc")
-	Get(app, "/v1/report", func(_ context.Context, _ *reportIn) (*reportOut, error) {
+	app.Get("/v1/report", func(_ context.Context, _ *reportIn) (*reportOut, error) {
 		return &reportOut{Body: "ok"}, nil
 	}, WithOperationID("report"), WithResponseHeader("Cache-Control", "Set-Cookie"))
 	if err := app.Build(); err != nil {
@@ -118,7 +118,7 @@ type brandOut struct {
 
 func TestResponseHeader_HostBindsWithNoNewSpelling(t *testing.T) {
 	app := quiet("svc")
-	Get(app, "/v1/brand", func(_ context.Context, in *brandIn) (*brandOut, error) {
+	app.Get("/v1/brand", func(_ context.Context, in *brandIn) (*brandOut, error) {
 		return &brandOut{Body: in.Host}, nil
 	}, WithOperationID("brand"))
 

@@ -151,7 +151,7 @@ func TestLoad_Unload(t *testing.T) {
 // host did not start, through the same Load call and the same Service type.
 func TestLoad_AlreadyRunning(t *testing.T) {
 	plugin := zip.New(zip.Config{AppName: "demo", DisableStartupMessage: true})
-	plugin.Get("/v1/demo/version", func(c *zip.Ctx) error {
+	plugin.Raw("GET", "/v1/demo/version", func(c *zip.Ctx) error {
 		return c.JSON(200, map[string]string{"version": "external"})
 	})
 	sock := filepath.Join(sockDir(t), "demo.sock")

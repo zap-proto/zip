@@ -35,23 +35,22 @@ func (API) List(ctx context.Context, in *In) (*Out, error) { return &Out{}, nil 
 // Read reads one.
 func (API) Read(ctx context.Context, in *In) (*Out, error) { return &Out{}, nil }
 
-// Register declares the surface three ways: the package-level function, a
-// scope's generic method, and a scope's method over a handler another package
-// composed.
+// Register declares the surface three ways: at the root, on a group, and on a
+// group over a handler another package composed.
 func Register(app *zip.App) {
 	var api API
-	zip.Post[In, Out](app, "/plain", api.Make)
+	app.Post("/plain", api.Make)
 
-	s := app.Scope("/scope")
-	s.Get("/direct", api.List)
-	s.Get("/paid", meter.Paid(api.Read))
+	g := app.Group("/scope")
+	g.Get("/direct", api.List)
+	g.Get("/paid", meter.Paid(api.Read))
 }
 
-// Clash declares one address twice through a scope, so a test can read which
+// Clash declares one address twice through a group, so a test can read which
 // line the conflict names.
 func Clash(app *zip.App) {
 	var api API
-	s := app.Scope("/scope")
-	s.Get("/twice", api.List)
-	s.Get("/twice", api.Read)
+	g := app.Group("/scope")
+	g.Get("/twice", api.List)
+	g.Get("/twice", api.Read)
 }

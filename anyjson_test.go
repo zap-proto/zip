@@ -44,7 +44,7 @@ func TestAnyJSON_ACustomMarshalerIsNotItsFields(t *testing.T) {
 		Description: "Relay forwards one call.",
 		Fields:      map[string]string{"relayOut.result": "The upstream body, untouched."},
 	})
-	zip.Get(app, "/v1/relay/:id", relay)
+	app.Get("/v1/relay/:id", relay)
 
 	props := propsOf(t, app, "/v1/relay/{id}", "get")
 
@@ -78,7 +78,7 @@ func TestAnyJSON_ACustomMarshalerIsNotItsFields(t *testing.T) {
 // a null through the same op, unchanged.
 func TestAnyJSON_RelayIsVerbatim(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "relay2", DisableStartupMessage: true})
-	zip.Get(app, "/v2/relay/:id", func(_ context.Context, in *relayIn) (*json.RawMessage, error) {
+	app.Get("/v2/relay/:id", func(_ context.Context, in *relayIn) (*json.RawMessage, error) {
 		out := json.RawMessage(`[1,2]`)
 		if in.ID == "null" {
 			out = json.RawMessage(`null`)

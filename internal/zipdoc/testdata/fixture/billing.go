@@ -56,11 +56,11 @@ type VoidIn struct {
 
 // Register wires the service. Paths are written once, here.
 func Register(app *zip.App, store Store) {
-	zip.Post(app, "/v1/billing/invoices", ListInvoices)
-	zip.Get(app, "/v1/billing/invoices/:id", GetInvoice)
-	zip.Post(app, "/v1/billing/invoices/:id/pay", payInvoice(store))
-	zip.Post(app, "/v1/billing/invoices/:id/disputes", audited(DisputeInvoice))
-	app.Get("/v1/billing/invoices/:id/csv", logged(invoiceCSV))
+	app.Post("/v1/billing/invoices", ListInvoices)
+	app.Get("/v1/billing/invoices/:id", GetInvoice)
+	app.Post("/v1/billing/invoices/:id/pay", payInvoice(store))
+	app.Post("/v1/billing/invoices/:id/disputes", audited(DisputeInvoice))
+	app.Raw("GET", "/v1/billing/invoices/:id/csv", logged(invoiceCSV))
 
 	// RefundInvoice returns a settled invoice's amount to the org's balance.
 	//
@@ -69,12 +69,9 @@ func Register(app *zip.App, store Store) {
 	// is.
 	//
 	// Response: {"ok": true}
-	zip.Post(app, "/v1/billing/invoices/:id/refund",
-		func(_ context.Context, in *PayIn) (*VoidOut, error) {
-			return &VoidOut{OK: store.Pay(in.ID)}, nil
-		},
-		zip.WithSummary("Refund a settled invoice"),
-	)
+	app.Post("/v1/billing/invoices/:id/refund", func(_ context.Context, in *PayIn) (*VoidOut, error) {
+		return &VoidOut{OK: store.Pay(in.ID)}, nil
+	}, zip.WithSummary("Refund a settled invoice"))
 
 	// VoidInvoice voids an invoice that has not been paid.
 	//
@@ -82,13 +79,13 @@ func Register(app *zip.App, store Store) {
 	// nowhere else to put one.
 	//
 	// Response: {"ok": true}
-	zip.Delete[VoidIn, VoidOut](app, "/v1/billing/invoices/:id", func(_ context.Context, in *VoidIn) (*VoidOut, error) {
+	app.Delete("/v1/billing/invoices/:id", func(_ context.Context, in *VoidIn) (*VoidOut, error) {
 		return &VoidOut{OK: in.ID != ""}, nil
 	})
 
-	app.Get("/v1/billing/invoices/:id/pdf", invoicePDF)
+	app.Raw("GET", "/v1/billing/invoices/:id/pdf", invoicePDF)
 
-	zip.Alias(app.Post, "/v1/billing/invoices/:id/reminders", "/v1/billing/send-invoice-reminder", remind)
+	app.Alias("POST", "/v1/billing/invoices/:id/reminders", "/v1/billing/send-invoice-reminder", remind)
 }
 
 // remind emails the invoice's contact a reminder that it is due.

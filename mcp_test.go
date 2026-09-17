@@ -25,7 +25,7 @@ type greetOut struct {
 // returns its output — no per-tool wiring. Served over the app's transports.
 func TestMCP_FreeToolSurface(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "greeter", DisableStartupMessage: true})
-	zip.Post(app, "/v1/greet", func(_ context.Context, in *greetIn) (*greetOut, error) {
+	app.Post("/v1/greet", func(_ context.Context, in *greetIn) (*greetOut, error) {
 		return &greetOut{Message: "hello " + in.Name}, nil
 	}, zip.WithOperationID("greet"), zip.WithSummary("Greet someone by name"))
 
@@ -98,7 +98,7 @@ func TestMCP_ToolsCarryZipdocProse(t *testing.T) {
 
 	app := zip.New(zip.Config{AppName: "wms", DisableStartupMessage: true})
 	// No WithSummary — the doc comment IS the description.
-	zip.Post(app, "/v1/stock", func(_ context.Context, _ *stockIn) (*stockOut, error) {
+	app.Post("/v1/stock", func(_ context.Context, _ *stockIn) (*stockOut, error) {
 		return &stockOut{Units: 3}, nil
 	}, zip.WithOperationID("stock"))
 
@@ -137,7 +137,7 @@ func TestMCP_ToolsCarryZipdocProse(t *testing.T) {
 // whose package cmd/zipdoc never ran over still names itself from WithSummary.
 func TestMCP_SummaryStillDescribesUndocumentedOp(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "bare", DisableStartupMessage: true})
-	zip.Post(app, "/v1/ping", func(_ context.Context, _ *greetIn) (*greetOut, error) {
+	app.Post("/v1/ping", func(_ context.Context, _ *greetIn) (*greetOut, error) {
 		return &greetOut{Message: "pong"}, nil
 	}, zip.WithOperationID("ping"), zip.WithSummary("Ping the service"))
 

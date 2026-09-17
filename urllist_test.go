@@ -26,7 +26,7 @@ func echoList(_ context.Context, in *listIn) (*listIn, error) { return in, nil }
 
 func listApp() *zip.App {
 	a := zip.New(zip.Config{AppName: "list", DisableStartupMessage: true})
-	zip.Get(a, "/v1/list/things", echoList)
+	a.Get("/v1/list/things", echoList)
 	return a
 }
 
@@ -88,7 +88,7 @@ func TestTheDocumentNamesWhatTheBinderFills(t *testing.T) {
 		ID hash `json:"id"`
 	}
 	a := listApp()
-	zip.Get(a, "/v1/list/one", func(_ context.Context, in *oneIn) (*oneIn, error) { return in, nil })
+	a.Get("/v1/list/one", func(_ context.Context, in *oneIn) (*oneIn, error) { return in, nil })
 
 	says := func(path string) map[string]string {
 		t.Helper()
