@@ -104,6 +104,10 @@ type ManifestOp struct {
 	// Gated says an Authorizer is in force, so the document publishes the held
 	// answer beside the finished one.
 	Gated bool `json:"gated,omitempty"`
+
+	// OAuth says the operation answers at an OAuth address, so its refusal is an
+	// RFC 6749 error rather than an RFC 9457 problem document.
+	OAuth bool `json:"oauth,omitempty"`
 }
 
 // TypeDesc is one type, described by what it is made of and by what it looks
@@ -287,6 +291,7 @@ func (a *App) Manifest() Manifest {
 		byType: map[reflect.Type]string{},
 		taken:  map[string]bool{},
 	}
+	oauth := composeOAuth(a.plan())
 	for _, op := range a.Registry() {
 		doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
 		mo := ManifestOp{
@@ -302,6 +307,7 @@ func (a *App) Manifest() Manifest {
 			In:              d.describe(op.InType, op.Origin),
 			Out:             d.describe(op.OutType, op.Origin),
 			Gated:           op.rule != nil && op.rule() != nil,
+			OAuth:           oauth[op.Method+" "+op.Path],
 		}
 		if hasDoc {
 			mo.Description = doc.Description

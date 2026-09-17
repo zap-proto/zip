@@ -160,6 +160,7 @@ func ProjectOpenAPI(m Manifest) map[string]any {
 				}
 			}
 		}
+		resp["default"] = refusalResponse(reg, op.OAuth)
 		obj["responses"] = resp
 		paths[path][strings.ToLower(op.Method)] = obj
 	}
