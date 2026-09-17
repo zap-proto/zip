@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 
@@ -288,6 +289,45 @@ func TestOAuthTakesTypedOpsToo(t *testing.T) {
 	}
 }
 
+// at walks the decoded document to one node, and says which step was not there.
+//
+// A walk over typed structs collapses EVERY structural miss to the zero value,
+// so a document missing a whole response reads exactly like one whose $ref is
+// empty. That is how a green feature and a red test came to disagree with
+// nobody able to say where: the assertion could only report "".
+func at(t *testing.T, tree map[string]any, steps ...string) any {
+	t.Helper()
+	var node any = tree
+	for i, step := range steps {
+		obj, ok := node.(map[string]any)
+		if !ok {
+			t.Fatalf("%s is a %T, not an object", strings.Join(steps[:i], " → "), node)
+		}
+		next, ok := obj[step]
+		if !ok {
+			have := make([]string, 0, len(obj))
+			for k := range obj {
+				have = append(have, k)
+			}
+			sort.Strings(have)
+			t.Fatalf("%s has no %q; it has %v", strings.Join(steps[:i], " → "), step, have)
+		}
+		node = next
+	}
+	return node
+}
+
+// text is [at] where the document says a string.
+func text(t *testing.T, tree map[string]any, steps ...string) string {
+	t.Helper()
+	node := at(t, tree, steps...)
+	s, ok := node.(string)
+	if !ok {
+		t.Fatalf("%s is a %T, not a string", strings.Join(steps, " → "), node)
+	}
+	return s
+}
+
 // TestTheDocumentDeclaresTheRefusal: every op publishes a `default` response in
 // the vocabulary its address speaks, so a generated client types its errors —
 // and the refusal on the wire carries every member that schema requires.
@@ -307,22 +347,7 @@ func TestTheDocumentDeclaresTheRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var doc struct {
-		Paths map[string]map[string]struct {
-			Responses map[string]struct {
-				Content map[string]struct {
-					Schema struct {
-						Ref string `json:"$ref"`
-					} `json:"schema"`
-				} `json:"content"`
-			} `json:"responses"`
-		} `json:"paths"`
-		Components struct {
-			Schemas map[string]struct {
-				Required []string `json:"required"`
-			} `json:"schemas"`
-		} `json:"components"`
-	}
+	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
@@ -331,9 +356,9 @@ func TestTheDocumentDeclaresTheRefusal(t *testing.T) {
 		{"/v1/things", "application/problem+json", "problem-details"},
 		{"/v1/oauth/token", "application/json", "oauth-error"},
 	} {
-		ref := doc.Paths[c.path]["post"].Responses["default"].Content[c.media].Schema.Ref
-		if ref != "#/components/schemas/"+c.schema {
-			t.Errorf("%s: default %s schema is %q, want %s", c.path, c.media, ref, c.schema)
+		want := "#/components/schemas/" + c.schema
+		if ref := text(t, doc, "paths", c.path, "post", "responses", "default", "content", c.media, "schema", "$ref"); ref != want {
+			t.Errorf("%s: default %s schema is %q, want %s", c.path, c.media, ref, want)
 			continue
 		}
 		req, err := http.NewRequest("POST", c.path, strings.NewReader("{"))
@@ -352,9 +377,9 @@ func TestTheDocumentDeclaresTheRefusal(t *testing.T) {
 		if err := json.Unmarshal(b, &body); err != nil {
 			t.Fatalf("%s: %s", c.path, b)
 		}
-		for _, member := range doc.Components.Schemas[c.schema].Required {
-			if _, ok := body[member]; !ok {
-				t.Errorf("%s: the refusal has no %q, which the document requires: %s", c.path, member, b)
+		for _, member := range at(t, doc, "components", "schemas", c.schema, "required").([]any) {
+			if _, ok := body[member.(string)]; !ok {
+				t.Errorf("%s: the refusal has no %v, which the document requires: %s", c.path, member, b)
 			}
 		}
 	}
