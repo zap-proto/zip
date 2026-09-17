@@ -1,15 +1,9 @@
 package zip_test
 
-// Head-to-head bench: zip's edge JSON path with encoding/json (v1) vs
-// encoding/json/v2. Build select happens via the `goexperiment.jsonv2`
-// tag — the same `zip.JSONVariant` constant the benchmarks print is
-// what `zip.New` logs at startup.
+// Bench for zip's edge JSON path, which is stdlib encoding/json.
 //
 // Run:
 //   go test -bench=BenchmarkJSON -benchmem -run=^$ .
-//   GOEXPERIMENT=jsonv2 go test -bench=BenchmarkJSON -benchmem -run=^$ .
-//
-// Compare allocations + ns/op between the two invocations.
 
 import (
 	"bytes"
@@ -55,8 +49,8 @@ var benchReqBody = []byte(`{
 }`)
 
 // BenchmarkJSONEdge runs the full edge path: POST a JSON body, zip
-// decodes it via c.Bind() (json/v2 if GOEXPERIMENT=jsonv2, else
-// json/v1), the handler returns a JSON response, zip encodes it.
+// decodes it via c.Bind(), the handler returns a JSON response, zip
+// encodes it.
 // This is the "JSON at the edge" hot path in production.
 func BenchmarkJSONEdge(b *testing.B) {
 	app := zip.New(zip.Config{
@@ -155,16 +149,9 @@ func BenchmarkJSONUnmarshalOnly(b *testing.B) {
 	}
 }
 
-// TestJSONVariantConstant catches the case where someone breaks the
-// build-tag wiring: with GOEXPERIMENT=jsonv2 we expect
-// `encoding/json/v2`; without it, `encoding/json`. The constant is
-// what zip.New logs at startup, so this is the same value operators
-// read in cloud-binary logs.
+// TestJSONVariantConstant pins the one JSON implementation zip.New logs.
 func TestJSONVariantConstant(t *testing.T) {
-	switch zip.JSONVariant {
-	case "encoding/json/v2", "encoding/json":
-		// ok — exactly one of these must be reported.
-	default:
-		t.Fatalf("unexpected JSONVariant %q", zip.JSONVariant)
+	if zip.JSONVariant != "encoding/json" {
+		t.Fatalf("JSONVariant = %q, want encoding/json", zip.JSONVariant)
 	}
 }

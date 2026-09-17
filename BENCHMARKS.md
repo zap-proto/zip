@@ -168,9 +168,8 @@ for i in $(seq 8); do
   go test -run='^$' -bench=Benchmark_PluginHop -benchmem -count=1 -benchtime=3000x .
 done
 
-# JSON edge path (v1 vs json/v2)
+# JSON edge path (stdlib encoding/json)
 go test -run='^$' -bench='BenchmarkJSON' -benchmem -count=6 .
-GOEXPERIMENT=jsonv2 go test -run='^$' -bench='BenchmarkJSON' -benchmem -count=6 .
 
 # Medians (requires golang.org/x/perf/cmd/benchstat)
 go test -run='^$' -bench='Benchmark_ZipTax|Benchmark_TypedRoute' -benchmem -count=6 . | benchstat -

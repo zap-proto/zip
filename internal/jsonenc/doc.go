@@ -4,12 +4,13 @@
 // generic In/Out handlers, module.go's extension envelope — goes
 // through Marshal / Unmarshal here. There is no other JSON path.
 //
-// Implementation: two build-tag-gated files swap the body. When the
-// binary is compiled with GOEXPERIMENT=jsonv2, the import resolver
-// can reach the stdlib's encoding/json/v2 package and the v2.go file
-// is selected; otherwise v1.go is selected and we fall back to
-// stdlib encoding/json. Either way callers see Marshal / Unmarshal —
-// no v1/v2 branching in zip's own code.
+// It is stdlib encoding/json and nothing else. Since Go 1.27 that API runs on
+// the v2 engine with v1 semantics, so the speed arrives with the toolchain and
+// the wire stays where it is. Calling encoding/json/v2 directly would not: v2
+// keeps a zero number or false under omitempty, writes a nil slice as [] and a
+// nil map as {}, and matches field names case-sensitively. This package used to
+// select v2 on the goexperiment.jsonv2 build tag, which Go 1.27 sets by default,
+// so moving a module's go directive to 1.27 changed what every response said.
 //
 // Per HIP-0106 "Wire protocol stack": JSON is the boundary format
 // (ingress → gateway → subsystem handler). Inter-subsystem calls use

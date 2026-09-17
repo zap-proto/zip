@@ -60,10 +60,8 @@ type Loader interface {
 // moduleEnvelope is the JSON shape every extension runtime receives.
 // Same shape across wasm / goja / pyvm / starlark — the host serializes
 // once and the guest sees the same bytes regardless of which engine ran
-// it. RawMessage is from encoding/json (v1) because the type lives in
-// v1 only; both v1 and v2 (encoding/json/v2) honor its MarshalJSON /
-// UnmarshalJSON so the envelope serializes identically under either
-// build of jsonenc.
+// it. RawMessage is encoding/json's, the same package jsonenc encodes
+// with.
 type moduleEnvelope struct {
 	Method  string            `json:"method"`
 	Path    string            `json:"path"`

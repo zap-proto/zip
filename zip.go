@@ -42,12 +42,9 @@ import (
 	"github.com/zap-proto/zip/internal/jsonenc"
 )
 
-// JSONVariant reports which JSON implementation zip is using in this
-// build — "encoding/json/v2" when compiled with GOEXPERIMENT=jsonv2,
-// "encoding/json" otherwise. Exposed for cmd/cloud startup logs and
-// for tests that need to assert the variant. Per HIP-0106 the wire
-// stack is "JSON only at edge, ZAP between services"; this constant
-// tells operators which JSON impl is on the edge.
+// JSONVariant names the JSON implementation on the edge: stdlib
+// encoding/json, whatever the toolchain. Per HIP-0106 the wire stack is
+// "JSON only at edge, ZAP between services".
 const JSONVariant = jsonenc.Variant
 
 // Handler is zip's request handler signature. Returning an error causes
@@ -410,9 +407,8 @@ func newApp(cfg Config) *App {
 
 // jsonMarshal / jsonUnmarshal route every fiber JSON path through zip's jsonenc
 // package: c.JSON(), c.Bind().Body(), and the default error handler when it
-// serialises an HTTPError. With GOEXPERIMENT=jsonv2 the underlying impl is
-// encoding/json/v2; otherwise encoding/json. Same call site, different
-// bytes-out. Named here so [App.fiberConfig] is the one place that says it.
+// serialises an HTTPError. Named here so [App.fiberConfig] is the one place
+// that says it.
 var (
 	jsonMarshal   = jsonenc.Marshal
 	jsonUnmarshal = jsonenc.Unmarshal
