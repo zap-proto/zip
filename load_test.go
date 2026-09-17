@@ -481,8 +481,13 @@ func TestPlugins_SurvivesPanic(t *testing.T) {
 	}
 
 	// Panic it on a goroutine — unrecoverable, so the process really dies.
-	if status, _ := call(t, app, "GET", "/v1/demo/crash", ""); status != 200 {
-		t.Fatalf("crash trigger: status %d", status)
+	//
+	// Whether it flushes its answer before it dies is a RACE, and not the one
+	// under test: 200 means the reply won, 502 means the socket went first. The
+	// claim is what follows — the host survives and the plugin comes back — so
+	// asserting either side of that race is asserting a scheduling accident.
+	if status, _ := call(t, app, "GET", "/v1/demo/crash", ""); status != 200 && status != 502 {
+		t.Fatalf("crash trigger: status %d, want 200 or a dead socket", status)
 	}
 
 	// THE HOST MUST SURVIVE. If a plugin panic could kill the host, none of
