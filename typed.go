@@ -646,11 +646,15 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 	// here, so no way of reaching this op can skip a check another way makes. A
 	// nil *Out becomes a nil `any`.
 	run := func(ctx context.Context, in *In) (out any, err error) {
-		// The operation, readable by the handler through [OpOf]. Stated here
-		// because this is the one contract every projection funnels through, and
-		// only as the DECLARATION: a seam that matched an occurrence has already
-		// stated the resolved address and keeps it.
-		ctx = declaredOp(ctx, meta)
+		// The call, readable by the handler through [OpOf] and [AddressOf].
+		// Stated here because this is the one contract every projection funnels
+		// through and the one place that holds BOTH the resolved pattern and the
+		// decoded input — so the address is computed once, correctly, for REST, a
+		// tools/call, the call plane and an in-process invoke alike.
+		//
+		// The authorizer below and the result hook are handed [Op] as an argument
+		// and are unaffected: neither is given the address.
+		ctx = withAddress(ctx, meta, in)
 		// TOLD ONCE, ON EVERY WAY OUT. This is the one contract every projection
 		// funnels through — REST, an MCP tools/call, the call plane, the graph and
 		// an in-process invoke — so a hook here is told about all of them, and a
