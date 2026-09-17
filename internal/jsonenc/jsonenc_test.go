@@ -91,3 +91,36 @@ func TestOmitZero(t *testing.T) {
 		t.Fatalf("Marshal = %s, want %s", got, want)
 	}
 }
+
+// The name is checked against the behaviour, so the options cannot move
+// without the name moving with them.
+//
+// The wire is stated in three places that have to agree: the option set, this
+// constant's value, and the comment explaining it. The cases above fail the
+// moment the options move — but they would pass happily while the name went on
+// claiming semantics the encoder no longer has, and the name is what an
+// operator reads in a startup line.
+func TestTheNameIsWhatTheEncoderDoes(t *testing.T) {
+	if !strings.HasPrefix(Variant, "encoding/json/v2") {
+		t.Errorf("Variant = %q; this package imports encoding/json/v2 and a build without it does not compile", Variant)
+	}
+
+	sorted, err := Marshal(map[string]int{"b": 1, "a": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims, does := strings.Contains(Variant, "sorted keys"), string(sorted) == `{"a":1,"b":1}`; claims != does {
+		t.Errorf("Variant = %q but a map encodes as %s", Variant, sorted)
+	}
+
+	var legacy struct {
+		N int `json:"n,omitempty"`
+	}
+	kept, err := Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims, does := strings.Contains(Variant, "v1 semantics"), string(kept) == `{}`; claims != does {
+		t.Errorf("Variant = %q but a zero under omitempty encodes as %s", Variant, kept)
+	}
+}
