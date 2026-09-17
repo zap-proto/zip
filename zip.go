@@ -492,13 +492,6 @@ func (a *App) Delete[In, Out any](path string, fn TypedHandler[In, Out], opts ..
 	return &Operation[In, Out]{op: registerTyped(0, a, "DELETE", path, fn, opts...)}
 }
 
-// Alias is [Group.Alias] at the root.
-func (a *App) Alias(method, canonical, legacy string, h Handler) *App {
-	a.Raw(method, canonical, h)
-	a.Raw(method, legacy, h)
-	return a
-}
-
 // OAuth is [Group.OAuth] at the root.
 func (a *App) OAuth() *Group { return a.Group("").OAuth() }
 

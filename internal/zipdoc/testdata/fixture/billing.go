@@ -85,7 +85,10 @@ func Register(app *zip.App, store Store) {
 
 	app.Raw("GET", "/v1/billing/invoices/:id/pdf", invoicePDF)
 
-	app.Alias("POST", "/v1/billing/invoices/:id/reminders", "/v1/billing/send-invoice-reminder", remind)
+	// One handler at two addresses is two registrations. It needs no helper: this
+	// pass reads each one, so both carry the handler's prose.
+	app.Raw("POST", "/v1/billing/invoices/:id/reminders", remind)
+	app.Raw("POST", "/v1/billing/send-invoice-reminder", remind)
 }
 
 // remind emails the invoice's contact a reminder that it is due.
