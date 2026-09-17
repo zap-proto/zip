@@ -142,6 +142,25 @@ func (g *Group) Undeclared() *Group {
 	return n
 }
 
+// Authorize installs fn as the rule over the ops declared on THIS group, and
+// only those. It is [App.Authorize] at a prefix, with the same semantics: asked
+// at invoke on the decoded input, a tighter rule than the one composed above it
+// wins, and declaring none here falls through to that one rather than dropping
+// it.
+//
+// The distinction is the whole point of having it. A subsystem that guards its
+// own writes must put the rule on the GROUP it guards: on the group, every op
+// under it answers the rule; on the host app, the rule becomes the HOST's, and
+// [App.Authorize] covers every op the host serves — including a sibling
+// subsystem's, whose ops would then be judged by rules written about a principal
+// this guard never attached. Refusing every valid call to an unrelated
+// subsystem is the failure that shape produces, and putting the rule nowhere is
+// the other one: an authenticated write that nothing checked.
+func (g *Group) Authorize(fn Authorizer) *Group {
+	g.on.authorizer = fn
+	return g
+}
+
 // Get declares a GET operation.
 func (g *Group) Get[In, Out any](path string, fn TypedHandler[In, Out], opts ...OpOption) *Operation[In, Out] {
 	return g.declare("GET", path, fn, opts)
