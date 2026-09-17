@@ -278,6 +278,38 @@
           }
         },
         "type": "object"
+      },
+      "problem-details": {
+        "description": "An RFC 9457 problem document.",
+        "properties": {
+          "code": {
+            "description": "A stable token a client can branch on, when the refusal names one.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "What was refused, for a person to read.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The HTTP status.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "The status's reason phrase.",
+            "type": "string"
+          },
+          "type": {
+            "description": "about:blank",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "status",
+          "detail"
+        ],
+        "type": "object"
       }
     }
   },
@@ -317,6 +349,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Bootstrapped reports whether a chain has finished bootstrapping on this node."
@@ -351,6 +393,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "ChainID resolves a chain's alias to the id it names."
@@ -380,6 +432,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Chains are the chains this node is running, which is a subset of the chains the P-Chain knows about."
@@ -404,6 +466,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Fees are the transaction fees this node charges, in nLUX."
@@ -432,6 +504,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "LPs is where the network's stake stands on every current Lux Proposal."
@@ -454,6 +536,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "NetworkID is the number of the network this node is on."
@@ -476,6 +568,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "NetworkName is the name of the network this node is on."
@@ -502,6 +604,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Identity is this node's id, with the proof it holds the staking key that id is derived from."
@@ -524,6 +636,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Address is where this node tells its peers to reach it."
@@ -549,6 +671,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "NodeVersion is what this node is running: its own release, the database format it reads, and the VM protocol it speaks."
@@ -596,6 +728,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Peers are the nodes this one is connected to."
@@ -619,6 +761,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Upgrades is the upgrade schedule this node runs."
@@ -642,6 +794,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "Uptime is how much of the network, by stake, reports having seen this node up."
@@ -671,6 +833,16 @@
               }
             },
             "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
           }
         },
         "summary": "VMs are the virtual machines installed on this node, and the feature extensions its UTXO chains understand."
