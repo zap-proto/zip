@@ -102,28 +102,28 @@ type decoder func([]byte, any) error
 // — a Group's prefix is part of the op's path, so a group-structured app
 // declares typed ops without spelling its prefix out per route.
 func Get[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(on, "GET", path, fn, opts...)
+	registerTyped(0, on, "GET", path, fn, opts...)
 }
 
 // Post registers a POST typed handler at path.
 func Post[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(on, "POST", path, fn, opts...)
+	registerTyped(0, on, "POST", path, fn, opts...)
 }
 
 // Put registers a PUT typed handler at path.
 func Put[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(on, "PUT", path, fn, opts...)
+	registerTyped(0, on, "PUT", path, fn, opts...)
 }
 
 // Patch registers a PATCH typed handler at path.
 func Patch[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(on, "PATCH", path, fn, opts...)
+	registerTyped(0, on, "PATCH", path, fn, opts...)
 }
 
 // Delete registers a DELETE typed handler at path. A DELETE addresses what it
 // deletes with its URL and carries no request body — see [hasBody].
 func Delete[In, Out any](on OpTarget, path string, fn TypedHandler[In, Out], opts ...OpOption) {
-	registerTyped(on, "DELETE", path, fn, opts...)
+	registerTyped(0, on, "DELETE", path, fn, opts...)
 }
 
 // OpOption configures a typed handler registration (OpenAPI metadata).
@@ -635,7 +635,7 @@ var mainPath = sync.OnceValue(func() string {
 	return "main"
 })
 
-func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) {
+func registerTyped[In, Out any](depth int, on OpTarget, method, path string, fn TypedHandler[In, Out], opts ...OpOption) *registeredOp {
 	scope := on.OpScope()
 	app := scope.App
 	// The op's path is the WHOLE path — the group's prefix composed with the
@@ -845,5 +845,6 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	// router and all five projections read the same value and cannot disagree
 	// about what exists — which is what makes composition a walk rather than a
 	// merge of a router and a registry that were written separately.
-	app.addRoute(here(2), route{method: method, path: path, serve: handler, op: op})
+	app.addRoute(here(2+depth), route{method: method, path: path, serve: handler, op: op})
+	return op
 }
