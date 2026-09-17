@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -45,7 +46,12 @@ func Address(pattern string, in any) string {
 		if len(segment) < 2 || segment[0] != ':' {
 			continue
 		}
-		segments[i] = values[strings.ToLower(paramName(segment))]
+		// ESCAPED, because the result is a URL PATH and a parameter's value is
+		// ONE segment of it. A trace id of "t1/2" substituted raw read as two
+		// segments, so a relay forwarding this address asked its runtime for a
+		// route nobody registered — the request arrived correctly and the
+		// forward went elsewhere.
+		segments[i] = url.PathEscape(values[strings.ToLower(paramName(segment))])
 	}
 	return strings.Join(segments, "/")
 }
