@@ -56,10 +56,10 @@ type registeredOp struct {
 	Tags     []string
 	InType   reflect.Type
 	OutType  reflect.Type
-	// Pkg is the import path of the package the handler was declared in, read
-	// off the function itself at registration. It namespaces this op's entry in
-	// the process-wide documentation map, where an address alone is not unique:
-	// two chains in one node both answer GET /height. See [docs].
+	// Pkg is the import path of the package that REGISTERED this op. It
+	// namespaces the op's entry in the process-wide documentation map, where an
+	// address alone is not unique: two chains in one node both answer
+	// GET /height. See [docs].
 	Pkg string
 	// Origin names the app this op was DECLARED in when it arrived here through
 	// composition — empty for an op this app registered itself. It qualifies the
@@ -584,23 +584,34 @@ func readsText(t reflect.Type) bool {
 
 var textReader = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
-// pkgOf is the import path of the package fn was declared in. The runtime
-// names a function fully — "github.com/luxfi/node/vms/platformvm.(*Service).getHeight"
-// — and the package ends at the last '/' segment's first '.', which is the one
-// place a path cannot have one.
+// registrarPkg is the import path of the package that called Get/Post/… — the
+// package cmd/zipdoc files this op's prose under, because that is the source it
+// read the registration and the handler's doc comment from.
 //
-// Package main is the exception: a built binary names its functions
-// "main.(*Store).Add", while cmd/zipdoc files their prose under the package's
-// import path. The build info carries that path, so a service whose handlers
-// live in package main finds its own doc comments. Under go test the package
-// keeps its import path and nothing is substituted.
-func pkgOf(fn any) string {
-	at := runtime.FuncForPC(reflect.ValueOf(fn).Pointer())
-	if at == nil {
-		return ""
+// The HANDLER's package is the wrong question and used to be the one asked. It
+// answers the same thing only while the handler is declared where it is
+// registered, and a handler composed by a helper elsewhere breaks it: a metered
+// op registered as fare.Paid(s, o.listBuckets) reports the helper's package, so
+// every one of apps/s3's seven paid ops lost its prose — the document, the MCP
+// tools and the SDKs published them with no description. It reported the
+// registering package under Go 1.26 and the helper's under 1.27, because whether
+// that closure is inlined is the compiler's business and not a contract.
+func registrarPkg() string {
+	var pcs [16]uintptr
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs[:])])
+	for {
+		f, more := frames.Next()
+		if pkg := packageOf(f.Function, mainPath()); pkg != "" && pkg != zipPkg {
+			return pkg
+		}
+		if !more {
+			return ""
+		}
 	}
-	return packageOf(at.Name(), mainPath())
 }
+
+// zipPkg is this package, whose frames sit between a registration and its caller.
+const zipPkg = "github.com/zap-proto/zip"
 
 // packageOf reads the package out of a runtime function name. program is the
 // import path that "main" stands for.
@@ -637,7 +648,7 @@ func registerTyped[In, Out any](on OpTarget, method, path string, fn TypedHandle
 	op := &registeredOp{
 		Method:  method,
 		Path:    path,
-		Pkg:     pkgOf(fn),
+		Pkg:     registrarPkg(),
 		InType:  reflect.TypeOf(inZero),
 		OutType: reflect.TypeOf(outZero),
 	}
