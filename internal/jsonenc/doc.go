@@ -4,13 +4,20 @@
 // generic In/Out handlers, module.go's extension envelope — goes
 // through Marshal / Unmarshal here. There is no other JSON path.
 //
-// It is stdlib encoding/json and nothing else. Since Go 1.27 that API runs on
-// the v2 engine with v1 semantics, so the speed arrives with the toolchain and
-// the wire stays where it is. Calling encoding/json/v2 directly would not: v2
+// It is encoding/json/v2, called with the wire stated as options rather than
+// taken from whatever the toolchain defaults to. That distinction is the whole
+// point of this package: v2 answers differently from v1 in several places — it
 // keeps a zero number or false under omitempty, writes a nil slice as [] and a
-// nil map as {}, and matches field names case-sensitively. This package used to
-// select v2 on the goexperiment.jsonv2 build tag, which Go 1.27 sets by default,
-// so moving a module's go directive to 1.27 changed what every response said.
+// nil map as {}, leaves `<` unescaped, matches field names case-sensitively,
+// and does not sort a map's keys. This package once selected v2 on the
+// goexperiment.jsonv2 build tag, which Go 1.27 sets by default, so moving a
+// module to 1.27 silently changed what every response said.
+//
+// So the options say v1's semantics, plus sorted keys, and every one of the
+// remaining differences is a decision to make here, once, in view of the
+// clients — never a default to inherit. What v2 gives in return is its API:
+// Write and Read stream straight to and from the connection with no second
+// copy, options are per call, and `omitzero` says what omitempty could not.
 //
 // Per HIP-0106 "Wire protocol stack": JSON is the boundary format
 // (ingress → gateway → subsystem handler). Inter-subsystem calls use
