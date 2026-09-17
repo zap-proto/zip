@@ -90,6 +90,14 @@ func adaptStreaming(h http.Handler) func(*Ctx) error {
 		// the pooled fiber one, and a client that goes away cancels it.
 		req = req.WithContext(c.fc.RequestCtx())
 
+		// THE REQUEST-TARGET, AS THE CALLER SENT IT. ConvertRequest fills URL and
+		// leaves this empty, and net/http's own server always sets it — so a
+		// handler that reads it, rather than URL.Path, was handed nothing. An
+		// empty target normalises to "/", so a relay asks its runtime for a path
+		// nobody requested and answers 404 to every valid call. http.ServeMux
+		// matches on URL.Path, which is why a mux in front of it looks fine.
+		req.RequestURI = string(c.fc.Request().Header.RequestURI())
+
 		pr, pw := io.Pipe()
 		w := &streamWriter{hdr: make(http.Header), status: http.StatusOK, pw: pw, ready: make(chan struct{})}
 
