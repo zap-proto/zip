@@ -23,7 +23,7 @@ func asOrg(t *testing.T, app *zip.App, org, body string) (int, string) {
 	if org != "" {
 		req.Header.Set(zip.HeaderOrg, org)
 	}
-	resp, err := app.Fiber().Test(req)
+	resp, err := app.Test(req, zip.TestConfig{Timeout: deadline, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("Test: %v", err)
 	}

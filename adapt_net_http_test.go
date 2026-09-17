@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zap-proto/zip"
 )
@@ -21,6 +22,16 @@ import (
 
 // call issues an in-memory request through fiber.Test and returns
 // (status, body). Empty body sends no request body.
+// deadline is how long a request may take before the test calls it unanswered.
+//
+// fiber's own default is one second, which is the round trip and nothing else.
+// A request to a lazy plugin waits for a CHILD PROCESS to start, and on a busy
+// machine that alone can outlast a second — so the four warm tests and the two
+// MCP ones failed on a deadline that was never measuring them, in a different
+// subset every run. A generous ceiling weakens no assertion: a deadline request
+// still returns the moment it is answered.
+const deadline = 10 * time.Second
+
 func call(t *testing.T, app *zip.App, method, target, body string) (int, string) {
 	t.Helper()
 	var r io.Reader
@@ -31,7 +42,7 @@ func call(t *testing.T, app *zip.App, method, target, body string) (int, string)
 	if err != nil {
 		t.Fatalf("NewRequest(%s %s): %v", method, target, err)
 	}
-	resp, err := app.Fiber().Test(req)
+	resp, err := app.Test(req, zip.TestConfig{Timeout: deadline, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("Test(%s %s): %v", method, target, err)
 	}
@@ -62,7 +73,7 @@ func TestAdaptNetHTTP_NewForm_Serves(t *testing.T) {
 		t.Fatalf("GET /api/foo: status %d, want 200 (body=%s)", status, body)
 	}
 	if !strings.Contains(body, "net/http path=/api/foo") {
-		t.Fatalf("GET /api/foo: body=%q, want it served by the mounted net/http handler", body)
+		t.Fatalf("GET /api/foo: body=%q, want it deadline by the mounted net/http handler", body)
 	}
 }
 
