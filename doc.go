@@ -1,6 +1,9 @@
 package zip
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Documentation comes from the source, because the source is where it is already
 // written.
@@ -60,6 +63,23 @@ type Doc struct {
 // and it is what keeps two declarations of one name apart.
 var docs = map[string]Doc{}
 
+// byAddr indexes those keys by the address alone, for the reader that has a
+// method and a path and no package to qualify them with. A raw route is that
+// reader's whole subject: it records no registrar — [App.raw] files a method, a
+// path and a handler chain — so an address is all anyone can ask by, while
+// cmd/zipdoc files its comment under the package that declared it like every
+// other entry. Without this index a service's untyped half documents as silent
+// the moment its generated file is rewritten.
+//
+// An address two packages describe DIFFERENTLY is dropped from the index rather
+// than resolved: in one process one address answers once, so two claims on it
+// are a conflict, and answering with either would be a guess. The qualified
+// lookup still reaches both.
+var byAddr = map[string]string{}
+
+// ambiguous marks an address more than one package describes.
+const ambiguous = "\x00"
+
 // DocKey is the key a package's operation is filed under. One function, so the
 // generator that writes a key and the registry that reads one cannot spell it
 // differently.
@@ -69,7 +89,19 @@ func DocKey(pkg, method, path string) string { return pkg + " " + method + " " +
 // built with [DocKey]. Generated code calls it from an init(); hand-written
 // calls are possible but defeat the point, since the comment is then no longer
 // the single source.
-func Describe(key string, d Doc) { docs[key] = d }
+func Describe(key string, d Doc) {
+	docs[key] = d
+	f := strings.Fields(key)
+	if len(f) != 3 {
+		return // already unqualified: docs holds it under the address itself
+	}
+	addr := f[1] + " " + f[2]
+	if prev, seen := byAddr[addr]; seen && prev != key {
+		byAddr[addr] = ambiguous
+		return
+	}
+	byAddr[addr] = key
+}
 
 // docFor returns the extraction for an operation, if cmd/zipdoc ran.
 //
@@ -80,8 +112,20 @@ func docFor(pkg, method, path string) (Doc, bool) {
 	if d, ok := docs[DocKey(pkg, method, path)]; ok {
 		return d, true
 	}
-	d, ok := docs[method+" "+path]
-	return d, ok
+	addr := method + " " + path
+	if d, ok := docs[addr]; ok {
+		return d, true
+	}
+	if pkg != "" {
+		// A caller that named a package asked about that package. Answering with
+		// another one's prose would document one service with another's sentence.
+		return Doc{}, false
+	}
+	key := byAddr[addr]
+	if key == "" || key == ambiguous {
+		return Doc{}, false
+	}
+	return docs[key], true
 }
 
 // Prose is what an operation says about itself: the sentence for a one-line
