@@ -229,13 +229,13 @@ func (e *extractor) call(info *types.Info, call *ast.CallExpr, prefixes map[type
 		outType = inst.TypeArgs.At(1)
 	} else if hType := info.TypeOf(handlerArg); hType != nil {
 		if hSig, ok := hType.Underlying().(*types.Signature); ok && hSig.Params().Len() >= 2 && hSig.Results().Len() >= 1 {
-			inParam := hSig.Params().At(1).Type()
+			inParam := types.Unalias(hSig.Params().At(1).Type())
 			if ptr, ok := inParam.(*types.Pointer); ok {
 				inType = ptr.Elem()
 			} else {
 				inType = inParam
 			}
-			outRes := hSig.Results().At(0).Type()
+			outRes := types.Unalias(hSig.Results().At(0).Type())
 			if ptr, ok := outRes.(*types.Pointer); ok {
 				outType = ptr.Elem()
 			} else {
@@ -372,24 +372,37 @@ func isRouteTable(t types.Type) bool {
 // assigned after the one it derives from.
 func groupPrefixes(info *types.Info, f *ast.File) map[types.Object]string {
 	out := map[types.Object]string{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
-			return true
-		}
-		id, ok := as.Lhs[0].(*ast.Ident)
+	bind := func(name ast.Expr, value ast.Expr) {
+		id, ok := name.(*ast.Ident)
 		if !ok {
-			return true
+			return
 		}
 		obj := info.Defs[id]
 		if obj == nil {
 			obj = info.Uses[id]
 		}
 		if obj == nil {
-			return true
+			return
 		}
-		if p, ok := groupCallPrefix(info, out, as.Rhs[0]); ok {
+		if p, ok := groupCallPrefix(info, out, value); ok {
 			out[obj] = p
+		}
+	}
+	// `g := r.Group(...)` and `var g = r.Group(...)` declare the same variable
+	// from the same call, so both are read. A group's prefix is a property of
+	// the call, not of the syntax that names the result.
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) == 1 && len(n.Rhs) == 1 {
+				bind(n.Lhs[0], n.Rhs[0])
+			}
+		case *ast.ValueSpec:
+			if len(n.Names) == len(n.Values) {
+				for i := range n.Names {
+					bind(n.Names[i], n.Values[i])
+				}
+			}
 		}
 		return true
 	})
@@ -479,27 +492,27 @@ func routerPrefix(info *types.Info, prefixes map[types.Object]string, arg ast.Ex
 
 // isZipApp reports whether t is *zip.App — the root router, which has no prefix.
 func isZipApp(t types.Type) bool {
-	ptr, ok := t.(*types.Pointer)
+	ptr, ok := types.Unalias(t).(*types.Pointer)
 	if !ok {
 		return false
 	}
-	named, ok := ptr.Elem().(*types.Named)
+	named, ok := types.Unalias(ptr.Elem()).(*types.Named)
 	if !ok || named.Obj().Pkg() == nil {
 		return false
 	}
 	return named.Obj().Pkg().Path() == ZipPkg && named.Obj().Name() == "App"
 }
 
-// isZipScope reports whether t is *zip.Scope or *zip.Group.
+// isZipGroup reports whether t is *zip.Group, however it is named.
 func isZipGroup(t types.Type) bool {
 	if t == nil {
 		return false
 	}
-	ptr, ok := t.(*types.Pointer)
+	ptr, ok := types.Unalias(t).(*types.Pointer)
 	if !ok {
 		return false
 	}
-	named, ok := ptr.Elem().(*types.Named)
+	named, ok := types.Unalias(ptr.Elem()).(*types.Named)
 	if !ok || named.Obj().Pkg() == nil {
 		return false
 	}
