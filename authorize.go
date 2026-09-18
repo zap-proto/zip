@@ -294,3 +294,31 @@ func (a *App) Build() error {
 	a.buildMu.Unlock()
 	return err
 }
+
+// Verify answers whether this definition composes, and changes nothing about
+// whether it is serving.
+//
+// It is [App.Build]'s first half and the same call: the walk, the structural
+// rules, the derived rules, and rule adoption. What it does NOT do is the second
+// half — it renders no projection, builds no generation and installs none, so it
+// does not freeze the definition. A definition that is about to be composed by
+// reference can therefore be checked first and still be composed.
+//
+// That is the case it exists for. A projection of a program that does not
+// compose panics rather than lying, so asking [App.Declaration] or
+// [App.Registry] about a definition whose middleware guards no routes takes the
+// host down with it — while [App.Build] would answer, and freeze the definition
+// in the same breath. Verify is the answer on its own: a host mounting a
+// subsystem can report which group is wrong and carry on.
+//
+// It does settle which rule governs each definition, exactly as Build's first
+// half does, because that is what the walk is for. Composing more and calling
+// either again settles it again.
+//
+// It answers for this definition as the root of its own walk — as if it were
+// the app being served. One rule reads differently from there: middleware at a
+// served root wraps the routes composition brings it later, so it is exempt,
+// while the same middleware one level down guards a subtree that is already
+// settled. Only the host knows which of the two a definition turned out to be,
+// so a clean Verify here and a refusal from the host's Build are both right.
+func (a *App) Verify() error { return verify(a) }
