@@ -249,7 +249,11 @@ func (e *graph) call(ctx context.Context, op *registeredOp, s *gqlSel, path []an
 		// seam binds them: the header is the authority for the field it names.
 		bindHeaders(in, headerOf(ctx))
 	}
-	out, err := op.direct(ctx, in)
+	// The op came out of the composed registry, so it knows the address it is
+	// served at. Saying so is what lets a path-keyed rule govern a graph field
+	// the same way it governs the REST route: without it the contract fell back
+	// to the declaration, which for anything declared on a group is the leaf.
+	out, err := op.direct(withOp(ctx, servedOp(op)), in)
 	if err != nil {
 		e.fail(path, err.Error())
 		return nil

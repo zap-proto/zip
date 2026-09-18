@@ -89,7 +89,7 @@ func Here[In, Out any](ctx context.Context, a *App, op string, in *In) (*Out, er
 	if o == nil || o.direct == nil {
 		return nil, ErrNotFound("unknown op: " + op)
 	}
-	out, err := o.direct(ctx, in)
+	out, err := o.direct(withOp(ctx, servedOp(o)), in)
 	if err != nil {
 		return nil, err
 	}
