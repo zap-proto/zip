@@ -655,6 +655,18 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// The authorizer below and the result hook are handed [Op] as an argument
 		// and are unaffected: neither is given the address.
 		ctx = withAddress(ctx, meta, in)
+
+		// AS SERVED, not as declared. A rule keyed on the path has to see the
+		// address the caller reached, and a recorder has to name the operation
+		// the way the route table and the registry name it. Both used to be
+		// handed the registration — the bare leaf for anything declared on a
+		// group — so a path-keyed rule silently governed an address nobody
+		// serves, and one definition mounted twice reported one name for two
+		// operations.
+		served := meta
+		if c, ok := ctx.Value(opKey{}).(*invocation); ok {
+			served = c.op
+		}
 		// TOLD ONCE, ON EVERY WAY OUT. This is the one contract every projection
 		// funnels through — REST, an MCP tools/call, the call plane, the graph and
 		// an in-process invoke — so a hook here is told about all of them, and a
@@ -672,7 +684,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// and which of those happened is carried by the [Approval] the caller
 		// receives rather than by this.
 		if told := op.result(); told != nil {
-			defer func() { told(ctx, meta, err) }()
+			defer func() { told(ctx, served, err) }()
 		}
 		if err := validate(in); err != nil {
 			return nil, ErrBadRequest(err.Error())
@@ -684,7 +696,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// projection funnels through, so allow, deny and approve reach REST, MCP,
 		// the call plane, the graph and the CLI without a branch in any of them.
 		if auth := op.rule(); auth != nil {
-			d, err := auth(ctx, meta, in)
+			d, err := auth(ctx, served, in)
 			if err != nil {
 				return nil, err // the check itself failed, which is not a refusal
 			}
@@ -785,7 +797,14 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// its absolute path, so the pattern fiber matched is where this op is
 		// served — including the prefix of whichever host composed it, which the
 		// registration-time identity cannot name.
-		served := Op{Method: meta.Method, Path: c.Route().Path, OperationID: meta.OperationID}
+		//
+		// The id follows the same rule the registry uses (see occurrenceID): a
+		// DECLARED id is the op's own name and composition does not get a vote;
+		// an underived one is computed from the address it is actually served at.
+		served := Op{Method: meta.Method, Path: c.Route().Path, OperationID: op.OperationID}
+		if served.OperationID == "" {
+			served.OperationID = ID(meta.Method, served.Path)
+		}
 		out, err := op.invoke(withOp(callerContext(c), served), jsonenc.Unmarshal, body, c.Queries(), path, header)
 		if err != nil {
 			return err

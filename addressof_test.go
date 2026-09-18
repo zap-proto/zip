@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/zap-proto/zip"
@@ -57,32 +58,31 @@ func TestAddressOf_IsThisCallsConcreteAddress(t *testing.T) {
 	}
 }
 
-// THE CONCRETE ADDRESS IS NOT ON Op, deliberately.
+// THE CONCRETE ADDRESS IS NOT ON Op, deliberately — but the PATTERN on it is
+// the one the call was served at.
 //
-// Op is what the authorizer is handed and what OnResult is told, and both are
-// narrow on purpose — the result hook is given the operation and the outcome and
-// never the input. A concrete address carries path parameters, which ARE input,
-// so putting it on Op would widen two contracts as a side effect of serving a
-// third. This is the test that says so, because a later reader would otherwise
-// fix the "inconsistency" by helpfully resolving Op.Path.
+// Op is what the authorizer is handed and what OnResult is told. It carries the
+// composed pattern and the composed operation id: the same identity the route
+// table and the by-name registry publish. It does NOT carry the concrete
+// address, because path parameters are input and OnResult is promised the
+// operation and the outcome and never the input.
 //
-// It also pins what those two are handed TODAY, which is worth knowing: the
-// DECLARED leaf, not the address the call is served at. So Op.Path means the
-// declaration to a rule and the served pattern to [zip.OpOf], and a rule cannot
-// tell two mountings of one definition apart. That is a real limit and it is
-// older than this test; changing what authorization sees is its own decision,
-// not a side effect of giving a handler its address.
-func TestAddressOf_WhatARuleIsHandedIsUnchanged(t *testing.T) {
+// Both halves were wrong the other way once. A rule keyed on op.Path saw the
+// bare leaf for anything declared on a group — "/traces/:id" for an op served
+// at "/v1/o11y/traces/:id" — so every path-keyed rule in a service that
+// declares relatively governed an address nobody serves, and one definition
+// mounted at two prefixes reported one name for two operations.
+func TestOp_ARuleIsHandedTheOpAsServed(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "traces", DisableStartupMessage: true})
 	app.Group("/v1/o11y").Get("/traces/:id", tracer{}.Spans)
 
 	var asked []string
-	var toldPath string
+	var told string
 	app.Authorize(func(_ context.Context, op zip.Op, _ any) (zip.Decision, error) {
-		asked = append(asked, op.Path)
+		asked = append(asked, op.Method+" "+op.Path+" id="+op.OperationID)
 		return zip.Decision{Effect: zip.Allow}, nil
 	})
-	app.OnResult(func(_ context.Context, op zip.Op, _ error) { toldPath = op.Path })
+	app.OnResult(func(_ context.Context, op zip.Op, _ error) { told = op.Path + " id=" + op.OperationID })
 	if err := app.Build(); err != nil {
 		t.Fatal(err)
 	}
@@ -93,17 +93,45 @@ func TestAddressOf_WhatARuleIsHandedIsUnchanged(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	// The declaration, unresolved — and no concrete address anywhere near it.
-	if len(asked) != 1 || asked[0] != "/traces/:id" {
-		t.Errorf("authorizer saw %v, want the declared leaf", asked)
+	// The composed pattern and the id derived from it, exactly as the route
+	// table and the registry carry them.
+	want := "GET /v1/o11y/traces/:id id=" + zip.ID("GET", "/v1/o11y/traces/:id")
+	if len(asked) != 1 || asked[0] != want {
+		t.Errorf("authorizer saw %v, want [%q]", asked, want)
 	}
-	if toldPath != "/traces/:id" {
-		t.Errorf("result hook was told %q, want the declared leaf", toldPath)
+	if told != "/v1/o11y/traces/:id id="+zip.ID("GET", "/v1/o11y/traces/:id") {
+		t.Errorf("result hook was told %q", told)
 	}
-	for _, p := range append(asked, toldPath) {
-		if p == "/v1/o11y/traces/abc123" {
-			t.Errorf("a rule was handed the concrete address %q; path parameters are input", p)
+
+	// And never the resolved address: parameters are input.
+	for _, s := range append(asked, told) {
+		if strings.Contains(s, "abc123") {
+			t.Errorf("a rule was handed the concrete address in %q; path parameters are input", s)
 		}
+	}
+}
+
+// A DECLARED id is the operation's own name, and composition does not get a
+// vote on it — the same rule occurrenceID applies in the registry.
+func TestOp_ADeclaredIDSurvivesComposition(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "traces", DisableStartupMessage: true})
+	app.Group("/v1/o11y").Get("/traces/:id", tracer{}.Spans).ID("traces.spans")
+
+	var seen string
+	app.Authorize(func(_ context.Context, op zip.Op, _ any) (zip.Decision, error) {
+		seen = op.OperationID + " at " + op.Path
+		return zip.Decision{Effect: zip.Allow}, nil
+	})
+	if err := app.Build(); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := app.Test(httptest.NewRequest("GET", "/v1/o11y/traces/abc", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if seen != "traces.spans at /v1/o11y/traces/:id" {
+		t.Errorf("rule saw %q, want the declared id at the composed path", seen)
 	}
 }
 
