@@ -422,3 +422,56 @@ func TestCall_CancelledContextNeverReachesTheWire(t *testing.T) {
 		t.Fatal("a cancelled context must not reach the wire")
 	}
 }
+
+// slowApp serves one op that holds the call for seconds, so only the caller's
+// ctx can end it early.
+func slowApp(t *testing.T) *zip.App {
+	t.Helper()
+	app := zip.New(zip.Config{AppName: "slow", DisableStartupMessage: true})
+	app.Post("/v1/slow/wait", func(_ context.Context, _ *retireIn) (*boolOut, error) {
+		time.Sleep(5 * time.Second)
+		return &boolOut{}, nil
+	}, zip.WithOperationID("slow_wait"))
+	return app
+}
+
+// TestCall_CancelStopsCallInFlight — cancelling ctx while the callee is still
+// working ends the call at once with context.Canceled.
+func TestCall_CancelStopsCallInFlight(t *testing.T) {
+	c, err := zip.Dial(serveUDS(t, slowApp(t)))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	_, err = zip.Call[retireIn, boolOut](ctx, c, "slow_wait", &retireIn{Flag: "x"})
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("cancel took %v to stop the call", took)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// TestCall_DeadlineBoundsCall — a ctx deadline caps the call.
+func TestCall_DeadlineBoundsCall(t *testing.T) {
+	c, err := zip.Dial(serveUDS(t, slowApp(t)))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = zip.Call[retireIn, boolOut](ctx, c, "slow_wait", &retireIn{Flag: "x"})
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("deadline took %v to stop the call", took)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+}

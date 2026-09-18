@@ -2,6 +2,7 @@ package zip
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/zap-proto/zip/internal/sock"
@@ -267,10 +268,10 @@ func (c *Conn) Close() error {
 // socket's peer credential (see [Peer]), not by anything this client could
 // set.
 //
-// ctx is honored to the extent the transport allows: an already-cancelled ctx
-// fails before the wire, and the transport's own read timeout bounds the call
-// (zap: 30s). It is not cancellable mid-flight, because abandoning a call
-// would mean abandoning the pooled buffers it is writing into.
+// ctx bounds the call: its deadline caps the exchange and cancelling it stops
+// the call mid-flight, over any transport whose client is a [ContextClient]
+// (zap is). Either way the error wraps ctx's cause, so errors.Is sees
+// context.Canceled or context.DeadlineExceeded.
 func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, error) {
 	if c == nil || c.client == nil {
 		return nil, ErrInternal("zip: Call on a nil Conn")
@@ -279,7 +280,7 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 		return nil, ErrBadRequest("zip: invalid op name " + op)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, Errorf(499, "zip: call %s: %v", op, err)
+		return nil, fmt.Errorf("zip: call %s: %w", op, context.Cause(ctx))
 	}
 
 	var body []byte
@@ -303,7 +304,10 @@ func Call[In, Out any](ctx context.Context, c *Conn, op string, in *In) (*Out, e
 	req.SetBody(body)
 	forwardIdentity(ctx, req)
 
-	if err := c.client.Do(req, resp); err != nil {
+	if err := do(ctx, c.client, req, resp); err != nil {
+		if ended(err) {
+			return nil, fmt.Errorf("zip: call %s at %s: %w", op, c.addr, err)
+		}
 		// The far end, not this hop, is what failed — same reading Proxy gives a
 		// broken upstream.
 		return nil, Errorf(502, "zip: call %s at %s: %v", op, c.addr, err)

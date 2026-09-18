@@ -817,7 +817,7 @@ func (a *App) relay(ctx context.Context, f *zapmcp.Frame, p *plugin) *zapmcp.Fra
 	req.Header.SetContentType(mimeJSON)
 	req.SetBody(body)
 	forwardIdentity(ctx, req)
-	if err := forward(req, resp, client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
+	if err := forward(ctx, req, resp, client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
 		return a.answer(f, nil, err)
 	}
 	var ans zapmcp.Frame

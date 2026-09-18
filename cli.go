@@ -484,9 +484,7 @@ func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, b
 	return json.RawMessage(out), nil
 }
 
-// do performs one request over the transport Base names. ctx is honoured up to
-// the point the request is handed to the transport, which owns its own
-// deadlines from there.
+// do performs one request over the transport Base names, bounded by ctx.
 func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -535,7 +533,7 @@ func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byt
 	for k, v := range r.Header {
 		req.Header.Set(k, v)
 	}
-	if err := t.Dial(host).Do(req, resp); err != nil {
+	if err := do(ctx, t.Dial(host), req, resp); err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	out := append([]byte(nil), resp.Body()...)

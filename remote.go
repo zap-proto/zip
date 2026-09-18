@@ -104,7 +104,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 	r := newApp(cfg)
 
 	proxy := func(c *Ctx) error {
-		return forward(c.fc.Request(), c.fc.Response(), client, hostport, "", "mount "+prefix)
+		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, hostport, "", "mount "+prefix)
 	}
 	if len(d.Routes) == 0 {
 		// Nothing declared: the prefix and everything under it, which is what a
@@ -233,7 +233,10 @@ func remoteInvoke(client Client, host, method, pattern string) func(context.Cont
 		}
 		forwardIdentity(ctx, req)
 
-		if err := client.Do(req, resp); err != nil {
+		if err := do(ctx, client, req, resp); err != nil {
+			if ended(err) {
+				return nil, fmt.Errorf("zip: call %s %s at %s: %w", method, url, host, err)
+			}
 			return nil, Errorf(502, "zip: call %s %s at %s: %v", method, url, host, err)
 		}
 		switch code := resp.StatusCode(); {

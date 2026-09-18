@@ -3,6 +3,7 @@ package zip
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -49,6 +50,34 @@ type Server interface {
 // giving a scheme a Dial is a one-liner.
 type Client interface {
 	Do(req *fasthttp.Request, resp *fasthttp.Response) error
+}
+
+// ContextClient is a Client that can be cancelled mid-flight and bounded by a
+// deadline. *http.Transport implements it; a Client that does not is still
+// usable, it just cannot be stopped once the request is on the wire.
+type ContextClient interface {
+	DoContext(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error
+}
+
+var _ ContextClient = (*http.Transport)(nil)
+
+// do sends req over client under ctx. A client without DoContext gets the
+// ctx checked once, before the wire.
+func do(ctx context.Context, client Client, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if cc, ok := client.(ContextClient); ok {
+		return cc.DoContext(ctx, req, resp)
+	}
+	if err := ctx.Err(); err != nil {
+		return context.Cause(ctx)
+	}
+	return client.Do(req, resp)
+}
+
+// ended reports whether err is a ctx ending rather than a far-end failure. The
+// conn's deadline can fire a moment before ctx's own timer, so ctx.Err() alone
+// can still be nil here.
+func ended(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // Transport is one address scheme in both directions: Serve terminates bytes
@@ -333,7 +362,7 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 		if upgrading(c.fc.Request()) {
 			return relay(c.fc.RequestCtx(), host, "mount "+prefix)
 		}
-		return forward(c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
+		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
 	}
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
 	site := here(1)
@@ -359,7 +388,7 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 //
 // what names the caller in the error, because "no instance running" is worth
 // nothing without knowing what did not run.
-func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host, path, what string) error {
+func forward(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, client Client, host, path, what string) error {
 	if client == nil {
 		return Errorf(503, "%s: no instance running", what)
 	}
@@ -374,7 +403,7 @@ func forward(req *fasthttp.Request, resp *fasthttp.Response, client Client, host
 	if path != "" {
 		req.URI().SetPath(path)
 	}
-	if err := client.Do(req, resp); err != nil {
+	if err := do(ctx, client, req, resp); err != nil {
 		// The upstream, not this hop, is what failed.
 		return Errorf(502, "%s: %v", what, err)
 	}

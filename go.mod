@@ -24,7 +24,7 @@ require (
 	github.com/valyala/fasthttp v1.70.0
 	github.com/zap-proto/fiber/v3 v3.2.1
 	github.com/zap-proto/go v1.8.3
-	github.com/zap-proto/http v0.3.5
+	github.com/zap-proto/http v0.3.11
 	github.com/zap-proto/mcp v1.0.5
 	golang.org/x/sys v0.45.0
 	golang.org/x/tools v0.45.0
