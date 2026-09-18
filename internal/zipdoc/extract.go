@@ -482,12 +482,11 @@ func routerPrefix(info *types.Info, prefixes map[types.Object]string, arg ast.Ex
 	if p, ok := groupCallPrefix(info, prefixes, arg); ok {
 		return p, nil
 	}
-	if isZipGroup(info.Types[arg].Type) {
-		return "", nil
-	}
 	return "", fmt.Errorf("cannot resolve the path prefix of the router this op registers on, so its doc comment " +
 		"would be filed under the wrong path and silently dropped from the document and the MCP tool. " +
-		"Register on the *zip.App, or on a group assigned in this file as `g := <router>.Group(\"/prefix\")`")
+		"Register on the *zip.App, or on a group assigned in this file as `g := <router>.Group(\"/prefix\")` — " +
+		"a group reached through a parameter cannot be resolved, because the prefix belongs to the call that made " +
+		"it and this pass reads one file")
 }
 
 // isZipApp reports whether t is *zip.App — the root router, which has no prefix.
