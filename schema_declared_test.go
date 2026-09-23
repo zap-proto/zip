@@ -86,3 +86,25 @@ func TestAReplyFieldIsDescribed(t *testing.T) {
 		t.Fatalf("height was not described: %s", b)
 	}
 }
+
+// An interface holds any JSON value, so its schema constrains nothing — the
+// same answer a silent marshaler gets. It was "object", and a string in one
+// failed validation against the document that described it.
+func TestAnInterfaceIsAnyJSON(t *testing.T) {
+	type in struct {
+		Auth any            `json:"auth"`
+		Args map[string]any `json:"args"`
+	}
+	f, _ := reflect.TypeOf(in{}).FieldByName("Auth")
+	if got := schemaOf(f.Type, nil, nil); !reflect.DeepEqual(got, map[string]any{}) {
+		t.Errorf("any: got %v want {}", got)
+	}
+	f, _ = reflect.TypeOf(in{}).FieldByName("Args")
+	want := map[string]any{"type": "object", "additionalProperties": map[string]any{}}
+	if got := schemaOf(f.Type, nil, nil); !reflect.DeepEqual(got, want) {
+		t.Errorf("map[string]any: got %v want %v", got, want)
+	}
+	if got := primSchema("any"); !reflect.DeepEqual(got, map[string]any{}) {
+		t.Errorf(`primSchema("any"): got %v want {}`, got)
+	}
+}

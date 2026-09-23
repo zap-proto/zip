@@ -944,6 +944,11 @@ func schemaOf(t reflect.Type, reg *schemaRegistry, fields map[string]string) map
 			"type":                 "object",
 			"additionalProperties": schemaOf(t.Elem(), reg, fields),
 		}
+	case reflect.Interface:
+		// `any` holds whatever JSON arrives — a token string, an array, a number.
+		// Saying "object" made every example that carried a string there invalid
+		// against its own schema, and taught every generated client the wrong type.
+		return map[string]any{}
 	case reflect.Struct:
 		if reg == nil {
 			return map[string]any{"type": "object"}

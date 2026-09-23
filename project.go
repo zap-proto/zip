@@ -576,6 +576,8 @@ func headerDecls(op ManifestOp) map[string]any {
 // vocabulary rather than from a reflect.Kind.
 func primSchema(prim string) map[string]any {
 	switch prim {
+	case "any":
+		return map[string]any{} // any JSON value, as schemaOf says of an interface
 	case "bool":
 		return map[string]any{"type": "boolean"}
 	case "string":
