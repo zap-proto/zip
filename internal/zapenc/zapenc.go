@@ -52,6 +52,7 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 
 	zap "github.com/zap-proto/go"
@@ -593,7 +594,10 @@ func readField(o zap.Object, f field, target reflect.Value) error {
 	case kFloat64:
 		target.SetFloat(o.Float64(f.offset))
 	case kText:
-		target.SetString(o.Text(f.offset))
+		// zap reads text zero-copy, over the frame that arrived, and the caller's
+		// transport reuses that frame once the call returns. The decoded value
+		// outlives the call, so it is copied here, as the generated codecs copy.
+		target.SetString(strings.Clone(o.Text(f.offset)))
 	case kBytes:
 		if b := o.Bytes(f.offset); len(b) > 0 {
 			target.SetBytes(append([]byte(nil), b...))
