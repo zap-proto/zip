@@ -653,7 +653,11 @@ type trace struct {
 // request is the one that has to begin it.
 func traceOf(c *Ctx) trace {
 	t := trace{}
-	if id, parent, ok := parseTrace(c.fc.Get(HeaderTrace)); ok {
+	// CLONED, because the ids are slices of it and it is a view over the header
+	// buffer: the Set below rewrites that buffer in place, which would turn the
+	// parent into this hop's own span, and the connection's next request rewrites
+	// it again before the span ships.
+	if id, parent, ok := parseTrace(strings.Clone(c.fc.Get(HeaderTrace))); ok {
 		t.trace, t.parent = id, parent
 	} else {
 		t.trace = mint(16)

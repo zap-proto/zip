@@ -54,3 +54,20 @@ func TestTraceparentHook(t *testing.T) {
 		t.Fatalf("hook answer: sent %q, want %q over the request's", overridden, own)
 	}
 }
+
+// The span a hop ships names its caller as parent and its own id as itself, even
+// after the hop has rewritten the header the caller's ids were read from, and
+// after the connection's next request has overwritten it.
+func TestTraceOfKeepsTheCallersIDs(t *testing.T) {
+	const (
+		caller = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parent = "00f067aa0ba902b7"
+	)
+	c := New(Config{AppName: "front", DisableStartupMessage: true}).TestCtx("GET", "/ask")
+	c.fc.Request().Header.Set(HeaderTrace, "00-"+caller+"-"+parent+"-01")
+	tr := traceOf(c)
+	c.fc.Request().Header.Set(HeaderTrace, "00-ffffffffffffffffffffffffffffffff-ffffffffffffffff-01")
+	if tr.trace != caller || tr.parent != parent || tr.span == parent {
+		t.Fatalf("trace = %+v, want trace %s parent %s and a span of its own", tr, caller, parent)
+	}
+}
