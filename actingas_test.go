@@ -2,6 +2,7 @@ package zip
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -96,5 +97,61 @@ func TestActingAs_DoesNotCarryTheOriginalProject(t *testing.T) {
 	acting, _ := ActingAs(ctx, "acme")
 	if got := CallerOf(acting).Project; got != "" {
 		t.Errorf("Project = %q; a project belongs to the org it was scoped to", got)
+	}
+}
+
+// The derived caller is what an outbound call carries, from a request-backed context
+// and from a stated one alike, and it is written whole: the target org, the actor,
+// the original principal and its claim, and never the original org's project.
+//
+// Mutation proof: drop the acting branch from forwardIdentity and the request row
+// forwards the request's own org and project with no X-Acted-By, and the stated row
+// forwards the original org.
+func TestActingAs_IsWhatAnOutboundCallCarries(t *testing.T) {
+	var got map[string]string
+	app := New(Config{AppName: "front", DisableStartupMessage: true})
+	app.Raw("GET", "/ask", func(c *Ctx) error {
+		ctx, err := ActingAs(c.Forward(), "globex")
+		if err != nil {
+			return err
+		}
+		got = forwarded(ctx)
+		return c.JSON(200, map[string]string{"ok": "1"})
+	})
+	req := httptest.NewRequest("GET", "/ask", nil)
+	for k, v := range map[string]string{
+		HeaderOrg: "platform", HeaderProject: "p-platform", HeaderUser: "u-admin",
+		HeaderUserName: "ada", HeaderUserOwner: "admin", HeaderUserAdmin: "true",
+		HeaderAccount: "person:admin/ada", HeaderRequestID: "req-9",
+	} {
+		req.Header.Set(k, v)
+	}
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	want := map[string]string{
+		HeaderOrg: "globex", HeaderActedBy: "u-admin", HeaderUser: "u-admin",
+		HeaderUserName: "ada", HeaderUserOwner: "admin", HeaderUserAdmin: "true",
+		HeaderAccount: "person:admin/ada", HeaderRequestID: "req-9",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("a request-backed ActingAs forwarded %s = %q, want %q (%v)", k, got[k], v, got)
+		}
+	}
+	if v, ok := got[HeaderProject]; ok {
+		t.Errorf("a request-backed ActingAs forwarded the original org's project %q", v)
+	}
+
+	stated := WithCaller(context.Background(), Caller{User: "u-admin", Org: "platform"})
+	acting, err := ActingAs(stated, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := forwarded(acting); h[HeaderOrg] != "acme" || h[HeaderActedBy] != "u-admin" {
+		t.Errorf("a stated ActingAs forwarded org %q acted-by %q, want acme and u-admin", h[HeaderOrg], h[HeaderActedBy])
 	}
 }

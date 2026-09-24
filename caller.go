@@ -180,26 +180,39 @@ func (c *Ctx) Forward() context.Context { return callerContext(c.fc) }
 // forwardIdentity copies the caller's identity onto an outbound request. A ctx
 // with no request behind it (a background job, a test) forwards nothing, which
 // is the honest answer — an unattributed call should look unattributed rather
-// than borrow the identity of whatever ran last.
-// borrow the identity of whatever ran last. A background caller that
+// than borrow the identity of whatever ran last. A background caller that
 // legitimately acts FOR someone says so with [WithCaller], and an inbound
 // request always wins over what it said.
+//
+// A caller derived with [ActingAs] wins over both, exactly as it does in
+// [CallerOf]: the next hop receives the org being acted for, the actor under
+// [HeaderActedBy], and no project, so the callee reads the same caller this
+// process reads. It is written whole from the derived caller rather than merged
+// onto the request's headers, so no field of the original request rides beside it.
 func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
-	if rc := requestOf(ctx); rc != nil {
+	rc := requestOf(ctx)
+	// Trace context travels too, and it is listed apart from the identity headers
+	// because it is not a claim about anyone. Identity is the gateway's assertion,
+	// forwarded because a callee has to know who it is acting for; [HeaderTrace] is
+	// this hop's position in a trace, forwarded so the next hop can say it came from
+	// here. Folding it into the identity list would make "what may a caller assert
+	// about itself" a question with two different answers.
+	if rc != nil {
+		if v := rc.Request.Header.Peek(HeaderTrace); len(v) > 0 {
+			req.Header.SetBytesV(HeaderTrace, v)
+		}
+	}
+	if acting, ok := ctx.Value(actingKey{}).(Caller); ok {
+		for h, v := range acting.headers() {
+			req.Header.Set(h, v)
+		}
+		return
+	}
+	if rc != nil {
 		for _, h := range identityHeaders {
 			if v := rc.Request.Header.Peek(h); len(v) > 0 {
 				req.Header.SetBytesV(h, v)
 			}
-		}
-		// Trace context travels too, and it is listed apart from the identity
-		// headers because it is not a claim about anyone. Identity is the
-		// gateway's assertion, forwarded because a callee has to know who it is
-		// acting for; [HeaderTrace] is this hop's position in a trace, forwarded
-		// so the next hop can say it came from here. Folding it into the identity
-		// list would make "what may a caller assert about itself" a question with
-		// two different answers.
-		if v := rc.Request.Header.Peek(HeaderTrace); len(v) > 0 {
-			req.Header.SetBytesV(HeaderTrace, v)
 		}
 		return
 	}
