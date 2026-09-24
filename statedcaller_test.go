@@ -24,6 +24,7 @@ type whoOut struct {
 	Owner    string `json:"owner"`
 	Admin    bool   `json:"admin"`
 	OrgAdmin bool   `json:"orgAdmin"`
+	Account  string `json:"account"`
 }
 
 func whoApp(t *testing.T) *zip.App {
@@ -34,6 +35,7 @@ func whoApp(t *testing.T) *zip.App {
 		return &whoOut{
 			Org: c.Org, Project: c.Project, User: c.User, Name: c.Name,
 			Email: c.Email, Owner: c.Owner, Admin: c.Admin, OrgAdmin: c.OrgAdmin,
+			Account: c.Account,
 		}, nil
 	}, zip.WithOperationID("who_ask"))
 	return app
@@ -60,6 +62,7 @@ func TestStatedCallerCrossesWhole(t *testing.T) {
 	want := zip.Caller{
 		Org: "acme", Project: "proj-1", User: "u-7", Name: "ada",
 		Email: "ada@acme.test", Owner: "acme", Admin: true, OrgAdmin: true,
+		Account: "person:acme/ada",
 	}
 	ctx := zip.WithCaller(context.Background(), want)
 	got, err := zip.Call[whoIn, whoOut](ctx, conn, "who_ask", &whoIn{})
@@ -68,7 +71,7 @@ func TestStatedCallerCrossesWhole(t *testing.T) {
 	}
 	if got.Org != want.Org || got.Project != want.Project || got.User != want.User ||
 		got.Name != want.Name || got.Email != want.Email || got.Owner != want.Owner ||
-		!got.Admin || !got.OrgAdmin {
+		got.Account != want.Account || !got.Admin || !got.OrgAdmin {
 		t.Fatalf("identity did not cross whole:\n got %+v\nwant %+v", got, want)
 	}
 }
@@ -131,6 +134,7 @@ func TestForwardedIdentityCrossesWhole(t *testing.T) {
 		zip.HeaderUser: "u-7", zip.HeaderUserName: "ada",
 		zip.HeaderUserEmail: "ada@acme.test", zip.HeaderUserOwner: "acme",
 		zip.HeaderUserAdmin: "true", zip.HeaderUserOrgAdmin: "true",
+		zip.HeaderAccount: "person:acme/ada",
 	} {
 		req.Header.Set(h, v)
 	}
@@ -149,6 +153,7 @@ func TestForwardedIdentityCrossesWhole(t *testing.T) {
 	want := whoOut{
 		Org: "acme", Project: "proj-1", User: "u-7", Name: "ada",
 		Email: "ada@acme.test", Owner: "acme", Admin: true, OrgAdmin: true,
+		Account: "person:acme/ada",
 	}
 	if got != want {
 		t.Fatalf("forwarded identity lost fields:\n got %+v\nwant %+v", got, want)
@@ -165,7 +170,7 @@ func TestUnstatedCallerStaysAnonymous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	if got.Org != "" || got.User != "" || got.Owner != "" || got.Admin || got.OrgAdmin {
+	if got.Org != "" || got.User != "" || got.Owner != "" || got.Account != "" || got.Admin || got.OrgAdmin {
 		t.Fatalf("an unattributed call carried an identity: %+v", got)
 	}
 }

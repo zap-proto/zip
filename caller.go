@@ -33,13 +33,13 @@ import (
 //
 // The set is what a gateway can assert and a callee can act on, which is more
 // than a subject: WHOSE tenant (org, project), WHICH person (id, name, email),
-// and the two admin scopes — which are distinct authorities and must never
-// collapse into one another. Owner names the org a principal belongs to, and a
-// deployment that reserves one org for platform operators reads platform sudo
-// off THAT and never off IsOrgAdmin, which says only "administers their own
-// org". A plane that forwarded one and dropped the other would let a callee
-// read "holds an org" as "administers it", or worse, as "administers the
-// fleet".
+// WHICH account pays (the billing-account claim), and the two admin scopes —
+// which are distinct authorities and must never collapse into one another.
+// Owner names the org a principal belongs to, and a deployment that reserves one
+// org for platform operators reads platform sudo off THAT and never off
+// IsOrgAdmin, which says only "administers their own org". A plane that
+// forwarded one and dropped the other would let a callee read "holds an org" as
+// "administers it", or worse, as "administers the fleet".
 const (
 	HeaderOrg       = "X-Org-Id"
 	HeaderProject   = "X-Project-Id"
@@ -54,6 +54,11 @@ const (
 	HeaderUserAdmin    = "X-User-IsAdmin"
 	HeaderUserOrgAdmin = "X-User-IsOrgAdmin"
 	HeaderRequestID    = "X-Request-Id"
+	// HeaderAccount carries the principal's signed billing-account claim: the
+	// account inside its org that a charge is billed to. zip carries it as the
+	// gateway minted it and never interprets it; a callee resolving who pays reads
+	// it through [Caller.Account].
+	HeaderAccount = "X-Billing-Account-Id"
 )
 
 // identityHeaders is the set Call forwards — the caller's identity and the
@@ -73,6 +78,10 @@ var identityHeaders = [...]string{
 	HeaderUser, HeaderUserName, HeaderUserEmail, HeaderUserOwner,
 	HeaderUserAdmin, HeaderUserOrgAdmin,
 	HeaderRequestID,
+	// The billing account travels with the identity it belongs to. A callee that
+	// resolves the payer without it falls back to a rule that ignores the claim,
+	// and bills a different account than the same request resolves over REST.
+	HeaderAccount,
 	// The impersonation travels WITH the identity it re-points, or the next hop
 	// sees a clean call from the target org and the audit trail ends at this
 	// process. That is precisely the failure this exists to close.
@@ -312,6 +321,13 @@ type Caller struct {
 	// that omits it records the wrong actor.
 	ActedBy string
 
+	// Account is the principal's signed billing-account claim, as the gateway
+	// minted it: which account inside its org pays. Empty when the credential
+	// carried no claim. A callee accepts it only where it names an account in the
+	// ledger being charged, because the claim belongs to the principal, not to
+	// whichever org the call acts for.
+	Account string
+
 	// IP is where this call came FROM, and it is the one field here that is not
 	// a header the caller stated about itself — it is what the connection says.
 	//
@@ -346,6 +362,7 @@ func (c Caller) headers() map[string]string {
 		HeaderUserOwner: c.Owner,
 		HeaderRequestID: c.RequestID,
 		HeaderActedBy:   c.ActedBy,
+		HeaderAccount:   c.Account,
 	} {
 		if v != "" {
 			h[k] = v
@@ -401,6 +418,7 @@ func CallerOf(ctx context.Context) Caller {
 		OrgAdmin:  string(h.Peek(HeaderUserOrgAdmin)) == "true",
 		RequestID: string(h.Peek(HeaderRequestID)),
 		ActedBy:   string(h.Peek(HeaderActedBy)),
+		Account:   string(h.Peek(HeaderAccount)),
 		IP:        callerIP(ctx),
 	}
 }
