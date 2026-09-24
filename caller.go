@@ -202,6 +202,11 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 			req.Header.SetBytesV(HeaderTrace, v)
 		}
 	}
+	if Traceparent != nil {
+		if v := Traceparent(ctx); v != "" {
+			req.Header.Set(HeaderTrace, v)
+		}
+	}
 	if acting, ok := ctx.Value(actingKey{}).(Caller); ok {
 		for h, v := range acting.headers() {
 			req.Header.Set(h, v)

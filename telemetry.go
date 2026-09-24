@@ -63,6 +63,17 @@ import (
 // that is.
 const HeaderTrace = "traceparent"
 
+// Traceparent, when set, answers the trace position a call made with ctx
+// continues, as a W3C traceparent value, or "" for none.
+//
+// A host that keeps spans in a tracer of its own has positions zip never sees: a
+// span opened inside a handler, or work that outlives the request it began in and
+// carries no request at all. Without this an outbound call names the inbound
+// request as its parent, or nothing, and the callee's spans land beside the span
+// that caused them instead of under it. A non-empty answer wins over the
+// request's own header. Set it once, before the first call.
+var Traceparent func(ctx context.Context) string
+
 // traceVersion is the only trace-context version this parses. The spec says a
 // receiver must accept future versions by reading the fields it knows, but a
 // version it does not know may reorder them — so an unknown version is treated
