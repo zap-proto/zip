@@ -219,6 +219,19 @@ func TestStripSelf(t *testing.T) {
 			"Removes one of your org's load balancers.\n"},
 		{"D1DatabaseList lists the databases on the account.\n", "list",
 			"Lists the databases on the account.\n"},
+		// The name in another case: an unexported handler documented with its
+		// exported spelling. "List" is one hump, so only the name can speak for it.
+		{"List returns the caller org's live bot runs.\n", "list",
+			"Returns the caller org's live bot runs.\n"},
+		{"Stop terminates one of the caller org's own bot runs.\n", "stop",
+			"Terminates one of the caller org's own bot runs.\n"},
+		{"KVNamespaceList lists the Workers KV namespaces.\n", "kvNamespaceList",
+			"Lists the Workers KV namespaces.\n"},
+		// ... and it keeps the verb guard: the name as the SUBJECT stays.
+		{"Health is a pure liveness probe.\n", "health", "Health is a pure liveness probe.\n"},
+		// A one-hump word that is NOT the handler's name is prose, not a symbol.
+		{"List every agent in your org.\n", "agents", "List every agent in your org.\n"},
+		{"Get returns one key.\n", "put", "Get returns one key.\n"},
 		// An inline handler names no function; only the shape can speak for it.
 		{"ListAgents returns every agent in your org.\n", "", "Returns every agent in your org.\n"},
 

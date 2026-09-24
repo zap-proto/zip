@@ -830,6 +830,16 @@ func (e *extractor) commentAbove(pos token.Pos) string {
 // MCP tool and a CLI help line opening with a Go symbol the reader cannot see,
 // cannot call, and already has in operationId.
 //
+// The name in another CASE is the same evidence. An unexported handler documented
+// the way its exported spelling would be — `list` carrying "List returns the
+// caller org's live bot runs", `stop` carrying "Stop terminates one run" — names
+// itself as exactly as "list returns" would; Go's convention asks for the
+// identifier and the author capitalised it because it opens a sentence. Measured
+// across one fleet, 136 lifted comments open this way, and a one-hump word is the
+// one shape the rule below cannot read as a symbol ("List" is also a verb). It
+// takes the same verb guard as the shape rule, so "Health is a liveness probe"
+// keeps its subject.
+//
 // So failing an exact match, Go's own SENTENCE SHAPE is the evidence: a strict
 // CamelCase word followed by a lowercase verb, which is the form the convention
 // itself prescribes. Both halves are deliberately narrow, because a wrong strip
@@ -849,7 +859,7 @@ func stripSelf(text, name string) string {
 		return recapitalize(rest, text)
 	}
 	word, rest, spaced := strings.Cut(text, " ")
-	if !spaced || !camelCase(word) {
+	if !spaced || !(camelCase(word) || name != "" && strings.EqualFold(word, name)) {
 		return text
 	}
 	verb, _, _ := strings.Cut(rest, " ")
