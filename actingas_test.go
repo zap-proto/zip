@@ -155,3 +155,22 @@ func TestActingAs_IsWhatAnOutboundCallCarries(t *testing.T) {
 		t.Errorf("a stated ActingAs forwarded org %q acted-by %q, want acme and u-admin", h[HeaderOrg], h[HeaderActedBy])
 	}
 }
+
+// Administering one's own org is not administering the org acted for, so the derived
+// caller does not carry OrgAdmin there, on the context or on the next hop.
+func TestActingAs_DoesNotCarryOrgAdminToTheTarget(t *testing.T) {
+	ctx := WithCaller(context.Background(), Caller{User: "u", Org: "acme", Owner: "acme", OrgAdmin: true})
+	acting, err := ActingAs(ctx, "globex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if CallerOf(acting).OrgAdmin {
+		t.Error("an org admin of acme reads as an org admin of globex")
+	}
+	if h := forwarded(acting); h[HeaderUserOrgAdmin] != "" {
+		t.Errorf("the next hop receives %s = %q for globex", HeaderUserOrgAdmin, h[HeaderUserOrgAdmin])
+	}
+	if !CallerOf(ctx).OrgAdmin {
+		t.Error("ActingAs changed the caller it derived from")
+	}
+}

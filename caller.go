@@ -294,6 +294,10 @@ func ActingAs(ctx context.Context, org string) (context.Context, error) {
 	acting := base
 	acting.Org = org
 	acting.Project = "" // a project is scoped to the original org, never to the target
+	// Administering one's own org says nothing about the org acted for, so the derived
+	// caller does not carry it there. Platform authority (Owner, Admin) is the
+	// principal's own and stays.
+	acting.OrgAdmin = false
 	if base.ActedBy != "" {
 		// Already an impersonation: the ORIGINAL actor stays the actor, so a
 		// chain of hops cannot quietly reassign who is responsible.
