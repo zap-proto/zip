@@ -1017,6 +1017,12 @@ func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fiel
 		if d := fields[typeName(t)+"."+name]; d != "" {
 			fs["description"] = d
 		}
+		// A string can say what kind of string it is. `format:"password"` marks a
+		// secret value: a generated client reads it without echo and never takes
+		// it as a command-line flag, where it would land in argv and history.
+		if tf := f.Tag.Get("format"); tf != "" && fs["type"] == "string" {
+			fs["format"] = tf
+		}
 		props[name] = fs
 		if tag := f.Tag.Get("validate"); strings.Contains(tag, "required") {
 			required = append(required, name)
