@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -685,5 +687,42 @@ func TestUnload_LazyStaysDown(t *testing.T) {
 	}
 	if app.Plugins()[0].Disabled {
 		t.Fatal("still marked disabled after a successful Reload")
+	}
+}
+
+// TestStart_TogetherAllRun starts many plugins at once, as a host does when it
+// brings its pinned set up together. Each start copies its binary before it
+// execs it, and a child forked meanwhile by another start inherits that write
+// handle until it execs in turn; an exec of a file someone holds open for writing
+// fails with "text file busy". Every start must succeed.
+func TestStart_TogetherAllRun(t *testing.T) {
+	bin := buildPlugin(t, "v1")
+	const n = 16
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	defer func() { _ = app.Shutdown() }()
+	dir := sockDir(t)
+	for i := range n {
+		name := "p" + strconv.Itoa(i)
+		app.Use(must(zip.Load(zip.Plugin{Name: name, Bin: bin, Dir: dir, Lazy: true}, "/v1/"+name)))
+	}
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = app.Start("p" + strconv.Itoa(i))
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("p%d did not start: %v", i, err)
+		}
+	}
+	for _, s := range app.Plugins() {
+		if !s.Running {
+			t.Errorf("%s is not running: %s", s.Name, s.Error)
+		}
 	}
 }

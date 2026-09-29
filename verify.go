@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // A plugin host is the one place a service becomes an arbitrary-code-execution
@@ -94,12 +95,21 @@ func openVerified(src, priv, name, want string) (*binary, error) {
 }
 
 // stage copies src to dst, which lives in a directory only the host can write.
+//
+// The write handle is open under syscall.ForkLock. A child forked by another
+// goroutine holds a copy of every descriptor this process has open until it
+// execs, O_CLOEXEC or not, and Linux refuses to exec a file anyone holds open for
+// writing. So two plugins starting at once could each fail the other's exec with
+// "text file busy". Holding the read side of ForkLock keeps any fork out while
+// the copy is written; the exec that follows runs with no writer left.
 func stage(src, dst, name string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
 	if err != nil {
 		return fmt.Errorf("plugin %s: stage binary: %w", name, err)
