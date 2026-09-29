@@ -63,7 +63,9 @@ func (c *Ctx) UserEmail() string { return c.fc.Get(HeaderUserEmail) }
 // cross-tenant surfaces on this and never on IsOrgAdmin.
 func (c *Ctx) UserOwner() string { return c.fc.Get(HeaderUserOwner) }
 
-// IsAdmin returns the X-User-IsAdmin gateway claim as a bool.
+// IsAdmin returns the X-User-IsAdmin gateway claim: platform authority. The
+// gateway mints it only for a person whose own org (UserOwner) is the one a
+// deployment reserves for its operators, never for a membership of that org.
 func (c *Ctx) IsAdmin() bool { return c.fc.Get(HeaderUserAdmin) == "true" }
 
 // IsOrgAdmin returns the X-User-IsOrgAdmin gateway claim: this principal

@@ -321,8 +321,9 @@ func ActingAs(ctx context.Context, org string) (context.Context, error) {
 // permitted.
 // The two admin fields are separate authorities and reading one for the other
 // is a privilege escalation: OrgAdmin says a person administers THEIR OWN org,
-// Owner says which org that is. A deployment that reserves one org for platform
-// operators gates its cross-tenant surfaces on Owner alone.
+// Owner says which org that is. Admin is platform authority, which the gateway
+// mints only for a person whose Owner is the org a deployment reserves for its
+// operators, never for a membership of it.
 type Caller struct {
 	Org       string
 	Project   string
