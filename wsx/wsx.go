@@ -67,6 +67,15 @@ func Upgrade(fn Handler, opts ...Config) zip.Handler {
 	// of a server that tries to upgrade every request it receives.
 	return zip.Terminal("wsx.Upgrade", func(c *zip.Ctx) error {
 		rc := c.Fiber().RequestCtx()
+		// A plain request to a WebSocket address is the client's mistake — a
+		// crawler, a health probe, a browser tab opened on the URL. Answered 426
+		// (RFC 9110 §15.5.22) with the protocol to switch to, as a client error,
+		// rather than handed to the upgrader, whose handshake error is reported
+		// as a server fault.
+		if !websocket.FastHTTPIsWebSocketUpgrade(rc) {
+			c.SetHeader("Upgrade", "websocket")
+			return zip.Errorf(fasthttp.StatusUpgradeRequired, "this address speaks WebSocket: connect with an Upgrade: websocket request")
+		}
 		return up.Upgrade(rc, func(ws *Conn) {
 			_ = fn(ws)
 		})
