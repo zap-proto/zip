@@ -702,8 +702,9 @@ func start(spec Plugin) (*instance, error) {
 	// untagged line in a merged stream is worse than useless: you can see that
 	// something is wrong and not which plugin is wrong. Tagging is the whole
 	// difference between one log stream and N attributable ones.
-	cmd.Stdout = &tagWriter{w: os.Stdout, tag: []byte("[" + spec.Name + "] ")}
-	cmd.Stderr = &tagWriter{w: os.Stderr, tag: []byte("[" + spec.Name + "] ")}
+	stdout := &tagWriter{w: os.Stdout, tag: []byte("[" + spec.Name + "] ")}
+	stderr := &tagWriter{w: os.Stderr, tag: []byte("[" + spec.Name + "] ")}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	tieToHost(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(dir)
@@ -715,6 +716,10 @@ func start(spec Plugin) (*instance, error) {
 	in := &instance{cmd: cmd, dir: dir, sock: sock, started: time.Now(), done: make(chan struct{})}
 	go func() {
 		in.exitErr = cmd.Wait()
+		// Wait returns once the child's output is copied, so what is left is a
+		// last line that never got its newline.
+		_ = stdout.Flush()
+		_ = stderr.Flush()
 		close(in.done)
 	}()
 
@@ -855,36 +860,73 @@ func waitListening(sock string, limit time.Duration, done <-chan struct{}, in *i
 // several plugins produces one stream that is still attributable. It splits on
 // newlines rather than on Write calls, because a child may emit a line across
 // several writes or several lines in one.
+//
+// A line reaches w whole: its tag and its bytes in one Write, under a lock every
+// child's writer shares. Every child writes to the same host stream, so a tag and
+// a line written separately — each under only its own child's lock — let another
+// child's line land between them: that line carried the wrong plugin's tag, and
+// the line after it carried none.
 type tagWriter struct {
-	w       io.Writer
-	tag     []byte
-	mu      sync.Mutex
-	midline bool // a previous Write ended without a newline
+	w   io.Writer
+	tag []byte
+	mu  sync.Mutex
+	buf []byte // the tagged line being assembled, until its newline arrives
 }
+
+// lineMu serializes whole lines from every child onto the host's output.
+var lineMu sync.Mutex
+
+// maxPartial bounds a line held while it waits for its newline. Past it the line
+// goes out as it stands, ended, and the rest follows tagged as a line of its own.
+const maxPartial = 64 << 10
 
 func (t *tagWriter) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := len(p)
 	for len(p) > 0 {
-		if !t.midline {
-			if _, err := t.w.Write(t.tag); err != nil {
-				return 0, err
-			}
-			t.midline = true
+		if len(t.buf) == 0 {
+			t.buf = append(t.buf, t.tag...)
 		}
 		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
-			_, err := t.w.Write(p)
-			return n, err
+			t.buf = append(t.buf, p...)
+			if len(t.buf) >= maxPartial {
+				t.buf = append(t.buf, '\n')
+				if err := t.emit(); err != nil {
+					return 0, err
+				}
+			}
+			return n, nil
 		}
-		if _, err := t.w.Write(p[:i+1]); err != nil {
+		t.buf = append(t.buf, p[:i+1]...)
+		p = p[i+1:]
+		if err := t.emit(); err != nil {
 			return 0, err
 		}
-		t.midline = false
-		p = p[i+1:]
 	}
 	return n, nil
+}
+
+// Flush ends and writes a line still waiting for its newline. The host calls it
+// once the child has exited, so a last line written without one is kept.
+func (t *tagWriter) Flush() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.buf) == 0 {
+		return nil
+	}
+	t.buf = append(t.buf, '\n')
+	return t.emit()
+}
+
+// emit writes the assembled line and empties the buffer. Held by t.mu.
+func (t *tagWriter) emit() error {
+	lineMu.Lock()
+	_, err := t.w.Write(t.buf)
+	lineMu.Unlock()
+	t.buf = t.buf[:0]
+	return err
 }
 
 // supervise watches one instance and brings the plugin back if it dies on its
