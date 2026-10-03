@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/valyala/fasthttp"
 )
 
 // TestDetachOutlivesTheRequest pins that a detached context answers with the
@@ -40,7 +42,7 @@ func TestDetachOutlivesTheRequest(t *testing.T) {
 	defer mu.Unlock()
 	for i, org := range []string{"acme", "globex", "initech"} {
 		ctx := det[i]
-		if requestOf(ctx) != nil {
+		if behind, _ := request(ctx, func(*fasthttp.RequestCtx) {}); behind {
 			t.Fatalf("%s: a detached context still reaches its request", org)
 		}
 		if err := ctx.Err(); err != nil {
@@ -48,6 +50,51 @@ func TestDetachOutlivesTheRequest(t *testing.T) {
 		}
 		if c := CallerOf(ctx); c.Org != org || c.User != "u-"+org {
 			t.Fatalf("%s: detached caller is %+v", org, c)
+		}
+	}
+}
+
+// TestAContextKeptPastItsRequestReachesNoOne pins the backstop under Detach: a
+// handler's own context, kept after its request ended, answers with no caller
+// and as no local call — never with the caller of the request the RequestCtx
+// serves next.
+func TestAContextKeptPastItsRequestReachesNoOne(t *testing.T) {
+	app := New(Config{AppName: "svc", DisableStartupMessage: true})
+	type none struct{}
+	var (
+		mu   sync.Mutex
+		kept []context.Context
+	)
+	app.Get("/v1/keep", func(ctx context.Context, _ *none) (*none, error) {
+		mu.Lock()
+		kept = append(kept, ctx)
+		mu.Unlock()
+		return &none{}, nil
+	}, WithOperationID("keep"))
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, org := range []string{"acme", "globex"} {
+		req := httptest.NewRequest("GET", "/v1/keep", nil)
+		req.Header.Set(HeaderOrg, org)
+		req.Header.Set(HeaderUser, "u-"+org)
+		resp, err := app.Fiber().Test(req)
+		if err != nil {
+			t.Fatalf("%s: %v", org, err)
+		}
+		_ = resp.Body.Close()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, ctx := range kept {
+		if c := CallerOf(ctx); c != (Caller{}) {
+			t.Fatalf("request %d: a context kept past its request answers as %+v", i, c)
+		}
+		if Local(ctx) {
+			t.Fatalf("request %d: a context kept past its request reads as a local call", i)
+		}
+		if PeerOf(ctx) != nil || Header(ctx, HeaderOrg) != "" {
+			t.Fatalf("request %d: a context kept past its request still reads the request", i)
 		}
 	}
 }

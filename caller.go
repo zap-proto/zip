@@ -5,6 +5,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
@@ -100,36 +101,68 @@ type callerKey struct{}
 // receive, so the two callers of an op — the REST route and the op-call plane —
 // both hand the handler a context that can answer who is calling.
 //
-// The returned context is valid for the life of the request only: both
-// transports reuse the underlying RequestCtx for the next request on the same
-// connection.
+// Both transports reuse the underlying RequestCtx for the next request: fasthttp
+// pools it, and the ZAP server keeps one per connection. So the request is held
+// through an [inflight] the request itself owns, which the server closes when it
+// resets the request for the next one. A context kept past its request then
+// reaches no request at all, and answers as a call whose request has ended,
+// instead of reading whichever request the RequestCtx is serving now.
 func callerContext(fc fiber.Ctx) context.Context {
 	rc := fc.RequestCtx()
 	if rc == nil {
 		return fc.Context()
 	}
-	// ONE value carrying both facts, because this is the only place that holds
-	// the fiber Ctx and therefore the only place that can resolve the caller's
-	// IP under the app's trust configuration. Two WithValue calls would double
-	// the per-request cost of a path whose allocation count is measured.
-	return context.WithValue(fc.Context(), callerKey{}, &inflight{rc: rc, ip: fc.IP()})
+	in, _ := rc.UserValue(inflightKey{}).(*inflight)
+	if in == nil {
+		// ONE value carrying both facts, because this is the only place that holds
+		// the fiber Ctx and therefore the only place that can resolve the caller's
+		// IP under the app's trust configuration.
+		in = &inflight{rc: rc, ip: strings.Clone(fc.IP())}
+		rc.SetUserValue(inflightKey{}, in)
+	}
+	return context.WithValue(fc.Context(), callerKey{}, in)
 }
 
 // inflight is what a handler's context carries about the call in progress: the
 // request itself, and the caller's IP as fiber resolved it — which honours a
 // proxy header only where the app trusts one. See [Caller.IP].
+//
+// It lives in the request's user values, so the server Closes it when it resets
+// the request (fasthttp closes every io.Closer there, before the headers are
+// reset). rc is read and cleared under mu, so no reader is inside the headers
+// when the server reuses them.
 type inflight struct {
-	rc *fasthttp.RequestCtx
+	mu sync.Mutex
+	rc *fasthttp.RequestCtx // nil once the request has ended
 	ip string
 }
 
-// requestOf recovers the in-flight request from a handler's context.
-func requestOf(ctx context.Context) *fasthttp.RequestCtx {
+// inflightKey is the request user value holding its inflight.
+type inflightKey struct{}
+
+// Close ends the context's reach into the request. The server calls it.
+func (in *inflight) Close() error {
+	in.mu.Lock()
+	in.rc = nil
+	in.mu.Unlock()
+	return nil
+}
+
+// request runs fn on the request behind ctx, holding it so the server cannot
+// reset it underneath. behind reports whether a request was ever behind ctx;
+// ended, whether that request is over, in which case fn does not run.
+func request(ctx context.Context, fn func(rc *fasthttp.RequestCtx)) (behind, ended bool) {
 	in, _ := ctx.Value(callerKey{}).(*inflight)
 	if in == nil {
-		return nil
+		return false, false
 	}
-	return in.rc
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.rc == nil {
+		return true, true
+	}
+	fn(in.rc)
+	return true, false
 }
 
 // Header reads one header of the request behind a handler's context, and "" when
@@ -160,11 +193,13 @@ func Header(ctx context.Context, name string) string {
 // a frame: the door no longer needs to hold an HTTP request to say what it knows
 // about headers, it needs only to say honestly that it knows nothing.
 func headerOf(ctx context.Context) func(string) string {
-	rc := requestOf(ctx)
-	if rc == nil {
+	if behind, _ := request(ctx, func(*fasthttp.RequestCtx) {}); !behind {
 		return nil
 	}
-	return func(k string) string { return string(rc.Request.Header.Peek(k)) }
+	return func(k string) (v string) {
+		request(ctx, func(rc *fasthttp.RequestCtx) { v = string(rc.Request.Header.Peek(k)) })
+		return v
+	}
 }
 
 // Forward returns a context that carries this request's identity onward, so a
@@ -191,17 +226,30 @@ func (c *Ctx) Forward() context.Context { return callerContext(c.fc) }
 // process reads. It is written whole from the derived caller rather than merged
 // onto the request's headers, so no field of the original request rides beside it.
 func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
-	rc := requestOf(ctx)
+	// The request's headers are copied while it is held. A request that has ended
+	// forwards no identity at all: it is not this call's to state, and stating
+	// nothing is what an unattributed call should look like.
+	var trace []byte
+	var ids [][2][]byte
+	behind, ended := request(ctx, func(rc *fasthttp.RequestCtx) {
+		if v := rc.Request.Header.Peek(HeaderTrace); len(v) > 0 {
+			trace = append([]byte(nil), v...)
+		}
+		for _, h := range identityHeaders {
+			if v := rc.Request.Header.Peek(h); len(v) > 0 {
+				ids = append(ids, [2][]byte{[]byte(h), append([]byte(nil), v...)})
+			}
+		}
+	})
+	live := behind && !ended
 	// Trace context travels too, and it is listed apart from the identity headers
 	// because it is not a claim about anyone. Identity is the gateway's assertion,
 	// forwarded because a callee has to know who it is acting for; [HeaderTrace] is
 	// this hop's position in a trace, forwarded so the next hop can say it came from
 	// here. Folding it into the identity list would make "what may a caller assert
 	// about itself" a question with two different answers.
-	if rc != nil {
-		if v := rc.Request.Header.Peek(HeaderTrace); len(v) > 0 {
-			req.Header.SetBytesV(HeaderTrace, v)
-		}
+	if len(trace) > 0 {
+		req.Header.SetBytesV(HeaderTrace, trace)
 	}
 	if Traceparent != nil {
 		if v := Traceparent(ctx); v != "" {
@@ -214,12 +262,13 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 		}
 		return
 	}
-	if rc != nil {
-		for _, h := range identityHeaders {
-			if v := rc.Request.Header.Peek(h); len(v) > 0 {
-				req.Header.SetBytesV(h, v)
-			}
+	if live {
+		for _, kv := range ids {
+			req.Header.SetBytesKV(kv[0], kv[1])
 		}
+		return
+	}
+	if behind {
 		return
 	}
 	stated, ok := ctx.Value(statedKey{}).(Caller)
@@ -452,26 +501,34 @@ func CallerOf(ctx context.Context) Caller {
 	if acting, ok := ctx.Value(actingKey{}).(Caller); ok {
 		return acting
 	}
-	rc := requestOf(ctx)
-	if rc == nil {
+	// A request that has ended has no caller to give: the RequestCtx is serving
+	// someone else by now, and borrowing that identity is the one wrong answer.
+	var c Caller
+	behind, ended := request(ctx, func(rc *fasthttp.RequestCtx) {
+		h := &rc.Request.Header
+		c = Caller{
+			Org:       string(h.Peek(HeaderOrg)),
+			Project:   string(h.Peek(HeaderProject)),
+			User:      string(h.Peek(HeaderUser)),
+			Name:      string(h.Peek(HeaderUserName)),
+			Email:     string(h.Peek(HeaderUserEmail)),
+			Owner:     string(h.Peek(HeaderUserOwner)),
+			Admin:     string(h.Peek(HeaderUserAdmin)) == "true",
+			OrgAdmin:  string(h.Peek(HeaderUserOrgAdmin)) == "true",
+			RequestID: string(h.Peek(HeaderRequestID)),
+			ActedBy:   string(h.Peek(HeaderActedBy)),
+			Account:   string(h.Peek(HeaderAccount)),
+		}
+	})
+	switch {
+	case !behind:
 		stated, _ := ctx.Value(statedKey{}).(Caller)
 		return stated
+	case ended:
+		return Caller{}
 	}
-	h := &rc.Request.Header
-	return Caller{
-		Org:       string(h.Peek(HeaderOrg)),
-		Project:   string(h.Peek(HeaderProject)),
-		User:      string(h.Peek(HeaderUser)),
-		Name:      string(h.Peek(HeaderUserName)),
-		Email:     string(h.Peek(HeaderUserEmail)),
-		Owner:     string(h.Peek(HeaderUserOwner)),
-		Admin:     string(h.Peek(HeaderUserAdmin)) == "true",
-		OrgAdmin:  string(h.Peek(HeaderUserOrgAdmin)) == "true",
-		RequestID: string(h.Peek(HeaderRequestID)),
-		ActedBy:   string(h.Peek(HeaderActedBy)),
-		Account:   string(h.Peek(HeaderAccount)),
-		IP:        callerIP(ctx),
-	}
+	c.IP = callerIP(ctx)
+	return c
 }
 
 // callerIP is what the connection said, resolved once at the seam. Empty when
@@ -505,7 +562,10 @@ func (p *Peer) String() string {
 // Local reports a call with no transport behind it: this process asking
 // itself, through [Here]. A server that scopes by the peer's credential asks
 // this first — there is no peer to read, and there is no one to refuse.
-func Local(ctx context.Context) bool { return requestOf(ctx) == nil }
+func Local(ctx context.Context) bool {
+	behind, _ := request(ctx, func(*fasthttp.RequestCtx) {})
+	return !behind
+}
 
 // PeerOf returns the credential of the process that made this call, or nil
 // when there is nothing to attest — the request arrived over tcp, or the host
@@ -517,12 +577,9 @@ func Local(ctx context.Context) bool { return requestOf(ctx) == nil }
 //	if p := zip.PeerOf(ctx); p == nil || p.UID != wantUID {
 //	    return nil, zip.ErrForbidden("not a fleet peer")
 //	}
-func PeerOf(ctx context.Context) *Peer {
-	rc := requestOf(ctx)
-	if rc == nil {
-		return nil
-	}
-	return peerOf(rc.Conn())
+func PeerOf(ctx context.Context) (p *Peer) {
+	request(ctx, func(rc *fasthttp.RequestCtx) { p = peerOf(rc.Conn()) })
+	return p
 }
 
 // Peer returns the credential of the process that made this request, or nil.
