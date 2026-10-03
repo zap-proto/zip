@@ -284,17 +284,20 @@ func (a *App) pinned() fasthttp.RequestHandler {
 // a codegen step, a test or a doc generator that looks at a program must not
 // freeze it and turn the next legitimate Use into a panic about a generation
 // nobody asked for.
-func (a *App) liveOrBuild() *generation {
+//
+// The error is the draft's, returned with it under the same lock. A live
+// generation has none: installing it is what proved the program composes.
+func (a *App) liveOrBuild() (*generation, error) {
 	if g := a.live.Load(); g != nil {
-		return g
+		return g, nil
 	}
 	a.buildMu.Lock()
 	defer a.buildMu.Unlock()
 	if g := a.live.Load(); g != nil {
-		return g
+		return g, nil
 	}
 	if a.draft != nil && a.draftAt == version.Load() {
-		return a.draft
+		return a.draft, a.draftErr
 	}
 	at := version.Load() // BEFORE the build: an append during it must invalidate
 	g, err := a.build()
@@ -307,5 +310,5 @@ func (a *App) liveOrBuild() *generation {
 	// API document for a broken build. Accessors still answer (they cannot
 	// return an error), but anything that PUBLISHES asks first: see project().
 	a.draft, a.draftAt, a.draftErr = g, at, err
-	return g
+	return g, err
 }

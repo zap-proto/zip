@@ -60,10 +60,13 @@ func computeHosts(root *App, occ []occurrence) []*App {
 // program that does not compose. A sentinel would lose here precisely because a
 // sentinel is something a caller can ignore, and a caller ignoring it is the
 // failure this exists to stop.
+//
+// The error comes back from liveOrBuild rather than being read off the App: the
+// draft is written under buildMu, so a read outside it races a concurrent build.
 func (a *App) mustBuild() *generation {
-	g := a.liveOrBuild()
-	if a.draftErr != nil && a.live.Load() == nil {
-		panic("zip: this program does not compose, so it has no projection:\n\t" + a.draftErr.Error())
+	g, err := a.liveOrBuild()
+	if err != nil {
+		panic("zip: this program does not compose, so it has no projection:\n\t" + err.Error())
 	}
 	return g
 }

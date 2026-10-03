@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
@@ -259,6 +260,33 @@ type actingKey struct{}
 // it trustworthy (see [Peer]), and never as far as a gateway's assertion.
 func WithCaller(ctx context.Context, c Caller) context.Context {
 	return context.WithValue(ctx, statedKey{}, c)
+}
+
+// Detach returns a context for work that outlives the request behind ctx.
+//
+//	go react(zip.Detach(ctx), ev)
+//
+// The server recycles a request once its handler returns, so a goroutine still
+// holding the handler's context reads whatever request the server put there next
+// — its headers, and so its caller. Detach reads the caller while the request is
+// still this one, states it on a context that no longer reaches the request, and
+// drops the request's cancellation. A context with no request behind it keeps the
+// caller it already stated.
+//
+// It launders nothing: the caller is the one this context already answered with,
+// and a stated caller is read only where no request is behind the context.
+func Detach(ctx context.Context) context.Context {
+	who := CallerOf(ctx)
+	who = Caller{
+		Org: strings.Clone(who.Org), Project: strings.Clone(who.Project),
+		User: strings.Clone(who.User), Name: strings.Clone(who.Name),
+		Email: strings.Clone(who.Email), Owner: strings.Clone(who.Owner),
+		Admin: who.Admin, OrgAdmin: who.OrgAdmin,
+		RequestID: strings.Clone(who.RequestID), ActedBy: strings.Clone(who.ActedBy),
+		Account: strings.Clone(who.Account), IP: strings.Clone(who.IP),
+	}
+	ctx = context.WithValue(context.WithoutCancel(ctx), callerKey{}, (*inflight)(nil))
+	return WithCaller(ctx, who)
 }
 
 // ActingAs derives a caller acting on ANOTHER org's behalf, and is the one way
