@@ -144,3 +144,63 @@ func TestAdaptNetHTTP_PanicClosesTheStream(t *testing.T) {
 		t.Fatal("reader stranded after the handler panicked")
 	}
 }
+
+// AN UPGRADE REACHES THE CONNECTION. A net/http WebSocket server takes the
+// socket with http.Hijacker and writes the 101 itself; without Hijack on the
+// writer coder/websocket answers 501 to every upgrade, which is how the talk
+// socket behind api.hanzo.ai refused every browser that reached it.
+func TestAdaptNetHTTP_AnUpgradeTakesTheConnection(t *testing.T) {
+	base := streamApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ticket") != "ok" {
+			http.Error(w, "a valid ticket is required", http.StatusUnauthorized)
+			return
+		}
+		conn, brw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n")
+		_ = brw.Flush()
+		line, _ := brw.ReadString('\n')
+		_, _ = brw.WriteString("echo " + line)
+		_ = brw.Flush()
+	})
+	addr := strings.TrimPrefix(base, "http://")
+
+	dial := func(ticket string) (net.Conn, *bufio.Reader) {
+		t.Helper()
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		fmt.Fprintf(conn, "GET /legacy/socket?ticket=%s HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n", ticket)
+		return conn, bufio.NewReader(conn)
+	}
+
+	conn, rd := dial("ok")
+	status, _ := rd.ReadString('\n')
+	if !strings.HasPrefix(status, "HTTP/1.1 101") {
+		t.Fatalf("upgrade answered %q, want 101 from the handler", status)
+	}
+	for line, _ := rd.ReadString('\n'); line != "\r\n" && line != ""; line, _ = rd.ReadString('\n') {
+	}
+	fmt.Fprint(conn, "ping\n")
+	if got, _ := rd.ReadString('\n'); got != "echo ping\n" {
+		t.Fatalf("the upgraded connection answered %q, want %q", got, "echo ping\n")
+	}
+
+	// A handler that declines the upgrade answers an ordinary reply.
+	_, rd = dial("no")
+	status, _ = rd.ReadString('\n')
+	if !strings.HasPrefix(status, "HTTP/1.1 401") {
+		t.Fatalf("a refused upgrade answered %q, want 401", status)
+	}
+	rest, _ := io.ReadAll(rd)
+	if !strings.Contains(string(rest), "a valid ticket is required") {
+		t.Fatalf("the refusal lost its body: %q", rest)
+	}
+}

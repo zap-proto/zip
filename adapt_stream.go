@@ -1,7 +1,12 @@
 package zip
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -98,6 +103,16 @@ func adaptStreaming(h http.Handler) func(*Ctx) error {
 		// matches on URL.Path, which is why a mux in front of it looks fine.
 		req.RequestURI = string(c.fc.Request().Header.RequestURI())
 
+		// AN UPGRADE IS ANSWERED ON THE CONNECTION ITSELF. A net/http WebSocket
+		// server (coder/websocket, gorilla) takes the socket with http.Hijacker and
+		// writes the 101 itself; a writer without Hijack makes it answer 501 to
+		// every upgrade. So the handler runs inside fasthttp's hijack, against the
+		// raw connection, after this returns.
+		if upgrading(c.fc.Request()) {
+			serveUpgrade(c, h, req)
+			return nil
+		}
+
 		pr, pw := io.Pipe()
 		w := &streamWriter{hdr: make(http.Header), status: http.StatusOK, pw: pw, ready: make(chan struct{})}
 
@@ -135,4 +150,76 @@ func adaptStreaming(h http.Handler) func(*Ctx) error {
 		resp.SetBodyStream(pr, size)
 		return nil
 	}
+}
+
+// serveUpgrade runs h on the hijacked connection. The request no longer has the
+// fasthttp context to carry — the handler must not hold ctx members past the
+// hijack — so it carries one of its own, cancelled when the handler returns.
+func serveUpgrade(c *Ctx, h http.Handler, req *http.Request) {
+	ctx, cancel := context.WithCancel(context.Background())
+	req = req.WithContext(ctx)
+	rc := c.fc.RequestCtx()
+	rc.HijackSetNoResponse(true)
+	rc.Hijack(func(conn net.Conn) {
+		defer cancel()
+		w := &upgradeWriter{
+			conn: conn,
+			brw:  bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
+			hdr:  make(http.Header),
+		}
+		h.ServeHTTP(w, req)
+		if !w.taken {
+			w.answer()
+		}
+	})
+}
+
+// upgradeWriter is the ResponseWriter of an upgrade request. A handler that
+// takes the connection (Hijack) speaks the new protocol on it; one that declines
+// — an unauthorized socket is refused before it opens — has its status, headers
+// and body written as an ordinary HTTP/1.1 reply, and the connection closes.
+type upgradeWriter struct {
+	conn   net.Conn
+	brw    *bufio.ReadWriter
+	hdr    http.Header
+	status int
+	body   bytes.Buffer
+	taken  bool
+}
+
+func (w *upgradeWriter) Header() http.Header { return w.hdr }
+
+func (w *upgradeWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+}
+
+func (w *upgradeWriter) Write(b []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	return w.body.Write(b)
+}
+
+// Flush satisfies http.Flusher; nothing is sent until the handler returns or
+// takes the connection.
+func (w *upgradeWriter) Flush() {}
+
+// Hijack hands the handler the connection, and with it the whole reply.
+func (w *upgradeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.taken {
+		return nil, nil, http.ErrHijacked
+	}
+	w.taken = true
+	return w.conn, w.brw, nil
+}
+
+func (w *upgradeWriter) answer() {
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w.brw, "HTTP/1.1 %d %s\r\n", w.status, http.StatusText(w.status))
+	w.hdr.Set("Content-Length", strconv.Itoa(w.body.Len()))
+	w.hdr.Set("Connection", "close")
+	_ = w.hdr.Write(w.brw)
+	_, _ = w.brw.WriteString("\r\n")
+	_, _ = w.brw.Write(w.body.Bytes())
+	_ = w.brw.Flush()
 }
