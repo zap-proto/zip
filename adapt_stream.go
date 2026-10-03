@@ -168,7 +168,7 @@ func serveUpgrade(c *Ctx, h http.Handler, req *http.Request) {
 			hdr:  make(http.Header),
 		}
 		h.ServeHTTP(w, req)
-		if !w.taken {
+		if !w.taken && !w.switched {
 			w.answer()
 		}
 	})
@@ -179,17 +179,30 @@ func serveUpgrade(c *Ctx, h http.Handler, req *http.Request) {
 // — an unauthorized socket is refused before it opens — has its status, headers
 // and body written as an ordinary HTTP/1.1 reply, and the connection closes.
 type upgradeWriter struct {
-	conn   net.Conn
-	brw    *bufio.ReadWriter
-	hdr    http.Header
-	status int
-	body   bytes.Buffer
-	taken  bool
+	conn     net.Conn
+	brw      *bufio.ReadWriter
+	hdr      http.Header
+	status   int
+	body     bytes.Buffer
+	taken    bool
+	switched bool // a 101 went out: the reply is the handler's from here
 }
 
 func (w *upgradeWriter) Header() http.Header { return w.hdr }
 
+// WriteHeader records a final status and SENDS an informational one, as net/http
+// does: coder/websocket writes its 101 with WriteHeader and only then hijacks, so
+// a 101 that waited for the handler to return would never reach the client and
+// the handshake would hang with the socket open.
 func (w *upgradeWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 && !w.taken {
+		fmt.Fprintf(w.brw, "HTTP/1.1 %d %s\r\n", code, http.StatusText(code))
+		_ = w.hdr.Write(w.brw)
+		_, _ = w.brw.WriteString("\r\n")
+		_ = w.brw.Flush()
+		w.switched = w.switched || code == http.StatusSwitchingProtocols
+		return
+	}
 	if w.status == 0 {
 		w.status = code
 	}

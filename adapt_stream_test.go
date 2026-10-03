@@ -204,3 +204,47 @@ func TestAdaptNetHTTP_AnUpgradeTakesTheConnection(t *testing.T) {
 		t.Fatalf("the refusal lost its body: %q", rest)
 	}
 }
+
+// THE 101 GOES OUT WHEN IT IS WRITTEN. coder/websocket sets its headers, calls
+// WriteHeader(101) and only then hijacks, relying on net/http to have sent an
+// informational status at once. Held until the handler returned, the client never
+// saw the switch and the handshake hung — the talk socket's second failure.
+func TestAdaptNetHTTP_ASwitchWrittenBeforeTheHijackIsSent(t *testing.T) {
+	base := streamApp(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Upgrade", "echo")
+		w.Header().Set("Connection", "Upgrade")
+		w.WriteHeader(http.StatusSwitchingProtocols)
+		conn, brw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		line, _ := brw.ReadString('\n')
+		_, _ = brw.WriteString("echo " + line)
+		_ = brw.Flush()
+	})
+	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprint(conn, "GET /legacy/socket HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+	rd := bufio.NewReader(conn)
+	status, err := rd.ReadString('\n')
+	if err != nil || !strings.HasPrefix(status, "HTTP/1.1 101") {
+		t.Fatalf("the switch answered %q (%v), want a 101 before any frame", status, err)
+	}
+	head := map[string]bool{}
+	for line, _ := rd.ReadString('\n'); line != "\r\n" && line != ""; line, _ = rd.ReadString('\n') {
+		head[strings.ToLower(strings.TrimSpace(line))] = true
+	}
+	if !head["upgrade: echo"] {
+		t.Fatalf("the 101 lost the handler's headers: %v", head)
+	}
+	fmt.Fprint(conn, "ping\n")
+	if got, _ := rd.ReadString('\n'); got != "echo ping\n" {
+		t.Fatalf("after the switch the connection answered %q", got)
+	}
+}
