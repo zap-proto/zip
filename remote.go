@@ -104,7 +104,7 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 	r := newApp(cfg)
 
 	proxy := func(c *Ctx) error {
-		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, hostport, "", "mount "+prefix)
+		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, hostport, "", "mount "+prefix, hold{})
 	}
 	if len(d.Routes) == 0 {
 		// Nothing declared: the prefix and everything under it, which is what a

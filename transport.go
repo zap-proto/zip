@@ -343,7 +343,7 @@ func (a *App) mount(prefix, addr string) error {
 	}
 	client := t.Dial(hostport)
 	a.logger.Info("zip mounting", "prefix", prefix, "transport", scheme, "addr", hostport)
-	a.mountVia(prefix, func() (Client, string) { return client, hostport })
+	a.mountVia(prefix, func() (Client, string, hold) { return client, hostport, hold{} })
 	return nil
 }
 
@@ -356,13 +356,16 @@ func (a *App) mount(prefix, addr string) error {
 // Registering the route is a separate concern from CLAIMING the prefix (see
 // [App.claim]): a reload re-resolves the target without re-registering, and an
 // ownership assertion happens once, at the door the composition came in.
-func (a *App) mountVia(prefix string, to func() (Client, string)) {
+//
+// The target comes back HELD: the instance behind it counts the request until it
+// is over, which is what keeps eviction off a process mid-answer.
+func (a *App) mountVia(prefix string, to func() (Client, string, hold)) {
 	h := func(c *Ctx) error {
-		client, host := to()
+		client, host, held := to()
 		if upgrading(c.fc.Request()) {
-			return relay(c.fc.RequestCtx(), host, "mount "+prefix)
+			return relay(c.fc.RequestCtx(), host, "mount "+prefix, held)
 		}
-		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix)
+		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix, held)
 	}
 	prefix = strings.TrimSuffix(normPath(prefix), "/")
 	site := here(1)
@@ -388,8 +391,13 @@ func (a *App) mountVia(prefix string, to func() (Client, string)) {
 //
 // what names the caller in the error, because "no instance running" is worth
 // nothing without knowing what did not run.
-func forward(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, client Client, host, path, what string) error {
+//
+// h is released when the reply is over: here for a whole reply, when its body is
+// closed for a streamed one. A zero hold — a remote, which no host may stop —
+// takes the direct path.
+func forward(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, client Client, host, path, what string, h hold) error {
 	if client == nil {
+		h.release()
 		return Errorf(503, "%s: no instance running", what)
 	}
 	// The caller's Host survives the hop. A client dials its own address and never
@@ -403,11 +411,64 @@ func forward(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response
 	if path != "" {
 		req.URI().SetPath(path)
 	}
-	if err := do(ctx, client, req, resp); err != nil {
-		// The upstream, not this hop, is what failed.
+	if h.in == nil {
+		if err := do(ctx, client, req, resp); err != nil {
+			// The upstream, not this hop, is what failed.
+			return Errorf(502, "%s: %v", what, err)
+		}
+		return nil
+	}
+	return forwardHeld(ctx, req, resp, client, what, h)
+}
+
+// forwardHeld is forward for a reply whose instance is held. The reply is read
+// into a response of its own, because a streamed body outlives this call and
+// fasthttp offers no way to take a stream back out of a response without closing
+// it: the hold has to ride the body, so the body has to be wrapped before it is
+// handed over.
+func forwardHeld(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, client Client, what string, h hold) error {
+	got := fasthttp.AcquireResponse()
+	if err := do(ctx, client, req, got); err != nil {
+		fasthttp.ReleaseResponse(got)
+		h.release()
 		return Errorf(502, "%s: %v", what, err)
 	}
+	if !got.IsBodyStream() {
+		got.CopyTo(resp)
+		fasthttp.ReleaseResponse(got)
+		h.release()
+		return nil
+	}
+	got.Header.CopyTo(&resp.Header)
+	resp.SkipBody = got.SkipBody
+	resp.SetBodyStream(&heldBody{got: got, h: h}, got.Header.ContentLength())
 	return nil
+}
+
+// heldBody is a streamed reply that keeps its instance busy until the reply is
+// read to its end or let go: a token stream is a request in flight for as long
+// as tokens arrive. The writer closes it once, from the goroutine that reads it.
+type heldBody struct {
+	got *fasthttp.Response
+	h   hold
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	if b.got == nil {
+		return 0, io.EOF
+	}
+	return b.got.BodyStream().Read(p)
+}
+
+func (b *heldBody) Close() error {
+	if b.got == nil {
+		return nil
+	}
+	err := b.got.CloseBodyStream()
+	fasthttp.ReleaseResponse(b.got)
+	b.got = nil
+	b.h.release()
+	return err
 }
 
 // upgradeWait bounds reaching a plugin for an upgrade. It is a dial on a socket
@@ -488,11 +549,22 @@ func upgrading(req *fasthttp.Request) bool {
 // than through the response object — fasthttp would frame a body onto a message
 // that has none. Bytes the plugin has already sent past the header are held in
 // the reader, so the copy starts there and not at the socket.
-func relay(rc *fasthttp.RequestCtx, addr, what string) error {
+//
+// h covers the whole exchange: a refused upgrade releases it on return, a
+// switched one when the tunnel closes, because a WebSocket session is a request
+// in flight for as long as it is open.
+func relay(rc *fasthttp.RequestCtx, addr, what string, h hold) error {
 	to := plain(addr)
 	if to == "" {
+		h.release()
 		return Errorf(502, "%s: no upgrade path over %s", what, NetworkOf(addr))
 	}
+	tunnel := false
+	defer func() {
+		if !tunnel {
+			h.release()
+		}
+	}()
 	up, err := net.DialTimeout(NetworkOf(to), to, upgradeWait)
 	if err != nil {
 		return Errorf(502, "%s: upgrade: %v", what, err)
@@ -525,7 +597,9 @@ func relay(rc *fasthttp.RequestCtx, addr, what string) error {
 
 	switched := head.Header()
 	rc.HijackSetNoResponse(true)
+	tunnel = true
 	rc.Hijack(func(down net.Conn) {
+		defer h.release()
 		defer func() { _ = up.Close() }()
 		defer func() { _ = down.Close() }()
 		if _, err := down.Write(switched); err != nil {

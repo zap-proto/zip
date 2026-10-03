@@ -107,6 +107,10 @@ type Config struct {
 	// so it is a ceiling rather than something a sweep restores a minute later,
 	// and again by [App.Evict] alongside each plugin's IdleAfter.
 	//
+	// A process serving a request is never the one stopped for room. When every
+	// candidate is busy, a starter waits for one to finish, for as long as its
+	// own [Plugin.Start] allows, and then answers 503 rather than kill a request.
+	//
 	// The host states it because the number is a fact about the host's memory: the
 	// processes are its own children in its own cgroup, and a library cannot know
 	// how much of it they may have.
@@ -307,6 +311,12 @@ type App struct {
 	// process is STARTED — a bound only a periodic sweep consults is a bound a
 	// burst outruns. See makeRoom.
 	warm int
+
+	// roomMu makes "is there room" and "take it" one step, and starting counts
+	// the processes that have taken room but are not running yet. Without both,
+	// two starters each read 34 of 35 and each start, and the ceiling is a race.
+	roomMu   sync.Mutex
+	starting int
 
 	// mcpList is the whole tools/list array, rendered by installMCP and re-rendered
 	// by any later load: own ops ++ every plugin catalogue, sorted by name. Serving

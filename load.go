@@ -283,6 +283,53 @@ type instance struct {
 	// first starve the others.
 	done    chan struct{}
 	exitErr error
+
+	// busy counts the requests this instance is serving: a reply until it is
+	// written, a streamed reply until its body is closed, an upgrade until its
+	// tunnel ends. Eviction never stops an instance whose count is above zero.
+	busy atomic.Int64
+	// closing is raised by evict BEFORE it reads busy, and a request raises busy
+	// BEFORE it reads closing. Whichever comes second sees the first, so a
+	// request is either refused by a closing instance or counted by evict.
+	closing atomic.Bool
+}
+
+// hold is one request's claim on the instance serving it. release ends the
+// claim and stamps the plugin's last use, so recency is when a request ENDED:
+// a request that ran for a minute is a minute more recent than its start. The
+// zero hold, for a mount with no instance behind it, releases nothing.
+type hold struct {
+	p  *plugin
+	in *instance
+}
+
+func (h hold) release() {
+	if h.in == nil {
+		return
+	}
+	if h.p.spec.IdleAfter > 0 {
+		h.p.lastUse.Store(time.Now().UnixNano())
+	}
+	h.in.busy.Add(-1)
+}
+
+// claim counts one request against in, or reports that in is closing.
+func (p *plugin) claim(in *instance) (hold, bool) {
+	in.busy.Add(1)
+	if in.closing.Load() {
+		in.busy.Add(-1)
+		return hold{}, false
+	}
+	return hold{p: p, in: in}, true
+}
+
+// startLimit is how long a start may wait for the child to listen, and how long
+// it may wait for room before that.
+func (p Plugin) startLimit() time.Duration {
+	if p.Start <= 0 {
+		return 10 * time.Second
+	}
+	return p.Start
 }
 
 // startError reports why the last start attempt failed, or "" when none has. It is
@@ -302,20 +349,20 @@ func (p *plugin) startError() string {
 	return ""
 }
 
-// target is the hot path: what the mounted route should talk to right now.
-// For a lazy plugin the first caller through here starts it; the atomic load
-// keeps the steady-state cost to one load once it is running.
-func (p *plugin) target() (Client, string) {
+// target is the hot path: what the mounted route should talk to right now, held
+// for the request — the caller releases the hold when the request is over. For a
+// lazy plugin the first caller through here starts it; once it is running the
+// cost is a load and two atomic adds.
+func (p *plugin) target() (Client, string, hold) {
 	if in := p.cur.Load(); in != nil {
-		// One store on the hot path, and only when idle eviction is armed:
-		// a plugin that can never be evicted has no reason to be timed.
-		if p.spec.IdleAfter > 0 {
-			p.lastUse.Store(time.Now().UnixNano())
+		if h, ok := p.claim(in); ok {
+			return in.client, in.sock, h
 		}
-		return in.client, in.sock
+		// Closing under us. startOnDemand waits on the lock evict holds, then
+		// finds it either kept or gone.
 	}
 	if p.app == nil || !p.spec.Lazy || p.disabled.Load() {
-		return nil, "" // eager and down, disabled, or unloaded — the route answers 503
+		return nil, "", hold{} // eager and down, disabled, or unloaded — the route answers 503
 	}
 	return p.startOnDemand()
 }
@@ -341,7 +388,9 @@ func (a *App) Start(name string) (string, error) {
 	if p == nil {
 		return "", fmt.Errorf("zip: Start: no plugin named %q", name)
 	}
-	if client, addr := p.target(); client != nil {
+	client, addr, h := p.target()
+	h.release() // a start is not a request; nothing is in flight
+	if client != nil {
 		return addr, nil
 	}
 	if p.disabled.Load() {
@@ -354,20 +403,28 @@ func (a *App) Start(name string) (string, error) {
 // so a burst of concurrent first requests produces ONE child rather than one
 // per request. A start failure is not cached: the next request tries again,
 // because the usual cause is a dependency that has not come up yet.
-func (p *plugin) startOnDemand() (Client, string) {
+func (p *plugin) startOnDemand() (Client, string, hold) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Under p.mu no evict is deciding — evict holds this lock from raising closing
+	// to the swap — so a current instance here is not closing and the claim holds.
 	if in := p.cur.Load(); in != nil {
-		return in.client, in.sock // won by another caller while we waited
+		h, _ := p.claim(in)
+		return in.client, in.sock, h // won by another caller while we waited
 	}
 	// Re-checked under the lock, where Unload set it, so a request racing an
 	// Unload cannot slip a child in behind it.
 	if p.closed || p.disabled.Load() {
-		return nil, ""
+		return nil, "", hold{}
 	}
 	// The ceiling is applied HERE, before another process exists, so warm bounds
 	// what this host holds rather than what a sweep restores a minute later.
-	p.host().makeRoom(p)
+	host := p.host()
+	if err := host.makeRoom(p); err != nil {
+		p.app.logger.Warn("zip lazy plugin found no room", "name", p.name, "err", err)
+		return nil, "", hold{}
+	}
+	defer host.started()
 
 	in, err := start(p.spec)
 	if err != nil {
@@ -376,8 +433,11 @@ func (p *plugin) startOnDemand() (Client, string) {
 		// later request too, so the reason has to outlive the log line.
 		msg := err.Error()
 		p.lastErr.Store(&msg)
-		return nil, ""
+		return nil, "", hold{}
 	}
+	// The caller's claim is counted before anyone can see the instance, so the
+	// first request on a fresh child is never the one an eviction lands on.
+	in.busy.Store(1)
 	// PUBLISHED BY COMPARE-AND-SWAP, because p.mu does not exclude the supervisor.
 	//
 	// A restart swaps its own instance in without taking this lock (supervise holds
@@ -398,15 +458,16 @@ func (p *plugin) startOnDemand() (Client, string) {
 	if !p.cur.CompareAndSwap(nil, in) {
 		stop(in, 0)
 		if cur := p.cur.Load(); cur != nil {
-			return cur.client, cur.sock
+			h, _ := p.claim(cur)
+			return cur.client, cur.sock, h
 		}
-		return nil, ""
+		return nil, "", hold{}
 	}
 	p.lastUse.Store(time.Now().UnixNano()) // or the next sweep evicts what just started
 	p.app.logger.Info("zip lazy plugin started on first request",
 		"name", p.name, "pid", in.cmd.Process.Pid, "addr", in.sock)
 	go p.app.supervise(p, in)
-	return in.client, in.sock
+	return in.client, in.sock, hold{p: p, in: in}
 }
 
 // When p.Addr is set the remote is proxied directly. Otherwise the binary is
@@ -723,7 +784,7 @@ func start(spec Plugin) (*instance, error) {
 		close(in.done)
 	}()
 
-	if err := waitListening(sock, spec.Start, in.done, in); err != nil {
+	if err := waitListening(sock, spec.startLimit(), in.done, in); err != nil {
 		stop(in, 0)
 		return nil, err
 	}
@@ -835,9 +896,6 @@ func stop(in *instance, grace time.Duration) {
 // deadline passes. Watching the child matters: a plugin that dies immediately
 // should say so, not time out.
 func waitListening(sock string, limit time.Duration, done <-chan struct{}, in *instance) error {
-	if limit <= 0 {
-		limit = 10 * time.Second
-	}
 	deadline := time.Now().Add(limit)
 	for {
 		if c, err := net.Dial("unix", sock); err == nil {

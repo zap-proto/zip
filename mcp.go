@@ -803,9 +803,10 @@ func (a *App) tools() []mcpTool {
 // spec: the model sees "this tool is not available right now" and can react,
 // where a 503 body is a failure it cannot interpret.
 func (a *App) relay(ctx context.Context, f *zapmcp.Frame, p *plugin) *zapmcp.Frame {
-	client, host := p.target()
+	client, host, h := p.target()
 	body, err := json.Marshal(f)
 	if err != nil {
+		h.release()
 		return a.answer(f, nil, err)
 	}
 	req := fasthttp.AcquireRequest()
@@ -817,7 +818,7 @@ func (a *App) relay(ctx context.Context, f *zapmcp.Frame, p *plugin) *zapmcp.Fra
 	req.Header.SetContentType(mimeJSON)
 	req.SetBody(body)
 	forwardIdentity(ctx, req)
-	if err := forward(ctx, req, resp, client, host, p.spec.mcpPath(), "mcp "+p.name); err != nil {
+	if err := forward(ctx, req, resp, client, host, p.spec.mcpPath(), "mcp "+p.name, h); err != nil {
 		return a.answer(f, nil, err)
 	}
 	var ans zapmcp.Frame

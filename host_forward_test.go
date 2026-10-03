@@ -52,7 +52,7 @@ func TestForwardKeepsTheCallersHost(t *testing.T) {
 	req.Header.SetHost("lux.id")
 	req.Header.SetRequestURI("/.well-known/openid-configuration")
 
-	if err := forward(context.Background(), req, resp, rec, "/var/run/iam.sock", "", "mount /v1/iam"); err != nil {
+	if err := forward(context.Background(), req, resp, rec, "/var/run/iam.sock", "", "mount /v1/iam", hold{}); err != nil {
 		t.Fatalf("forward: %v", err)
 	}
 	if rec.sawHost != "lux.id" {
@@ -71,7 +71,7 @@ func TestForwardFallsBackToTheDialAddress(t *testing.T) {
 
 	req.Header.SetRequestURI("/mcp")
 
-	if err := forward(context.Background(), req, resp, rec, "plugin.sock", "", "mcp iam"); err != nil {
+	if err := forward(context.Background(), req, resp, rec, "plugin.sock", "", "mcp iam", hold{}); err != nil {
 		t.Fatalf("forward: %v", err)
 	}
 	if rec.sawHost != "plugin.sock" {
@@ -89,7 +89,7 @@ func TestForwardStillRewritesThePath(t *testing.T) {
 	req.Header.SetHost("hanzo.ai")
 	req.Header.SetRequestURI("/v1/iam/mcp")
 
-	if err := forward(context.Background(), req, resp, rec, "iam.sock", "/mcp", "mcp iam"); err != nil {
+	if err := forward(context.Background(), req, resp, rec, "iam.sock", "/mcp", "mcp iam", hold{}); err != nil {
 		t.Fatalf("forward: %v", err)
 	}
 	if got := string(req.URI().Path()); got != "/mcp" {
@@ -105,7 +105,7 @@ func TestForwardWithNoClientIs503(t *testing.T) {
 	req, resp := fasthttp.AcquireRequest(), fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
-	err := forward(context.Background(), req, resp, nil, "iam.sock", "", "mount /v1/iam")
+	err := forward(context.Background(), req, resp, nil, "iam.sock", "", "mount /v1/iam", hold{})
 	if err == nil || !strings.Contains(err.Error(), "no instance running") {
 		t.Fatalf("err = %v, want a 503 naming the mount", err)
 	}

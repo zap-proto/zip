@@ -2,6 +2,7 @@ package zip
 
 import (
 	"cmp"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -91,39 +92,91 @@ func (p *plugin) host() *App {
 // door asks every subsystem at once: ~100 children started inside 90 seconds, the
 // pod stopped answering its own liveness probe, and the kubelet killed it — the
 // "ceiling" observed only in the logs of a container that was already gone.
-func (a *App) makeRoom(starter *plugin) {
+//
+// A BUSY PROCESS IS NEVER THE ONE STOPPED. Ranking by when a request started, and
+// not counting the ones in flight, stopped a subsystem two to eleven seconds into
+// a request it was still answering: the caller read "http: read response: EOF" as
+// a 502, and the host evicted 162 times in eight minutes, each stop the next
+// start's cold miss. Candidates are idle instances, coldest by when their last
+// request ended. When every candidate is busy the starter waits for one to finish,
+// as long as its own start may take, and then gives up with an error — the caller
+// answers 503 and nothing in flight is killed.
+//
+// On success the starter holds one unit of room until it calls started.
+func (a *App) makeRoom(starter *plugin) error {
+	if a.warm <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(starter.spec.startLimit())
+	for {
+		a.roomMu.Lock()
+		live, idle, busy := a.census(starter)
+		if live+a.starting < a.warm || idle == nil && busy == 0 {
+			// Under the ceiling, or over it on processes nothing may stop: a host
+			// is better over its budget than deprived of an identity or config
+			// service every other call goes through.
+			a.starting++
+			a.roomMu.Unlock()
+			return nil
+		}
+		if idle != nil {
+			seen := idle.lastUse.Load()
+			if idle.evict("room", time.Since(time.Unix(0, seen)), seen) {
+				a.starting++
+				a.roomMu.Unlock()
+				return nil
+			}
+		}
+		a.roomMu.Unlock()
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%d of %d processes running, %d busy and none idle", live, a.warm, busy)
+		}
+		time.Sleep(roomPoll)
+	}
+}
+
+// roomPoll is how often a starter waiting for room looks again. A request on the
+// process it is waiting for takes far longer than this to finish.
+const roomPoll = 10 * time.Millisecond
+
+// started returns the unit of room makeRoom handed out: the process is now
+// counted as running, or it failed to start and holds nothing.
+func (a *App) started() {
 	if a.warm <= 0 {
 		return
 	}
-	now := time.Now()
-	for {
-		var (
-			live      int
-			evictable []*plugin
-		)
-		for _, p := range a.pluginSet() {
-			if p.cur.Load() == nil {
-				continue
-			}
-			live++
-			if p != starter && p.spec.Lazy && p.spec.idleAfter() > 0 {
-				evictable = append(evictable, p)
-			}
+	a.roomMu.Lock()
+	a.starting--
+	a.roomMu.Unlock()
+}
+
+// census counts the running processes, and among the ones this host may stop
+// returns the coldest idle one and how many are busy. The starter is never a
+// candidate.
+func (a *App) census(starter *plugin) (live int, coldest *plugin, busy int) {
+	for _, p := range a.pluginSet() {
+		in := p.cur.Load()
+		if in == nil {
+			continue
 		}
-		// The starter is not running yet, so room for it means strictly under.
-		if live < a.warm || len(evictable) == 0 {
-			return
+		live++
+		if p == starter || !p.evictable() {
+			continue
 		}
-		slices.SortFunc(evictable, func(x, y *plugin) int {
-			return cmp.Compare(x.lastUse.Load(), y.lastUse.Load())
-		})
-		cold := evictable[0]
-		coldSeen := cold.lastUse.Load()
-		if !cold.evict("room", now.Sub(time.Unix(0, coldSeen)), coldSeen) {
-			return // already down; re-reading would spin
+		if in.busy.Load() > 0 {
+			busy++
+			continue
+		}
+		if coldest == nil || p.lastUse.Load() < coldest.lastUse.Load() {
+			coldest = p
 		}
 	}
+	return live, coldest, busy
 }
+
+// evictable is whether the ceiling and the age bound may stop p at all: only a
+// lazy plugin with an idle bound, because the next request has to bring it back.
+func (p *plugin) evictable() bool { return p.spec.Lazy && p.spec.idleAfter() > 0 }
 
 // pluginSet is every plugin this host and its composed hosts hold, read once
 // under each host's lock. Both passes need the same set and neither may hold a
@@ -169,20 +222,21 @@ func (a *App) evictOver(warm int, now time.Time) int {
 		evictable []*plugin
 	)
 	for _, p := range a.pluginSet() {
-		if p.cur.Load() == nil {
+		in := p.cur.Load()
+		if in == nil {
 			continue
 		}
 		live++
-		if p.spec.Lazy && p.spec.idleAfter() > 0 {
+		if p.evictable() && in.busy.Load() == 0 {
 			evictable = append(evictable, p)
 		}
 	}
 	if live <= warm {
 		return 0
 	}
-	// Ascending by last use, so the front of the slice is the coldest. A
-	// plugin's lastUse is stamped on every resolve, and only stamped for the
-	// ones collected above, so the ordering is total.
+	// Ascending by last use, so the front of the slice is the coldest. lastUse
+	// is stamped when a request ENDS, so a plugin that has been answering for a
+	// minute is not mistaken for one asked a minute ago and since forgotten.
 	slices.SortFunc(evictable, func(x, y *plugin) int {
 		return cmp.Compare(x.lastUse.Load(), y.lastUse.Load())
 	})
@@ -224,12 +278,17 @@ func (p *plugin) evictIfIdle(now time.Time) bool {
 // the one place a plugin is reclaimed, so the two policies above cannot come to
 // disagree about how a child is taken down; reason says which asked.
 func (p *plugin) evict(reason string, idle time.Duration, seen int64) bool {
-	p.mu.Lock()
+	// A plugin whose lock is held is mid-transition — starting, reloading,
+	// unloading — and is nobody's candidate. Waiting for it would hold the room
+	// lock across a child's whole start.
+	if !p.mu.TryLock() {
+		return false
+	}
 	if p.closed || p.disabled.Load() {
 		p.mu.Unlock()
 		return false
 	}
-	// THE CLOCK IS RE-READ UNDER THE LOCK, and this is the whole of the fix.
+	// THE CLOCK IS RE-READ UNDER THE LOCK.
 	//
 	// The caller decided to evict from a lastUse it read outside the lock. A
 	// request arriving in that window does not just get served by the instance
@@ -248,15 +307,30 @@ func (p *plugin) evict(reason string, idle time.Duration, seen int64) bool {
 		p.mu.Unlock()
 		return false
 	}
+	in := p.cur.Load()
+	if in == nil {
+		p.mu.Unlock()
+		return false // already down; nothing to stop
+	}
+	// NOTHING IN FLIGHT, decided against every request that will ever reach in.
+	// closing is raised before busy is read, and claim raises busy before it
+	// reads closing, so a request either sees closing and goes to the lock this
+	// holds, or is counted here and keeps the instance.
+	in.closing.Store(true)
+	if in.busy.Load() > 0 {
+		in.closing.Store(false)
+		p.mu.Unlock()
+		return false
+	}
 	// Swap to nil BEFORE the child dies so supervise()'s CAS fails and it does
 	// not treat this as a crash to recover from. Not disabled: the next request
 	// through target() is meant to bring it back.
-	in := p.cur.Swap(nil)
+	if !p.cur.CompareAndSwap(in, nil) {
+		p.mu.Unlock()
+		return false // it exited on its own; the supervisor has it
+	}
 	p.mu.Unlock()
 
-	if in == nil {
-		return false // already down; nothing to stop
-	}
 	p.evictions.Add(1)
 	if p.app != nil {
 		p.app.logger.Info("zip idle plugin evicted",

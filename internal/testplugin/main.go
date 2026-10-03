@@ -5,10 +5,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"log"
 	"os"
+	"time"
 
 	"github.com/zap-proto/zip"
 )
@@ -89,7 +91,27 @@ func main() {
 	// otherwise identical from the outside. A wildcard answers paths that do not
 	// exist, so there is no operation for it to be: an op is one named endpoint
 	// with one schema, and this is deliberately neither.
+	//
+	// ?sleep=<duration> answers after that long and ?drip=<duration> streams a
+	// line every 50ms for that long, then "done". They make a request that is
+	// still in flight when something else happens — what the eviction tests need,
+	// at any prefix the plugin is mounted under.
 	app.Raw(zip.MethodAll, "/*", func(c *zip.Ctx) error {
+		if d, err := time.ParseDuration(c.Query("drip")); err == nil {
+			return c.SendStreamWriter(func(w *bufio.Writer) {
+				for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+					_, _ = w.WriteString("tick\n")
+					if w.Flush() != nil {
+						return
+					}
+				}
+				_, _ = w.WriteString("done\n")
+				_ = w.Flush()
+			})
+		}
+		if d, err := time.ParseDuration(c.Query("sleep")); err == nil {
+			time.Sleep(d)
+		}
 		return c.JSON(200, map[string]string{"echo": c.Path(), "version": version})
 	})
 
