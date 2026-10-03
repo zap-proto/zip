@@ -248,3 +248,38 @@ func TestAdaptNetHTTP_ASwitchWrittenBeforeTheHijackIsSent(t *testing.T) {
 		t.Fatalf("after the switch the connection answered %q", got)
 	}
 }
+
+// A HEADER KEPT IS A HEADER KEPT. A handler stores the bearer one request
+// presented; the next request on the same connection presents another of the
+// same length. The stored one must still read as it was — it was handed a Go
+// string, and a string does not change under its holder.
+func TestAdaptNetHTTP_AKeptHeaderSurvivesTheNextRequest(t *testing.T) {
+	kept := make(chan [2]string, 2)
+	base := streamApp(t, func(w http.ResponseWriter, r *http.Request) {
+		kept <- [2]string{r.Header.Get("Authorization"), r.URL.Query().Get("ticket")}
+		_, _ = io.WriteString(w, "ok")
+	})
+	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	rd := bufio.NewReader(conn)
+	ask := func(bearer, ticket string) {
+		fmt.Fprintf(conn, "GET /legacy/session?ticket=%s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n\r\n", ticket, bearer)
+		resp, err := http.ReadResponse(rd, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+	ask("aaaaaaaaaaaaaaaa", "first-ticket")
+	first := <-kept
+	ask("bbbbbbbbbbbbbbbb", "other-ticket")
+	<-kept
+	if first[0] != "Bearer aaaaaaaaaaaaaaaa" || first[1] != "first-ticket" {
+		t.Fatalf("the first request's header and ticket now read %q and %q", first[0], first[1])
+	}
+}

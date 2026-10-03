@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/zap-proto/fiber/v3/middleware/adaptor"
@@ -103,12 +105,24 @@ func adaptStreaming(h http.Handler) func(*Ctx) error {
 		// matches on URL.Path, which is why a mux in front of it looks fine.
 		req.RequestURI = string(c.fc.Request().Header.RequestURI())
 
+		// THE REQUEST OWNS ITS STRINGS. ConvertRequest hands net/http views of
+		// fasthttp's pooled request buffer, and the next request on the connection
+		// writes over that buffer. A Go string is immutable, so a handler may keep
+		// one — a session desk holding the bearer a ticket was issued for — and
+		// then read someone else's bytes under it: the talk socket's chat call
+		// went out with a corrupted token on every other turn.
+		if err := own(req); err != nil {
+			return err
+		}
+
 		// AN UPGRADE IS ANSWERED ON THE CONNECTION ITSELF. A net/http WebSocket
 		// server (coder/websocket, gorilla) takes the socket with http.Hijacker and
 		// writes the 101 itself; a writer without Hijack makes it answer 501 to
 		// every upgrade. So the handler runs inside fasthttp's hijack, against the
 		// raw connection, after this returns.
 		if upgrading(c.fc.Request()) {
+			// The handler runs after this returns, when the buffer is the pool's.
+			req.Body = io.NopCloser(bytes.NewReader(bytes.Clone(c.fc.Request().Body())))
 			serveUpgrade(c, h, req)
 			return nil
 		}
@@ -150,6 +164,34 @@ func adaptStreaming(h http.Handler) func(*Ctx) error {
 		resp.SetBodyStream(pr, size)
 		return nil
 	}
+}
+
+// own copies every string the request carries out of fasthttp's buffer: method,
+// protocol, host, header names and values, and the URL, parsed again from the
+// target already copied into RequestURI. The body stays a view: net/http forbids
+// reading it after the handler returns, and the buffer lives until then.
+func own(req *http.Request) error {
+	req.Method = strings.Clone(req.Method)
+	req.Proto = strings.Clone(req.Proto)
+	req.Host = strings.Clone(req.Host)
+	header := make(http.Header, len(req.Header))
+	for k, vs := range req.Header {
+		kept := make([]string, len(vs))
+		for i, v := range vs {
+			kept[i] = strings.Clone(v)
+		}
+		header[strings.Clone(k)] = kept
+	}
+	req.Header = header
+	for i, v := range req.TransferEncoding {
+		req.TransferEncoding[i] = strings.Clone(v)
+	}
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil {
+		return err
+	}
+	req.URL = u
+	return nil
 }
 
 // serveUpgrade runs h on the hijacked connection. The request no longer has the
