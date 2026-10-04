@@ -670,7 +670,7 @@ func makeSocketDir(addr string) error {
 }
 
 // closeServers stops every running listener. Called from Shutdown.
-func (a *App) closeServers() {
+func (a *App) closeServers(ctx context.Context) {
 	a.srvMu.Lock()
 	servers := a.servers
 	unbind := a.unbind
@@ -683,9 +683,28 @@ func (a *App) closeServers() {
 	for _, u := range unbind {
 		u()
 	}
+	// Every listener stops accepting first; then the servers that hold
+	// connections open drain them together, bounded by ctx. A stream a client
+	// keeps reading would otherwise hold the shutdown for as long as it liked.
+	var drains []drainer
 	for _, s := range servers {
+		if d, ok := s.(drainer); ok {
+			drains = append(drains, d)
+			continue
+		}
 		_ = s.Close()
 	}
+	var wg sync.WaitGroup
+	for _, d := range drains {
+		wg.Go(func() { _ = d.ShutdownWithContext(ctx) })
+	}
+	wg.Wait()
+}
+
+// drainer is a server that stops accepting and then waits, bounded by ctx, for
+// the connections it holds to finish.
+type drainer interface {
+	ShutdownWithContext(ctx context.Context) error
 }
 
 // splitScheme splits "scheme://addr" into (scheme, addr); a bare address
@@ -725,6 +744,12 @@ func (h *httpServer) ListenAndServe() error {
 	return h.srv.ListenAndServe(h.addr)
 }
 func (h *httpServer) Close() error { return h.srv.Shutdown() }
+
+// ShutdownWithContext stops accepting and waits for open connections, until ctx
+// ends.
+func (h *httpServer) ShutdownWithContext(ctx context.Context) error {
+	return h.srv.ShutdownWithContext(ctx)
+}
 
 // zapServer adapts zap-proto/http.Server the same way, and for the same
 // reason the HTTP one exists: the mode a socket is bound with is the App's to

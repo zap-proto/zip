@@ -43,9 +43,11 @@ func (a *App) OnShutdown(fn func(context.Context) error) {
 // hookMu (snapshotting and clearing the hooks) and every later call returns
 // nil without repeating any step, so hooks run at most once.
 //
-// Sequence: (1) stop every transport accepting new connections; (2) drain
-// in-flight requests via fiber, bounded by ctx; (3) run teardown hooks LIFO,
-// passing ctx to each. All errors are joined and returned.
+// Sequence: (1) stop every transport accepting new connections, and wait for
+// the connections an HTTP transport holds, bounded by ctx; (2) drain in-flight
+// requests via fiber, bounded by ctx; (3) run teardown hooks LIFO, passing ctx
+// to each; (4) wait for every plugin child to exit. All errors are joined and
+// returned.
 func (a *App) shutdown(ctx context.Context) error {
 	a.hookMu.Lock()
 	if a.shuttingDown {
@@ -57,8 +59,9 @@ func (a *App) shutdown(ctx context.Context) error {
 	a.hooks = nil
 	a.hookMu.Unlock()
 
-	// 1. Stop accepting new connections on every transport listener.
-	a.closeServers()
+	// 1. Stop accepting new connections on every transport listener, and drain
+	//    the connections HTTP holds until ctx ends.
+	a.closeServers(ctx)
 	a.closeMCP()
 	// 2. Drain in-flight requests (graceful; bounded by ctx).
 	// A program that was never served has no router to drain.
