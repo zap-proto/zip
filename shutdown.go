@@ -68,10 +68,52 @@ func (a *App) shutdown(ctx context.Context) error {
 	}
 	// 3. Tear subsystems down in reverse mount order (LIFO). Run ALL hooks
 	//    even if some fail; aggregate every error.
+	nested := ctx.Value(nestedShutdown{}) != nil
+	hookCtx := context.WithValue(ctx, nestedShutdown{}, true)
 	for i := len(hooks) - 1; i >= 0; i-- {
-		if err := hooks[i](ctx); err != nil {
+		if err := hooks[i](hookCtx); err != nil {
 			errs = append(errs, err)
 		}
 	}
+	// 4. Wait for every plugin child to exit. The hooks only signalled them, so
+	//    they drain together and each is killed at its own grace; the host
+	//    returns once the last is gone, or when ctx ends. A composed app's
+	//    shutdown runs as its parent's hook and leaves the wait to the
+	//    outermost one, which walks the whole composition: waiting at each level
+	//    would drain the children one after another.
+	if !nested {
+		if g, err := a.liveOrBuild(); err == nil {
+			errs = append(errs, awaitChildren(ctx, g.hosts))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// nestedShutdown marks the context a parent hands its teardown hooks, so a
+// composed app's shutdown knows it is not the outermost.
+type nestedShutdown struct{}
+
+// awaitChildren blocks until no plugin in hosts has a process left to stop.
+func awaitChildren(ctx context.Context, hosts []*App) error {
+	var ps []*plugin
+	for _, h := range hosts {
+		h.plugMu.Lock()
+		for _, p := range h.plugins {
+			ps = append(ps, p)
+		}
+		h.plugMu.Unlock()
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, p := range ps {
+			p.stopping.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

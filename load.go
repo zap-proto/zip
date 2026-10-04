@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -69,8 +70,9 @@ import (
 //     Re-registering on reload would grow the route table without bound.
 //   - The new process must be listening before any request moves to it; the
 //     old one keeps serving until then, and a failed start changes nothing.
-//   - The old process is killed, reaped exactly once, its pooled connections
-//     closed, and its directory removed — so nothing survives the swap.
+//   - The old process is stopped (SIGTERM, then a kill once its grace is
+//     spent), reaped exactly once, its pooled connections closed, and its
+//     directory removed — so nothing survives the swap.
 
 // AddrEnv is the variable a host sets to tell a plugin where to listen. A
 // plugin reads it through [Addr].
@@ -126,6 +128,11 @@ type Plugin struct {
 	// Drain is how long a replaced process keeps serving after a Reload, so
 	// requests already in flight on it finish. Zero means 5s.
 	Drain time.Duration
+
+	// Grace is how long a stopped process has to exit on its own after SIGTERM
+	// before it is killed: the time it has to finish what it is serving, close
+	// and ship its stores, and hand back what it holds. Zero means 20s.
+	Grace time.Duration
 
 	// IdleAfter stops a LAZY plugin that has not served for this long, to be
 	// started again by the next request that needs it. Zero means never, which
@@ -283,6 +290,7 @@ type instance struct {
 	sock    string
 	client  Client
 	started time.Time
+	grace   time.Duration // Plugin.Grace, fixed when the process starts
 
 	// done is CLOSED when the child has exited, and exitErr holds why. A
 	// closed channel broadcasts: the supervisor, a drain, and Shutdown can all
@@ -337,6 +345,14 @@ func (p Plugin) startLimit() time.Duration {
 		return 10 * time.Second
 	}
 	return p.Start
+}
+
+// graceLimit is Grace with its default applied.
+func (p Plugin) graceLimit() time.Duration {
+	if p.Grace <= 0 {
+		return 20 * time.Second
+	}
+	return p.Grace
 }
 
 // startError reports why the last start attempt failed, or "" when none has. It is
@@ -605,16 +621,15 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		go a.supervise(p, in)
 	}
 
+	// The hook SIGNALS and returns; shutdown's last step waits for every
+	// child at once. Each child drains on its own clock, so N children take the
+	// longest grace rather than the sum of them, and the host still outlives
+	// every one.
 	a.OnShutdown(func(context.Context) error {
 		p.mu.Lock()
 		p.closed = true
 		p.mu.Unlock()
-		if cur := p.cur.Swap(nil); cur != nil {
-			stop(cur, 0)
-		}
-		// Wait out any instance a Reload or Unload is still draining, so no
-		// child survives this host.
-		p.stopping.Wait()
+		p.retire(p.cur.Swap(nil), 0)
 		return nil
 	})
 	return nil
@@ -784,7 +799,7 @@ func start(spec Plugin) (*instance, error) {
 
 	// Exactly one Wait for this process's lifetime; everyone else observes the
 	// close. Two Waits is an error, and a child nobody waits on is a zombie.
-	in := &instance{cmd: cmd, dir: dir, sock: sock, started: time.Now(), done: make(chan struct{})}
+	in := &instance{cmd: cmd, dir: dir, sock: sock, started: time.Now(), grace: spec.graceLimit(), done: make(chan struct{})}
 	go func() {
 		in.exitErr = cmd.Wait()
 		// Wait returns once the child's output is copied, so what is left is a
@@ -873,24 +888,20 @@ func fetch(spec Plugin) (string, error) {
 // Both built-in clients implement it; a custom one need not.
 type idleCloser interface{ CloseIdleConnections() }
 
-// stop releases everything an instance holds, after letting it serve for grace.
+// stop releases everything an instance holds, after letting it serve for drain.
 // Safe to call on a partially-started instance.
-func stop(in *instance, grace time.Duration) {
+func stop(in *instance, drain time.Duration) {
 	if in == nil {
 		return
 	}
-	if grace > 0 {
+	if drain > 0 {
 		select {
 		case <-in.done: // already gone; nothing to wait out
-		case <-time.After(grace):
+		case <-time.After(drain):
 		}
 	}
 	if in.cmd != nil && in.cmd.Process != nil {
-		_ = in.cmd.Process.Kill()
-		select {
-		case <-in.done:
-		case <-time.After(5 * time.Second):
-		}
+		terminate(in)
 	}
 	// Pooled connections to a dead socket are not reusable and would otherwise
 	// be held by the transport until GC.
@@ -899,6 +910,35 @@ func stop(in *instance, grace time.Duration) {
 	}
 	if in.dir != "" {
 		_ = os.RemoveAll(in.dir) // takes the binary and the socket with it
+	}
+}
+
+// terminate ends the process: SIGTERM, then up to its grace for it to exit,
+// then SIGKILL. A child that is asked runs its own shutdown — it drains, closes
+// its stores with a checkpoint and ships them — which a kill skips, leaving
+// hot -wal sidecars and unshipped writes behind. Where the platform has no
+// SIGTERM the signal fails and the kill is immediate, as before.
+func terminate(in *instance) {
+	select {
+	case <-in.done:
+		return
+	default:
+	}
+	grace := in.grace
+	if grace <= 0 {
+		grace = Plugin{}.graceLimit()
+	}
+	if in.cmd.Process.Signal(syscall.SIGTERM) == nil {
+		select {
+		case <-in.done:
+			return
+		case <-time.After(grace):
+		}
+	}
+	_ = in.cmd.Process.Kill()
+	select {
+	case <-in.done:
+	case <-time.After(5 * time.Second):
 	}
 }
 

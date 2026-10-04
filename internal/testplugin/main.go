@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/zap-proto/zip"
@@ -128,10 +130,34 @@ func main() {
 		return
 	}
 
+	// TESTPLUGIN_ON_TERM names a file the plugin writes when SIGTERM arrives,
+	// TESTPLUGIN_TERM_DELAY after it, then exits — standing in for the stores a
+	// real child closes and ships on the way out. TESTPLUGIN_TERM=ignore makes
+	// it ignore SIGTERM, so only a kill ends it.
+	switch {
+	case os.Getenv("TESTPLUGIN_TERM") == "ignore":
+		signal.Ignore(syscall.SIGTERM)
+	case os.Getenv("TESTPLUGIN_ON_TERM") != "":
+		go onTerm(os.Getenv("TESTPLUGIN_ON_TERM"))
+	}
+
 	// Addr is the whole plugin side of the contract: serve where the host said.
 	// Report rather than swallow: a fixture that discards this error exits
 	// silently and the host reports only "exited before listening".
 	if err := app.Listen(zip.Addr(":9999")); err != nil {
 		log.Fatalf("testplugin: %v", err)
 	}
+}
+
+// onTerm waits for SIGTERM, takes TESTPLUGIN_TERM_DELAY, writes path and exits.
+func onTerm(path string) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM)
+	<-sig
+	d, _ := time.ParseDuration(os.Getenv("TESTPLUGIN_TERM_DELAY"))
+	time.Sleep(d)
+	if err := os.WriteFile(path, []byte("drained"), 0o600); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
