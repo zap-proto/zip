@@ -574,6 +574,9 @@ func leInt(v uint64, n int) []byte {
 // ---- decode ---------------------------------------------------------------
 
 func readStruct(o zap.Object, lay *layout, rv reflect.Value) error {
+	if o.IsNull() {
+		return nil // nothing to read; every accessor would dereference a nil message
+	}
 	for _, f := range lay.fields {
 		fv := rv.Field(f.index)
 		if f.ptr {
@@ -600,7 +603,7 @@ func readPointer(o zap.Object, f field, fv reflect.Value) error {
 		if l.Len() == 0 {
 			return nil
 		}
-		if err := readElem(l, 0, f.slice, nv.Elem()); err != nil {
+		if err := readElem(l.BytesAt(0), f.slice, nv.Elem()); err != nil {
 			return err
 		}
 	case kStruct:
@@ -687,36 +690,50 @@ func fixedRefusal(t reflect.Type) error {
 		"declare the type's wire (MarshalZAP/UnmarshalZAP) and it crosses inline", t, t.Len())
 }
 
+// readList walks the list once. Element i by index re-walks the stream from its
+// start, so decoding a list that way is quadratic in its length — a 160KB body
+// was over a second of CPU. The slice grows from the elements that are actually
+// there rather than being allocated from the count the message claims.
 func readList(o zap.Object, f field, target reflect.Value) error {
 	l := o.List(f.offset)
-	n := l.Len()
-	if n == 0 {
+	if l.Len() == 0 {
 		return nil
 	}
-	out := reflect.MakeSlice(target.Type(), n, n)
-	for i := 0; i < n; i++ {
-		ev := out.Index(i)
+	out := reflect.MakeSlice(target.Type(), 0, 0)
+	var err error
+	l.EachBytes(func(_ int, raw []byte) bool {
+		ev := reflect.New(f.slice.typ)
+		if err = readElem(raw, f.slice, ev.Elem()); err != nil {
+			return false
+		}
 		if f.slice.ptr {
-			nv := reflect.New(f.slice.typ)
-			if err := readElem(l, i, f.slice, nv.Elem()); err != nil {
-				return err
-			}
-			ev.Set(nv)
-			continue
+			out = reflect.Append(out, ev)
+		} else {
+			out = reflect.Append(out, ev.Elem())
 		}
-		if err := readElem(l, i, f.slice, ev); err != nil {
-			return err
-		}
+		return true
+	})
+	if err != nil {
+		return err
 	}
 	target.Set(out)
 	return nil
 }
 
-func readElem(l zap.List, i int, se *sliceElem, target reflect.Value) error {
+// readElem decodes one element from its own bytes. A struct element is a
+// complete message; one that does not parse is an error, never a nil object read
+// as if it were one — a single malformed element used to take the process down.
+func readElem(raw []byte, se *sliceElem, target reflect.Value) error {
 	if se.kind == kStruct {
-		return readStruct(l.ObjectAt(i), se.elem, target)
+		if len(raw) == 0 {
+			return nil // an empty element is the zero value, as the generated codec reads it
+		}
+		msg, err := zap.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("zapenc: list element: %w", err)
+		}
+		return readStruct(msg.Root(), se.elem, target)
 	}
-	raw := l.BytesAt(i)
 	switch se.kind {
 	case kText:
 		target.SetString(string(raw))

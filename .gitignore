@@ -8,3 +8,4 @@ rust/examples/*/target/
 CLAUDE.md
 AGENTS.md
 GEMINI.md
+/testplugin

@@ -209,6 +209,13 @@ type plugin struct {
 	spec     Plugin
 
 	app *App // for logging and supervision when started on demand
+
+	// lazy, idle and start are spec.Lazy, spec.IdleAfter and spec.startLimit(),
+	// copied at Load because the request path reads them with no lock while
+	// Reload rewrites spec under p.mu. Reload replaces the source, never these.
+	lazy  bool
+	idle  time.Duration
+	start time.Duration
 	// owner is the ROOT app of the composition this plugin ended up in, stamped
 	// when a generation is built. app is the definition that Load'ed it, which for
 	// a composed service is a sub-app holding one plugin and no ceiling — so it is
@@ -307,7 +314,7 @@ func (h hold) release() {
 	if h.in == nil {
 		return
 	}
-	if h.p.spec.IdleAfter > 0 {
+	if h.p.idle > 0 {
 		h.p.lastUse.Store(time.Now().UnixNano())
 	}
 	h.in.busy.Add(-1)
@@ -361,10 +368,12 @@ func (p *plugin) target() (Client, string, hold) {
 		// Closing under us. startOnDemand waits on the lock evict holds, then
 		// finds it either kept or gone.
 	}
-	if p.app == nil || !p.spec.Lazy || p.disabled.Load() {
+	if p.app == nil || !p.lazy || p.disabled.Load() {
 		return nil, "", hold{} // eager and down, disabled, or unloaded — the route answers 503
 	}
-	return p.startOnDemand()
+	// The wait for room is this caller's own, counted from now: a caller queued
+	// on p.mu behind another starter has already spent part of it.
+	return p.startOnDemand(time.Now().Add(p.start))
 }
 
 // Start brings the plugin named name up if it is not already, and reports the
@@ -403,7 +412,7 @@ func (a *App) Start(name string) (string, error) {
 // so a burst of concurrent first requests produces ONE child rather than one
 // per request. A start failure is not cached: the next request tries again,
 // because the usual cause is a dependency that has not come up yet.
-func (p *plugin) startOnDemand() (Client, string, hold) {
+func (p *plugin) startOnDemand(deadline time.Time) (Client, string, hold) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Under p.mu no evict is deciding — evict holds this lock from raising closing
@@ -420,7 +429,7 @@ func (p *plugin) startOnDemand() (Client, string, hold) {
 	// The ceiling is applied HERE, before another process exists, so warm bounds
 	// what this host holds rather than what a sweep restores a minute later.
 	host := p.host()
-	if err := host.makeRoom(p); err != nil {
+	if err := host.makeRoom(p, deadline); err != nil {
 		p.app.logger.Warn("zip lazy plugin found no room", "name", p.name, "err", err)
 		return nil, "", hold{}
 	}
@@ -548,7 +557,8 @@ func (a *App) load(prefixes []string, spec Plugin) error {
 		return fmt.Errorf("zip: Load(%s): plugin %q has URL but no Sum — refusing to run an unverified download", prefix, spec.Name)
 	}
 
-	p := &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec, app: a}
+	p := &plugin{name: spec.Name, prefix: prefix, prefixes: prefixes, spec: spec, app: a,
+		lazy: spec.Lazy, idle: spec.IdleAfter, start: spec.startLimit()}
 	var in *instance
 	if !spec.Lazy {
 		var err error

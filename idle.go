@@ -30,14 +30,6 @@ import (
 // that CAS always fails and no restart storm follows. It is the same contract
 // Unload and Reload use, minus the disabled flag.
 
-// IdleAfter is how long a lazy plugin may go unused before its process is
-// stopped. Zero means never — the historical behaviour, and the right setting
-// for a plugin whose start is expensive or whose first request must not pay a
-// cold start (an identity or config service every other call goes through).
-//
-// It applies only to Lazy plugins: an eager one was started deliberately at
-// Load and stopping it would contradict that.
-func (p Plugin) idleAfter() time.Duration { return p.IdleAfter }
 
 // Evict reclaims plugin processes under two bounds and reports how many it
 // stopped: first every lazy plugin that has not served for its IdleAfter, then,
@@ -103,36 +95,47 @@ func (p *plugin) host() *App {
 // answers 503 and nothing in flight is killed.
 //
 // On success the starter holds one unit of room until it calls started.
-func (a *App) makeRoom(starter *plugin) error {
+func (a *App) makeRoom(starter *plugin, deadline time.Time) error {
 	if a.warm <= 0 {
 		return nil
 	}
-	deadline := time.Now().Add(starter.spec.startLimit())
 	for {
-		a.roomMu.Lock()
-		live, idle, busy := a.census(starter)
-		if live+a.starting < a.warm || idle == nil && busy == 0 {
-			// Under the ceiling, or over it on processes nothing may stop: a host
-			// is better over its budget than deprived of an identity or config
-			// service every other call goes through.
-			a.starting++
-			a.roomMu.Unlock()
+		room, live, busy := a.room(starter)
+		if room {
 			return nil
 		}
-		if idle != nil {
-			seen := idle.lastUse.Load()
-			if idle.evict("room", time.Since(time.Unix(0, seen)), seen) {
-				a.starting++
-				a.roomMu.Unlock()
-				return nil
-			}
-		}
-		a.roomMu.Unlock()
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%d of %d processes running, %d busy and none idle", live, a.warm, busy)
 		}
 		time.Sleep(roomPoll)
 	}
+}
+
+// room is one look for room under roomMu, and reports whether it took one.
+//
+// Over the ceiling is admitted only when nothing could ever make room: no
+// process this host may stop, busy or idle, and no start in flight, which
+// becomes such a process once it runs. Admitting while starts are in flight let
+// a cold burst of eight first requests start eight processes against a ceiling
+// of two.
+func (a *App) room(starter *plugin) (ok bool, live, busy int) {
+	a.roomMu.Lock()
+	defer a.roomMu.Unlock()
+	live, idle, busy := a.census(starter)
+	if live+a.starting < a.warm || len(idle) == 0 && busy == 0 && a.starting == 0 {
+		a.starting++
+		return true, live, busy
+	}
+	// Coldest first, and on to the next when one cannot be stopped: a plugin
+	// mid-Reload holds its lock, and the room behind it is still room.
+	for _, p := range idle {
+		seen := p.lastUse.Load()
+		if p.evict("room", time.Since(time.Unix(0, seen)), seen) {
+			a.starting++
+			return true, live, busy
+		}
+	}
+	return false, live, busy
 }
 
 // roomPoll is how often a starter waiting for room looks again. A request on the
@@ -151,9 +154,9 @@ func (a *App) started() {
 }
 
 // census counts the running processes, and among the ones this host may stop
-// returns the coldest idle one and how many are busy. The starter is never a
-// candidate.
-func (a *App) census(starter *plugin) (live int, coldest *plugin, busy int) {
+// returns the idle ones coldest first and how many are busy. The starter is
+// never a candidate.
+func (a *App) census(starter *plugin) (live int, idle []*plugin, busy int) {
 	for _, p := range a.pluginSet() {
 		in := p.cur.Load()
 		if in == nil {
@@ -167,16 +170,17 @@ func (a *App) census(starter *plugin) (live int, coldest *plugin, busy int) {
 			busy++
 			continue
 		}
-		if coldest == nil || p.lastUse.Load() < coldest.lastUse.Load() {
-			coldest = p
-		}
+		idle = append(idle, p)
 	}
-	return live, coldest, busy
+	slices.SortFunc(idle, func(x, y *plugin) int {
+		return cmp.Compare(x.lastUse.Load(), y.lastUse.Load())
+	})
+	return live, idle, busy
 }
 
 // evictable is whether the ceiling and the age bound may stop p at all: only a
 // lazy plugin with an idle bound, because the next request has to bring it back.
-func (p *plugin) evictable() bool { return p.spec.Lazy && p.spec.idleAfter() > 0 }
+func (p *plugin) evictable() bool { return p.lazy && p.idle > 0 }
 
 // pluginSet is every plugin this host and its composed hosts hold, read once
 // under each host's lock. Both passes need the same set and neither may hold a
@@ -256,8 +260,8 @@ func (a *App) evictOver(warm int, now time.Time) int {
 // evictIfIdle stops p's current instance if it is lazy, running, and has been
 // unused for at least its IdleAfter. It reports whether it stopped one.
 func (p *plugin) evictIfIdle(now time.Time) bool {
-	after := p.spec.idleAfter()
-	if after <= 0 || !p.spec.Lazy {
+	after := p.idle
+	if after <= 0 || !p.lazy {
 		return false
 	}
 	// No lock: the swap that takes the child down happens under p.mu inside
@@ -329,6 +333,7 @@ func (p *plugin) evict(reason string, idle time.Duration, seen int64) bool {
 		p.mu.Unlock()
 		return false // it exited on its own; the supervisor has it
 	}
+	drain := p.spec.Drain // read under the lock Reload writes spec under
 	p.mu.Unlock()
 
 	p.evictions.Add(1)
@@ -337,7 +342,7 @@ func (p *plugin) evict(reason string, idle time.Duration, seen int64) bool {
 			"name", p.name, "pid", in.cmd.Process.Pid, "reason", reason,
 			"idle", idle.Round(time.Second).String())
 	}
-	p.retire(in, p.spec.Drain)
+	p.retire(in, drain)
 	return true
 }
 

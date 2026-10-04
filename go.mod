@@ -14,6 +14,10 @@ go 1.27.1
 // it is told rather than silently moved. v1.36.22 is the re-cut.
 retract v1.36.21
 
+// Carries a 14.7MB test binary at the module root, and a plugin request over
+// ZAP or a declined upgrade could hold its process for good.
+retract v1.37.31
+
 require (
 	github.com/dop251/goja v0.0.0-20260607120635-348e6bea910d
 	github.com/evanw/esbuild v0.28.1
@@ -24,7 +28,7 @@ require (
 	github.com/valyala/fasthttp v1.70.0
 	github.com/zap-proto/fiber/v3 v3.2.1
 	github.com/zap-proto/go v1.8.3
-	github.com/zap-proto/http v0.3.11
+	github.com/zap-proto/http v0.3.12
 	github.com/zap-proto/mcp v1.0.5
 	golang.org/x/sys v0.45.0
 	golang.org/x/tools v0.45.0

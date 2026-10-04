@@ -100,7 +100,7 @@ var (
 	transports   = map[string]Transport{
 		"zap": {
 			Serve: func(addr string, h fasthttp.RequestHandler) Server {
-				return &zapServer{addr: addr, srv: &http.Server{Network: NetworkOf(addr), Addr: addr, Handler: h}}
+				return &zapServer{addr: addr, srv: &http.Server{Network: NetworkOf(addr), Addr: addr, Handler: overZAP(h)}}
 			},
 			Dial: func(addr string) Client { return http.Dial(NetworkOf(addr), addr) },
 		},
@@ -132,6 +132,24 @@ var (
 		},
 	}
 )
+
+// viaZAP marks a request the ZAP transport carried. ZAP frames a request and its
+// reply and has no connection to hand over, so its server never runs a hijack:
+// an upgrade relayed over it would answer an empty 200 and hold the plugin for
+// good.
+type viaZAP struct{}
+
+func overZAP(h fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(rc *fasthttp.RequestCtx) {
+		rc.SetUserValue(viaZAP{}, true)
+		h(rc)
+	}
+}
+
+func carriedByZAP(rc *fasthttp.RequestCtx) bool {
+	v, _ := rc.UserValue(viaZAP{}).(bool)
+	return v
+}
 
 // withPort defaults the port of a tcp address, because a URL usually omits it
 // and a dialer never can. A unix path is returned untouched.
@@ -363,6 +381,10 @@ func (a *App) mountVia(prefix string, to func() (Client, string, hold)) {
 	h := func(c *Ctx) error {
 		client, host, held := to()
 		if upgrading(c.fc.Request()) {
+			if carriedByZAP(c.fc.RequestCtx()) {
+				held.release()
+				return Errorf(501, "mount %s: a protocol upgrade does not cross ZAP", prefix)
+			}
 			return relay(c.fc.RequestCtx(), host, "mount "+prefix, held)
 		}
 		return forward(c.Context(), c.fc.Request(), c.fc.Response(), client, host, "", "mount "+prefix, held)
@@ -470,6 +492,11 @@ func (b *heldBody) Close() error {
 	b.h.release()
 	return err
 }
+
+// declineWait bounds reading the reply a plugin gave instead of switching
+// protocols. It is an ordinary answer and arrives at once; one still streaming
+// after this is not an answer to an upgrade.
+const declineWait = 10 * time.Second
 
 // upgradeWait bounds reaching a plugin for an upgrade. It is a dial on a socket
 // in this pod, so a second is already generous; what it exists to stop is a
@@ -587,11 +614,16 @@ func relay(rc *fasthttp.RequestCtx, addr, what string, h hold) error {
 	if head.StatusCode() != fasthttp.StatusSwitchingProtocols {
 		defer func() { _ = up.Close() }()
 		head.CopyTo(&rc.Response.Header)
-		body, err := body(br, head.ContentLength())
-		if err != nil {
-			return Errorf(502, "%s: upgrade: %v", what, err)
+		// A declined upgrade is an ordinary reply, and it may be chunked or never
+		// end: read it as a reply, for as long as a reply takes and no longer, or
+		// the request holding the plugin waits on a body that is still streaming.
+		_ = up.SetReadDeadline(time.Now().Add(declineWait))
+		var got fasthttp.Response
+		head.CopyTo(&got.Header)
+		if err := got.ReadBody(br, 0); err != nil {
+			return Errorf(502, "%s: upgrade declined: %v", what, err)
 		}
-		rc.Response.SetBody(body)
+		rc.Response.SetBody(got.Body())
 		return nil
 	}
 
@@ -616,19 +648,6 @@ func relay(rc *fasthttp.RequestCtx, addr, what string, h hold) error {
 		_, _ = io.Copy(down, br)
 	})
 	return nil
-}
-
-// body reads a reply's body given the length its header declared. A negative
-// length is "until the connection ends", which is what identity encoding means.
-func body(br *bufio.Reader, n int) ([]byte, error) {
-	if n < 0 {
-		return io.ReadAll(br)
-	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(br, b); err != nil {
-		return nil, err
-	}
-	return b, nil
 }
 
 // makeSocketDir creates the directory a unix socket will be bound in, so

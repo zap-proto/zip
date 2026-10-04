@@ -72,10 +72,13 @@ func (x *Ided) UnmarshalZAP(data []byte) error {
 	copy(x.ID[:], o.BytesFixed(idedIDAt, 32))
 	x.Name = string(strings.Clone(o.Text(idedNameAt)))
 	if l := o.List(idedIDsAt); l.Len() > 0 {
-		rows := make([][32]uint8, l.Len())
-		for i := range rows {
-			copy(rows[i][:], l.BytesAt(i))
-		}
+		var rows [][32]uint8
+		l.EachBytes(func(_ int, raw []byte) bool {
+			var e [32]uint8
+			copy(e[:], raw)
+			rows = append(rows, e)
+			return true
+		})
 		x.IDs = rows
 	}
 	if raw := o.Bytes(idedLeafAt); len(raw) > 0 {
@@ -624,95 +627,131 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 		x.PtrL = &v
 	}
 	if l := o.List(trunkNumsAt); l.Len() > 0 {
-		rows := make([]uint32, l.Len())
-		for i := range rows {
+		var rows []uint32
+		l.EachBytes(func(_ int, raw []byte) bool {
 			var full [8]byte
-			copy(full[:], l.BytesAt(i))
-			rows[i] = uint32(binary.LittleEndian.Uint64(full[:]))
-		}
+			copy(full[:], raw)
+			e := uint32(binary.LittleEndian.Uint64(full[:]))
+			rows = append(rows, e)
+			return true
+		})
 		x.Nums = rows
 	}
 	if l := o.List(trunkSigsAt); l.Len() > 0 {
-		rows := make([]int32, l.Len())
-		for i := range rows {
+		var rows []int32
+		l.EachBytes(func(_ int, raw []byte) bool {
 			var full [8]byte
-			copy(full[:], l.BytesAt(i))
-			rows[i] = int32(int64(binary.LittleEndian.Uint64(full[:])<<32) >> 32)
-		}
+			copy(full[:], raw)
+			e := int32(int64(binary.LittleEndian.Uint64(full[:])<<32) >> 32)
+			rows = append(rows, e)
+			return true
+		})
 		x.Sigs = rows
 	}
 	if l := o.List(trunkBigsAt); l.Len() > 0 {
-		rows := make([]float64, l.Len())
-		for i := range rows {
+		var rows []float64
+		l.EachBytes(func(_ int, raw []byte) bool {
 			var full [8]byte
-			copy(full[:], l.BytesAt(i))
-			rows[i] = float64(math.Float64frombits(binary.LittleEndian.Uint64(full[:])))
-		}
+			copy(full[:], raw)
+			e := float64(math.Float64frombits(binary.LittleEndian.Uint64(full[:])))
+			rows = append(rows, e)
+			return true
+		})
 		x.Bigs = rows
 	}
 	if l := o.List(trunkStrsAt); l.Len() > 0 {
-		rows := make([]string, l.Len())
-		for i := range rows {
-			rows[i] = string(l.BytesAt(i))
-		}
+		var rows []string
+		l.EachBytes(func(_ int, raw []byte) bool {
+			e := string(raw)
+			rows = append(rows, e)
+			return true
+		})
 		x.Strs = rows
 	}
 	if l := o.List(trunkBufsAt); l.Len() > 0 {
-		rows := make([][]uint8, l.Len())
-		for i := range rows {
-			rows[i] = []uint8(append([]byte(nil), l.BytesAt(i)...))
-		}
+		var rows [][]uint8
+		l.EachBytes(func(_ int, raw []byte) bool {
+			e := []uint8(append([]byte(nil), raw...))
+			rows = append(rows, e)
+			return true
+		})
 		x.Bufs = rows
 	}
 	if l := o.List(trunkBitsAt); l.Len() > 0 {
-		rows := make([]bool, l.Len())
-		for i := range rows {
-			raw := l.BytesAt(i)
-			rows[i] = bool(len(raw) > 0 && raw[0] != 0)
-		}
+		var rows []bool
+		l.EachBytes(func(_ int, raw []byte) bool {
+			e := bool(len(raw) > 0 && raw[0] != 0)
+			rows = append(rows, e)
+			return true
+		})
 		x.Bits = rows
 	}
 	if l := o.List(trunkKidsAt); l.Len() > 0 {
-		rows := make([]Leaf, l.Len())
-		for i := range rows {
-			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
-				return err
+		var rows []Leaf
+		var ferr error
+		l.EachBytes(func(_ int, raw []byte) bool {
+			var e Leaf
+			if ferr = e.UnmarshalZAP(raw); ferr != nil {
+				return false
 			}
+			rows = append(rows, e)
+			return true
+		})
+		if ferr != nil {
+			return ferr
 		}
 		x.Kids = rows
 	}
 	if l := o.List(trunkPtrsAt); l.Len() > 0 {
-		rows := make([]*Leaf, l.Len())
-		for i := range rows {
-			rows[i] = new(Leaf)
-			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
-				return err
+		var rows []*Leaf
+		var ferr error
+		l.EachBytes(func(_ int, raw []byte) bool {
+			e := new(Leaf)
+			if ferr = e.UnmarshalZAP(raw); ferr != nil {
+				return false
 			}
+			rows = append(rows, e)
+			return true
+		})
+		if ferr != nil {
+			return ferr
 		}
 		x.Ptrs = rows
 	}
 	if l := o.List(trunkSealsAt); l.Len() > 0 {
-		rows := make([]Sealed, l.Len())
-		for range rows {
-		}
+		var rows []Sealed
+		l.EachBytes(func(_ int, raw []byte) bool {
+			var e Sealed
+			rows = append(rows, e)
+			return true
+		})
 		x.Seals = rows
 	}
 	if l := o.List(trunkPKidsAt); l.Len() > 0 {
-		rows := make([]Leaf, l.Len())
-		for i := range rows {
-			if err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {
-				return err
+		var rows []Leaf
+		var ferr error
+		l.EachBytes(func(_ int, raw []byte) bool {
+			var e Leaf
+			if ferr = e.UnmarshalZAP(raw); ferr != nil {
+				return false
 			}
+			rows = append(rows, e)
+			return true
+		})
+		if ferr != nil {
+			return ferr
 		}
 		x.PKids = &rows
 	}
 	if l := o.List(trunkPNumsAt); l.Len() > 0 {
-		rows := make([]uint32, l.Len())
-		for i := range rows {
+		var rows []uint32
+		l.EachBytes(func(_ int, raw []byte) bool {
 			var full [8]byte
-			copy(full[:], l.BytesAt(i))
-			rows[i] = uint32(binary.LittleEndian.Uint64(full[:]))
-		}
+			copy(full[:], raw)
+			e := uint32(binary.LittleEndian.Uint64(full[:]))
+			rows = append(rows, e)
+			return true
+		})
 		x.PNums = &rows
 	}
 	if l := o.List(trunkPtrI8At); l.Len() > 0 {

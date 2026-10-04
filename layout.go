@@ -586,8 +586,10 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 		//
 		// An inline slot has no null: the writer leaves an absent pointer's
 		// bytes zeroed (see [writeField]), so all-zero is what absence looks
-		// like coming back. That is the rule the pointer SCALARS already read
-		// by, and reading it here is what keeps the two directions symmetric.
+		// like coming back, and a pointer to an all-zero array reads back nil.
+		// This is the one pointer that still cannot say present-and-zero: a
+		// scalar crosses as a list of at most one element, and bytes_fixed has no
+		// list form inline. Giving it one moves the wire of every optional id.
 		name := p.spell(ft)
 		fmt.Fprintf(w, "\tif raw := o.BytesFixed(%s, %d); len(raw) > 0 {\n", at, s.N)
 		fmt.Fprintf(w, "\t\tvar v %s\n\t\tcopy(v[:], raw)\n", name)
@@ -771,49 +773,68 @@ func bits(zaptype, v string) string {
 	return fmt.Sprintf("uint64(%s)", v)
 }
 
+// readList emits a single pass over the list. Element i by index re-walks the
+// stream from its start, so reading a list that way is quadratic in its length;
+// the rows grow from the elements actually there rather than from the count the
+// message claims.
 func readList(w *bytes.Buffer, at, fn string, s Slot, f reflect.StructField, p *pkg) error {
 	ft := under(f.Type)
 	et := ft.Elem()
 	ptr := et.Kind() == reflect.Pointer
 	el := under(et)
+	fallible := el.Kind() == reflect.Struct && !empty(el)
 
 	var elem bytes.Buffer
 	w, outer := &elem, w
+	// A scalar element arrives as its value and is pointed at after; a struct
+	// element is decoded in place, so a pointer one is allocated first.
+	value, point := "e", ""
+	if ptr && el.Kind() != reflect.Struct {
+		value, point = "v", "\t\t\te := &v\n"
+	}
 	switch {
-	case el.Kind() == reflect.Struct && empty(el):
-		if ptr {
-			fmt.Fprintf(w, "\t\t\trows[i] = new(%s)\n", p.spell(el))
-		}
 	case el.Kind() == reflect.Struct:
 		if ptr {
-			fmt.Fprintf(w, "\t\t\trows[i] = new(%s)\n", p.spell(el))
+			fmt.Fprintf(w, "\t\t\te := new(%s)\n", p.spell(el))
+		} else {
+			fmt.Fprintf(w, "\t\t\tvar e %s\n", p.spell(el))
 		}
-		fmt.Fprint(w, "\t\t\tif err := rows[i].UnmarshalZAP(l.BytesAt(i)); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n")
+		if fallible {
+			fmt.Fprint(w, "\t\t\tif ferr = e.UnmarshalZAP(raw); ferr != nil {\n\t\t\t\treturn false\n\t\t\t}\n")
+		}
 	case el.Kind() == reflect.Array:
-		fmt.Fprint(w, "\t\t\tcopy(rows[i][:], l.BytesAt(i))\n")
+		fmt.Fprintf(w, "\t\t\tvar %s %s\n\t\t\tcopy(%s[:], raw)\n", value, p.spell(el), value)
 	case s.Elem == "text":
-		fmt.Fprintf(w, "\t\t\trows[i] = %s(l.BytesAt(i))\n", p.spell(et))
+		fmt.Fprintf(w, "\t\t\t%s := %s(raw)\n", value, p.spell(el))
 	case s.Elem == "bytes":
-		fmt.Fprintf(w, "\t\t\trows[i] = %s(append([]byte(nil), l.BytesAt(i)...))\n", p.spell(et))
+		fmt.Fprintf(w, "\t\t\t%s := %s(append([]byte(nil), raw...))\n", value, p.spell(el))
 	case s.Elem == "bool":
-		fmt.Fprintf(w, "\t\t\traw := l.BytesAt(i)\n\t\t\trows[i] = %s(len(raw) > 0 && raw[0] != 0)\n", p.spell(et))
+		fmt.Fprintf(w, "\t\t\t%s := %s(len(raw) > 0 && raw[0] != 0)\n", value, p.spell(el))
 	default:
-		fmt.Fprint(w, "\t\t\tvar full [8]byte\n\t\t\tcopy(full[:], l.BytesAt(i))\n")
-		fmt.Fprintf(w, "\t\t\trows[i] = %s(%s)\n", p.spell(et), elementRead(s))
+		fmt.Fprint(w, "\t\t\tvar full [8]byte\n\t\t\tcopy(full[:], raw)\n")
+		fmt.Fprintf(w, "\t\t\t%s := %s(%s)\n", value, p.spell(el), elementRead(s))
 		p.std("encoding/binary")
 		if s.Elem == "f32" || s.Elem == "f64" {
 			p.std("math")
 		}
 	}
+	fmt.Fprint(w, point)
 	w = outer
-	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n", at)
-	fmt.Fprintf(w, "\t\trows := make(%s, l.Len())\n\t\tfor %s range rows {\n", p.spell(ft), index(&elem))
+	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n\t\tvar rows %s\n", at, p.spell(ft))
+	if fallible {
+		fmt.Fprint(w, "\t\tvar ferr error\n")
+	}
+	fmt.Fprint(w, "\t\tl.EachBytes(func(_ int, raw []byte) bool {\n")
 	w.Write(elem.Bytes())
+	fmt.Fprint(w, "\t\t\trows = append(rows, e)\n\t\t\treturn true\n\t\t})\n")
+	if fallible {
+		fmt.Fprint(w, "\t\tif ferr != nil {\n\t\t\treturn ferr\n\t\t}\n")
+	}
 	assign := "x." + fn + " = rows"
 	if s.Ptr {
 		assign = "x." + fn + " = &rows"
 	}
-	fmt.Fprintf(w, "\t\t}\n\t\t%s\n\t}\n", assign)
+	fmt.Fprintf(w, "\t\t%s\n\t}\n", assign)
 	return nil
 }
 
