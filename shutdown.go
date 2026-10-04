@@ -76,14 +76,16 @@ func (a *App) shutdown(ctx context.Context) error {
 		}
 	}
 	// 4. Wait for every plugin child to exit. The hooks only signalled them, so
-	//    they drain together and each is killed at its own grace; the host
-	//    returns once the last is gone, or when ctx ends. A composed app's
+	//    they drain together, and each is killed at its own grace. That grace,
+	//    not ctx, bounds this wait: ctx has usually been spent on the drain, and
+	//    a host that returned first would be torn down under its children (a
+	//    container stops every process when its first one exits). A composed app's
 	//    shutdown runs as its parent's hook and leaves the wait to the
 	//    outermost one, which walks the whole composition: waiting at each level
 	//    would drain the children one after another.
 	if !nested {
 		if g, err := a.liveOrBuild(); err == nil {
-			errs = append(errs, awaitChildren(ctx, g.hosts))
+			awaitChildren(g.hosts)
 		}
 	}
 	return errors.Join(errs...)
@@ -94,26 +96,16 @@ func (a *App) shutdown(ctx context.Context) error {
 type nestedShutdown struct{}
 
 // awaitChildren blocks until no plugin in hosts has a process left to stop.
-func awaitChildren(ctx context.Context, hosts []*App) error {
-	var ps []*plugin
+func awaitChildren(hosts []*App) {
 	for _, h := range hosts {
 		h.plugMu.Lock()
+		ps := make([]*plugin, 0, len(h.plugins))
 		for _, p := range h.plugins {
 			ps = append(ps, p)
 		}
 		h.plugMu.Unlock()
-	}
-	done := make(chan struct{})
-	go func() {
 		for _, p := range ps {
 			p.stopping.Wait()
 		}
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }

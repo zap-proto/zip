@@ -1,6 +1,7 @@
 package zip_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -92,5 +93,26 @@ func TestShutdown_ChildrenDrainTogether(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, strconv.Itoa(i))); err != nil {
 			t.Fatalf("child %d did not finish its shutdown: %v", i, err)
 		}
+	}
+}
+
+// The wait for the children is bounded by their grace, not by the context a
+// shutdown was given: that context is usually spent on the drain, and a host
+// that returned before its children would be torn down under them.
+func TestShutdown_OutlivesAnEndedContext(t *testing.T) {
+	bin := buildPlugin(t, "v1")
+	mark := filepath.Join(t.TempDir(), "drained")
+
+	app := zip.New(zip.Config{AppName: "host", DisableStartupMessage: true})
+	app.Use(must(zip.Load(zip.Plugin{Name: "demo", Bin: bin, Env: []string{
+		"TESTPLUGIN_ON_TERM=" + mark, "TESTPLUGIN_TERM_DELAY=300ms",
+	}}, "/v1/demo")))
+	version(t, app)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = app.ShutdownWithContext(ctx)
+	if _, err := os.Stat(mark); err != nil {
+		t.Fatalf("the host returned before its child finished: %v", err)
 	}
 }
