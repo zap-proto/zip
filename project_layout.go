@@ -109,14 +109,30 @@ func (p *projector) slotOf(r TypeRef, inside map[string]bool) (slot, bool) {
 		case "map":
 			return slot{}, false
 		}
-		return primSlot(td.Repr)
+		s, ok := primSlot(td.Repr)
+		return optional(s, ok, r.Opt)
 	}
-	return primSlot(r.Prim)
+	s, ok := primSlot(r.Prim)
+	return optional(s, ok, r.Opt)
+}
+
+// optional is a primitive that may be absent: a list of at most one element,
+// which is how the Go encoder writes a pointer to one, so a present zero and an
+// absent value are different bytes. A fixed array is inline and has no list.
+func optional(s slot, ok bool, opt bool) (slot, bool) {
+	if !ok || !opt {
+		return s, ok
+	}
+	if _, fixed := fixedLen(s.repr); fixed {
+		return s, ok
+	}
+	return slot{repr: "list<" + s.repr + ">", elem: s.repr}, true
 }
 
 // elemOf is a list element's spelling. A list of lists has no form: the element
 // of a list is one value at one width, and a list is neither.
 func (p *projector) elemOf(r TypeRef, inside map[string]bool) (string, bool) {
+	r.Opt = false // a list element has no absent form: a nil one is written as its zero
 	s, ok := p.slotOf(r, inside)
 	if !ok || strings.HasPrefix(s.repr, "list<") {
 		return "", false

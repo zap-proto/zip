@@ -161,7 +161,18 @@ const (
 	trunkSealsAt = 184
 	trunkPKidsAt = 192
 	trunkPNumsAt = 200
-	trunkSize    = 208
+	trunkPtrI8At = 208
+	trunkPtrI6At = 216
+	trunkPtrI3At = 224
+	trunkPtrI4At = 232
+	trunkPtrU1At = 240
+	trunkPtrU6At = 248
+	trunkPtrU3At = 256
+	trunkPtrF3At = 264
+	trunkPtrF6At = 272
+	trunkPtrCAt  = 280
+	trunkPtrRAt  = 288
+	trunkSize    = 296
 )
 
 var _ interface {
@@ -175,6 +186,29 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		return nil, nil
 	}
 	b := zap.NewBuilder(trunkSize + 256)
+	ptrUAt, ptrUN := 0, 0
+	if x.PtrU != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrU)))
+		enc := full[:8]
+		ptrUAt = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrUN = 1
+	}
+	ptrSAt, ptrSN := 0, 0
+	if x.PtrS != nil {
+		enc := []byte((*x.PtrS))
+		ptrSAt = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrSN = 1
+	}
+	ptrBAt, ptrBN := 0, 0
+	if x.PtrB != nil {
+		enc := []byte{0}
+		if *x.PtrB {
+			enc[0] = 1
+		}
+		ptrBAt = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrBN = 1
+	}
 	numsAt, numsN := 0, len(x.Nums)
 	if numsN > 0 {
 		var blob []byte
@@ -339,6 +373,92 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		}
 		pNumsAt = b.WriteBytes(blob)
 	}
+	ptrI8At, ptrI8N := 0, 0
+	if x.PtrI8 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrI8)))
+		enc := full[:1]
+		ptrI8At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrI8N = 1
+	}
+	ptrI6At, ptrI6N := 0, 0
+	if x.PtrI6 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrI6)))
+		enc := full[:2]
+		ptrI6At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrI6N = 1
+	}
+	ptrI3At, ptrI3N := 0, 0
+	if x.PtrI3 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrI3)))
+		enc := full[:4]
+		ptrI3At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrI3N = 1
+	}
+	ptrI4At, ptrI4N := 0, 0
+	if x.PtrI4 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrI4)))
+		enc := full[:8]
+		ptrI4At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrI4N = 1
+	}
+	ptrU1At, ptrU1N := 0, 0
+	if x.PtrU1 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrU1)))
+		enc := full[:1]
+		ptrU1At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrU1N = 1
+	}
+	ptrU6At, ptrU6N := 0, 0
+	if x.PtrU6 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrU6)))
+		enc := full[:2]
+		ptrU6At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrU6N = 1
+	}
+	ptrU3At, ptrU3N := 0, 0
+	if x.PtrU3 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrU3)))
+		enc := full[:4]
+		ptrU3At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrU3N = 1
+	}
+	ptrF3At, ptrF3N := 0, 0
+	if x.PtrF3 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64(math.Float32bits(float32((*x.PtrF3)))))
+		enc := full[:4]
+		ptrF3At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrF3N = 1
+	}
+	ptrF6At, ptrF6N := 0, 0
+	if x.PtrF6 != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], math.Float64bits(float64((*x.PtrF6))))
+		enc := full[:8]
+		ptrF6At = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrF6N = 1
+	}
+	ptrCAt, ptrCN := 0, 0
+	if x.PtrC != nil {
+		var full [8]byte
+		binary.LittleEndian.PutUint64(full[:], uint64((*x.PtrC)))
+		enc := full[:8]
+		ptrCAt = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrCN = 1
+	}
+	ptrRAt, ptrRN := 0, 0
+	if x.PtrR != nil {
+		enc := []byte((*x.PtrR))
+		ptrRAt = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))
+		ptrRN = 1
+	}
 	ob := b.StartObject(trunkSize)
 	ob.SetBool(trunkBAt, bool(x.B))
 	ob.SetInt8(trunkI8At, int8(x.I8))
@@ -359,15 +479,6 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		return nil, err
 	}
 	ob.SetBytes(trunkLeafAt, innerLeaf)
-	if x.PtrU != nil {
-		ob.SetUint64(trunkPtrUAt, uint64((*x.PtrU)))
-	}
-	if x.PtrS != nil {
-		ob.SetText(trunkPtrSAt, string((*x.PtrS)))
-	}
-	if x.PtrB != nil {
-		ob.SetBool(trunkPtrBAt, bool((*x.PtrB)))
-	}
 	if x.PtrL != nil {
 		innerPtrL, err := x.PtrL.MarshalZAP()
 		if err != nil {
@@ -379,6 +490,15 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 		eb := zap.NewBuilder(zap.HeaderSize)
 		eb.StartObject(0).FinishAsRoot()
 		ob.SetBytes(trunkSealAt, eb.Finish())
+	}
+	if ptrUN > 0 {
+		ob.SetList(trunkPtrUAt, ptrUAt, ptrUN)
+	}
+	if ptrSN > 0 {
+		ob.SetList(trunkPtrSAt, ptrSAt, ptrSN)
+	}
+	if ptrBN > 0 {
+		ob.SetList(trunkPtrBAt, ptrBAt, ptrBN)
 	}
 	if numsN > 0 {
 		ob.SetList(trunkNumsAt, numsAt, numsN)
@@ -413,6 +533,39 @@ func (x *Trunk) MarshalZAP() ([]byte, error) {
 	if pNumsN > 0 {
 		ob.SetList(trunkPNumsAt, pNumsAt, pNumsN)
 	}
+	if ptrI8N > 0 {
+		ob.SetList(trunkPtrI8At, ptrI8At, ptrI8N)
+	}
+	if ptrI6N > 0 {
+		ob.SetList(trunkPtrI6At, ptrI6At, ptrI6N)
+	}
+	if ptrI3N > 0 {
+		ob.SetList(trunkPtrI3At, ptrI3At, ptrI3N)
+	}
+	if ptrI4N > 0 {
+		ob.SetList(trunkPtrI4At, ptrI4At, ptrI4N)
+	}
+	if ptrU1N > 0 {
+		ob.SetList(trunkPtrU1At, ptrU1At, ptrU1N)
+	}
+	if ptrU6N > 0 {
+		ob.SetList(trunkPtrU6At, ptrU6At, ptrU6N)
+	}
+	if ptrU3N > 0 {
+		ob.SetList(trunkPtrU3At, ptrU3At, ptrU3N)
+	}
+	if ptrF3N > 0 {
+		ob.SetList(trunkPtrF3At, ptrF3At, ptrF3N)
+	}
+	if ptrF6N > 0 {
+		ob.SetList(trunkPtrF6At, ptrF6At, ptrF6N)
+	}
+	if ptrCN > 0 {
+		ob.SetList(trunkPtrCAt, ptrCAt, ptrCN)
+	}
+	if ptrRN > 0 {
+		ob.SetList(trunkPtrRAt, ptrRAt, ptrRN)
+	}
 	ob.FinishAsRoot()
 	return b.Finish(), nil
 }
@@ -446,13 +599,21 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 			return err
 		}
 	}
-	if v := uint64(o.Uint64(trunkPtrUAt)); v != uint64(0) {
+	if l := o.List(trunkPtrUAt); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := uint64(binary.LittleEndian.Uint64(full[:]))
 		x.PtrU = &v
 	}
-	if v := string(strings.Clone(o.Text(trunkPtrSAt))); v != "" {
+	if l := o.List(trunkPtrSAt); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		v := string(raw)
 		x.PtrS = &v
 	}
-	if v := bool(o.Bool(trunkPtrBAt)); v {
+	if l := o.List(trunkPtrBAt); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		v := bool(len(raw) > 0 && raw[0] != 0)
 		x.PtrB = &v
 	}
 	if raw := o.Bytes(trunkPtrLAt); len(raw) > 0 {
@@ -553,6 +714,81 @@ func (x *Trunk) UnmarshalZAP(data []byte) error {
 			rows[i] = uint32(binary.LittleEndian.Uint64(full[:]))
 		}
 		x.PNums = &rows
+	}
+	if l := o.List(trunkPtrI8At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := int8(int64(binary.LittleEndian.Uint64(full[:])<<56) >> 56)
+		x.PtrI8 = &v
+	}
+	if l := o.List(trunkPtrI6At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := int16(int64(binary.LittleEndian.Uint64(full[:])<<48) >> 48)
+		x.PtrI6 = &v
+	}
+	if l := o.List(trunkPtrI3At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := int32(int64(binary.LittleEndian.Uint64(full[:])<<32) >> 32)
+		x.PtrI3 = &v
+	}
+	if l := o.List(trunkPtrI4At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := int64(int64(binary.LittleEndian.Uint64(full[:])<<0) >> 0)
+		x.PtrI4 = &v
+	}
+	if l := o.List(trunkPtrU1At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := uint8(binary.LittleEndian.Uint64(full[:]))
+		x.PtrU1 = &v
+	}
+	if l := o.List(trunkPtrU6At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := uint16(binary.LittleEndian.Uint64(full[:]))
+		x.PtrU6 = &v
+	}
+	if l := o.List(trunkPtrU3At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := uint32(binary.LittleEndian.Uint64(full[:]))
+		x.PtrU3 = &v
+	}
+	if l := o.List(trunkPtrF3At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := float32(math.Float32frombits(uint32(binary.LittleEndian.Uint64(full[:]))))
+		x.PtrF3 = &v
+	}
+	if l := o.List(trunkPtrF6At); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := float64(math.Float64frombits(binary.LittleEndian.Uint64(full[:])))
+		x.PtrF6 = &v
+	}
+	if l := o.List(trunkPtrCAt); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		var full [8]byte
+		copy(full[:], raw)
+		v := Count(binary.LittleEndian.Uint64(full[:]))
+		x.PtrC = &v
+	}
+	if l := o.List(trunkPtrRAt); l.Len() > 0 {
+		raw := l.BytesAt(0)
+		v := []uint8(append([]byte(nil), raw...))
+		x.PtrR = &v
 	}
 	return nil
 }

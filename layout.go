@@ -414,8 +414,13 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		if !ok {
 			continue
 		}
-		if kindOf(s, f.Type) == aList {
+		switch kindOf(s, f.Type) {
+		case aList:
 			if err := writeList(w, p.field(t, s.Name), s, f, p); err != nil {
+				return err
+			}
+		case aOpt:
+			if err := writeOpt(w, p.field(t, s.Name), s, f, p); err != nil {
 				return err
 			}
 		}
@@ -426,7 +431,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 		if !ok {
 			continue
 		}
-		if kindOf(s, f.Type) == aList {
+		if listed(kindOf(s, f.Type)) {
 			continue
 		}
 		if err := writeField(w, lo, p.field(t, s.Name), s, f, p); err != nil {
@@ -435,7 +440,7 @@ func declare(w *bytes.Buffer, t reflect.Type, p *pkg) error {
 	}
 	for _, s := range shape.Slots {
 		f, ok := held(t, s.Name)
-		if !ok || kindOf(s, f.Type) != aList {
+		if !ok || !listed(kindOf(s, f.Type)) {
 			continue
 		}
 		fn := p.field(t, s.Name)
@@ -482,7 +487,14 @@ const (
 	aFixed
 	aNest
 	aList
+	// aOpt is a pointer to a scalar, text or bytes: a list of at most one
+	// element, so a pointer to zero is not mistaken for no pointer.
+	aOpt
 )
+
+// listed is whether a slot is written before the object and filled by SetList
+// after it — every list, including the one-element list an optional is.
+func listed(f form) bool { return f == aList || f == aOpt }
 
 func kindOf(s Slot, ft reflect.Type) form {
 	ft = under(ft)
@@ -491,8 +503,12 @@ func kindOf(s Slot, ft reflect.Type) form {
 		return aFixed
 	case ft.Kind() == reflect.Struct:
 		return aNest
-	case ft.Kind() == reflect.Slice && strings.HasPrefix(s.Type, "list<"):
-		return aList
+	case !strings.HasPrefix(s.Type, "list<"):
+		return aScalar
+	case ft.Kind() == reflect.Slice && ft.Elem().Kind() != reflect.Uint8:
+		return aList // a []byte is one value, so a list<…> over one is an optional
+	case s.Ptr:
+		return aOpt
 	}
 	return aScalar
 }
@@ -591,6 +607,8 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 		return nil
 	case aList:
 		return readList(w, at, fn, s, f, p)
+	case aOpt:
+		return readOpt(w, at, fn, s, f, p)
 	}
 	c, ok := setter[s.Type]
 	if !ok {
@@ -600,14 +618,6 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 	read := fmt.Sprintf("%s(o.%s(%s))", spell, c[1], at)
 	switch s.Type {
 	case "bytes":
-		// A slice is not comparable, so an absent one is told by its length —
-		// which is the same thing the reflective decoder asks when it decides
-		// whether to allocate.
-		if s.Ptr {
-			fmt.Fprintf(w, "\tif raw := o.Bytes(%s); len(raw) > 0 {\n\t\tv := %s(append([]byte(nil), raw...))\n\t\tx.%s = &v\n\t}\n",
-				at, spell, fn)
-			return nil
-		}
 		read = fmt.Sprintf("%s(append([]byte(nil), o.Bytes(%s)...))", spell, at)
 	case "text":
 		// ZAP decodes a string zero-copy, over the frame that arrived, and the
@@ -616,25 +626,64 @@ func readField(w *bytes.Buffer, lo, fn string, s Slot, f reflect.StructField, p 
 		read = fmt.Sprintf("%s(strings.Clone(o.Text(%s)))", spell, at)
 		p.std("strings")
 	}
-	if s.Ptr {
-		fmt.Fprintf(w, "\tif v := %s; %s {\n\t\tx.%s = &v\n\t}\n", read, present(s, spell), fn)
-		return nil
-	}
 	fmt.Fprintf(w, "\tx.%s = %s\n", fn, read)
 	return nil
 }
 
-// present is when an absent pointer field is actually there, mirroring the
-// reflective decoder: it allocates only once something is, so a pointer to a
-// zero value comes back nil rather than as a pointer to nothing.
-func present(s Slot, spell string) string {
-	switch s.Type {
-	case "text":
-		return `v != ""`
+// writeOpt emits an optional's one-element list, written before the object as
+// every list is. Its element is what a list element of the same type is, so the
+// reflective encoder and this agree byte for byte.
+func writeOpt(w *bytes.Buffer, fn string, s Slot, f reflect.StructField, p *pkg) error {
+	v := lower(fn)
+	ref := "(*x." + fn + ")"
+	fmt.Fprintf(w, "\t%sAt, %sN := 0, 0\n\tif x.%s != nil {\n", v, v, fn)
+	switch s.Elem {
+	case "text", "bytes":
+		fmt.Fprintf(w, "\t\tenc := []byte(%s)\n", ref)
 	case "bool":
-		return "v"
+		fmt.Fprintf(w, "\t\tenc := []byte{0}\n\t\tif %s {\n\t\t\tenc[0] = 1\n\t\t}\n", ref)
+	default:
+		if _, ok := setter[s.Elem]; !ok {
+			return fmt.Errorf("zip: field %s: no wire form for %s", s.Name, s.Type)
+		}
+		fmt.Fprint(w, "\t\tvar full [8]byte\n")
+		fmt.Fprintf(w, "\t\tbinary.LittleEndian.PutUint64(full[:], %s)\n", bits(s.Elem, ref))
+		fmt.Fprintf(w, "\t\tenc := full[:%d]\n", widthOf(s.Elem))
+		if s.Elem == "f32" || s.Elem == "f64" {
+			p.std("math")
+		}
 	}
-	return "v != " + spell + "(0)"
+	fmt.Fprintf(w, "\t\t%sAt = b.WriteBytes(append(binary.LittleEndian.AppendUint32(nil, uint32(len(enc))), enc...))\n", v)
+	fmt.Fprintf(w, "\t\t%sN = 1\n\t}\n", v)
+	p.std("encoding/binary")
+	return nil
+}
+
+// readOpt emits the read of an optional: present exactly when its list holds an
+// element, whatever that element's value.
+func readOpt(w *bytes.Buffer, at, fn string, s Slot, f reflect.StructField, p *pkg) error {
+	spell := p.spell(under(f.Type))
+	fmt.Fprintf(w, "\tif l := o.List(%s); l.Len() > 0 {\n\t\traw := l.BytesAt(0)\n", at)
+	switch s.Elem {
+	case "text":
+		fmt.Fprintf(w, "\t\tv := %s(raw)\n", spell)
+	case "bytes":
+		fmt.Fprintf(w, "\t\tv := %s(append([]byte(nil), raw...))\n", spell)
+	case "bool":
+		fmt.Fprintf(w, "\t\tv := %s(len(raw) > 0 && raw[0] != 0)\n", spell)
+	default:
+		if _, ok := setter[s.Elem]; !ok {
+			return fmt.Errorf("zip: field %s: no wire form for %s", s.Name, s.Type)
+		}
+		fmt.Fprint(w, "\t\tvar full [8]byte\n\t\tcopy(full[:], raw)\n")
+		fmt.Fprintf(w, "\t\tv := %s(%s)\n", spell, elementRead(s))
+		p.std("encoding/binary")
+		if s.Elem == "f32" || s.Elem == "f64" {
+			p.std("math")
+		}
+	}
+	fmt.Fprintf(w, "\t\tx.%s = &v\n\t}\n", fn)
+	return nil
 }
 
 func writeList(w *bytes.Buffer, fn string, s Slot, f reflect.StructField, p *pkg) error {
@@ -706,16 +755,20 @@ func index(body *bytes.Buffer) string {
 	return ""
 }
 
-// element spells one list element for the little-endian write. A float crosses
-// as its bits, which is what the reflective encoder writes, so the two agree.
-func element(s Slot, ref string) string {
-	switch s.Elem {
+// element spells one list element for the little-endian write.
+func element(s Slot, ref string) string { return bits(s.Elem, ref+"[i]") }
+
+// bits spells one scalar as the uint64 its little-endian bytes are cut from. A
+// float crosses as its bits, which is what the reflective encoder writes, so the
+// two agree.
+func bits(zaptype, v string) string {
+	switch zaptype {
 	case "f32":
-		return fmt.Sprintf("uint64(math.Float32bits(float32(%s[i])))", ref)
+		return fmt.Sprintf("uint64(math.Float32bits(float32(%s)))", v)
 	case "f64":
-		return fmt.Sprintf("math.Float64bits(float64(%s[i]))", ref)
+		return fmt.Sprintf("math.Float64bits(float64(%s))", v)
 	}
-	return fmt.Sprintf("uint64(%s[i])", ref)
+	return fmt.Sprintf("uint64(%s)", v)
 }
 
 func readList(w *bytes.Buffer, at, fn string, s Slot, f reflect.StructField, p *pkg) error {

@@ -107,5 +107,58 @@ func trunks() []Trunk {
 		},
 		{Text: "only text"},
 		{Kids: []Leaf{{}}},
+		zeroes(),
+		{
+			PtrI8: ptr(int8(-8)), PtrI6: ptr(int16(-16)), PtrI3: ptr(int32(-32)), PtrI4: ptr(int64(-64)),
+			PtrU1: ptr(uint8(8)), PtrU6: ptr(uint16(16)), PtrU3: ptr(uint32(32)), PtrU: ptr(uint64(64)),
+			PtrF3: ptr(float32(1.5)), PtrF6: ptr(-2.25), PtrC: ptr(Count(7)),
+			PtrB: ptr(true), PtrS: ptr("set"), PtrR: ptr([]byte{1, 2}),
+		},
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// zeroes points every optional field at its zero value: present, and zero.
+func zeroes() Trunk {
+	return Trunk{
+		PtrI8: ptr(int8(0)), PtrI6: ptr(int16(0)), PtrI3: ptr(int32(0)), PtrI4: ptr(int64(0)),
+		PtrU1: ptr(uint8(0)), PtrU6: ptr(uint16(0)), PtrU3: ptr(uint32(0)), PtrU: ptr(uint64(0)),
+		PtrF3: ptr(float32(0)), PtrF6: ptr(0.0), PtrC: ptr(Count(0)),
+		PtrB: ptr(false), PtrS: ptr(""), PtrR: ptr([]byte{}), PtrL: &Leaf{},
+	}
+}
+
+// TestAPointerToZeroIsPresent is the generated codec's half of the optional rule:
+// a pointer to zero comes back a pointer to zero, nil comes back nil, and both
+// codecs read what either wrote.
+func TestAPointerToZeroIsPresent(t *testing.T) {
+	for _, want := range []Trunk{{}, zeroes()} {
+		enc, err := want.MarshalZAP()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var byCodec, byReflection Trunk
+		if err := byCodec.UnmarshalZAP(enc); err != nil {
+			t.Fatal(err)
+		}
+		if err := zapenc.Unmarshal(enc, &byReflection); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []Trunk{byCodec, byReflection} {
+			for i := range reflect.TypeOf(want).NumField() {
+				w, g := reflect.ValueOf(want).Field(i), reflect.ValueOf(got).Field(i)
+				if w.Kind() != reflect.Pointer || reflect.TypeOf(want).Field(i).Name[:3] != "Ptr" {
+					continue
+				}
+				if w.IsNil() != g.IsNil() {
+					t.Errorf("%s: sent nil=%v, read nil=%v", reflect.TypeOf(want).Field(i).Name, w.IsNil(), g.IsNil())
+					continue
+				}
+				if !w.IsNil() && !g.Elem().IsZero() {
+					t.Errorf("%s: sent a pointer to zero, read %v", reflect.TypeOf(want).Field(i).Name, g.Elem())
+				}
+			}
+		}
 	}
 }

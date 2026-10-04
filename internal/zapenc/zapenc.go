@@ -24,6 +24,19 @@
 // and ObjectAt already read; a slice of structs therefore carries one complete
 // ZAP message per element.
 //
+// # A pointer is present or absent, whatever it points at
+//
+// A pointer to a scalar, a string or a []byte crosses as a list of at most one
+// element: nil is the empty list, anything else is that one element. A scalar
+// slot has no null — the zero value and an absent value are the same bytes — so
+// a pointer written into one came back nil whenever it pointed at zero. enforce
+// pointing at false arrived unset, and a cap the caller made soft was created
+// hard; a spend of 0 arrived as "unknown". A list has its own empty, so the
+// element is there or it is not.
+//
+// A pointer to a struct needs none of this: its slot holds a complete message,
+// which is never empty, so present is "the slot is not null".
+//
 // Anything else — a map, an interface, a channel, a FIXED-SIZE ARRAY — is
 // refused at encode rather than dropped. A field that silently does not cross is
 // the failure this package exists to make impossible.
@@ -149,6 +162,10 @@ const (
 	// kFixed is bytes_fixed[N] — N bytes written INLINE, aligned to 1. It has a
 	// layout and no reflective codec: see [Layout] and writeStruct's refusal.
 	kFixed
+	// kOpt is a pointer to a scalar, a string or a []byte: a list of at most one
+	// element, so absent and zero are different bytes. slice says how the one
+	// element is encoded.
+	kOpt
 )
 
 type field struct {
@@ -158,7 +175,7 @@ type field struct {
 	n      int          // kFixed: the array length
 	ptr    bool         // the Go field is a pointer to the encoded type
 	elem   *layout      // kStruct: the nested layout
-	slice  *sliceElem   // kSlice: how one element is encoded
+	slice  *sliceElem   // kSlice, kOpt: how one element is encoded
 	typ    reflect.Type // the Go type at this field, minus any pointer
 }
 
@@ -337,6 +354,10 @@ func fieldOf(t reflect.Type) (field, error) {
 	default:
 		return f, fmt.Errorf("zapenc: %s cannot cross the plane; give it a type that can", t.Kind())
 	}
+	if f.ptr && f.kind != kStruct && f.kind != kSlice && f.kind != kFixed {
+		f.slice = &sliceElem{kind: f.kind, typ: t}
+		f.kind = kOpt
+	}
 	return f, nil
 }
 
@@ -372,7 +393,7 @@ func width(k kind) int {
 		return 4
 	case kInt64, kUint64, kFloat64:
 		return 8
-	case kText, kBytes, kSlice, kStruct:
+	case kText, kBytes, kSlice, kStruct, kOpt:
 		return 8
 	}
 	return 8
@@ -410,6 +431,13 @@ func writeStruct(b *zap.Builder, lay *layout, rv reflect.Value, asRoot bool) err
 				return err
 			}
 			pends = append(pends, pending{f: f, list: off, length: n})
+		case kOpt:
+			enc, err := marshalElem(f.slice, fv)
+			if err != nil {
+				return err
+			}
+			blob := binary.LittleEndian.AppendUint32(nil, uint32(len(enc)))
+			pends = append(pends, pending{f: f, list: b.WriteBytes(append(blob, enc...)), length: 1})
 		}
 	}
 
@@ -548,24 +576,50 @@ func leInt(v uint64, n int) []byte {
 func readStruct(o zap.Object, lay *layout, rv reflect.Value) error {
 	for _, f := range lay.fields {
 		fv := rv.Field(f.index)
-		target := fv
 		if f.ptr {
-			// Allocate only once something is actually there, so an absent field
-			// reads back as nil rather than as a pointer to a zero value.
-			nv := reflect.New(f.typ)
-			target = nv.Elem()
-			if err := readField(o, f, target); err != nil {
+			// Allocated only when the wire says the value is THERE — the one
+			// element of an optional, a nested message — never when it is merely
+			// non-zero: a pointer to false is a pointer, and nil is not false.
+			if err := readPointer(o, f, fv); err != nil {
 				return err
-			}
-			if !target.IsZero() {
-				fv.Set(nv)
 			}
 			continue
 		}
-		if err := readField(o, f, target); err != nil {
+		if err := readField(o, f, fv); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func readPointer(o zap.Object, f field, fv reflect.Value) error {
+	nv := reflect.New(f.typ)
+	switch f.kind {
+	case kOpt:
+		l := o.List(f.offset)
+		if l.Len() == 0 {
+			return nil
+		}
+		if err := readElem(l, 0, f.slice, nv.Elem()); err != nil {
+			return err
+		}
+	case kStruct:
+		if len(o.Bytes(f.offset)) == 0 {
+			return nil
+		}
+		if err := readField(o, f, nv.Elem()); err != nil {
+			return err
+		}
+	default:
+		// A pointer to a list: an empty list and an absent one are both null.
+		if err := readField(o, f, nv.Elem()); err != nil {
+			return err
+		}
+		if nv.Elem().IsZero() {
+			return nil
+		}
+	}
+	fv.Set(nv)
 	return nil
 }
 
@@ -715,7 +769,7 @@ type Slot struct {
 	Width  int
 	Type   string // the .zap type: u64, text, bytes, bytes_fixed[32], list<…>, struct
 	N      int    // bytes_fixed[N]: the length. Otherwise 0.
-	Ptr    bool   // the Go field is a pointer to the encoded type
+	Ptr    bool   // the Go field is a pointer; to a scalar, text or bytes it is list<T> of at most one
 	Elem   string // list<…>: the element's .zap type
 }
 
@@ -757,7 +811,7 @@ func LayoutOf(t reflect.Type) (Shape, error) {
 			N:      f.n,
 			Ptr:    f.ptr,
 		}
-		if f.kind == kSlice && f.slice != nil {
+		if (f.kind == kSlice || f.kind == kOpt) && f.slice != nil {
 			s.Elem = spell(f.slice.kind, f.slice.n)
 			s.Type = "list<" + s.Elem + ">"
 		}

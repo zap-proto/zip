@@ -199,7 +199,7 @@ func TestInflight_RecencyIsWhenARequestEnded(t *testing.T) {
 func TestInflight_TheSweepSparesTheBusy(t *testing.T) {
 	app := warmHost(t, 1, 0, 200*time.Millisecond)
 
-	slow := inflight(t, app, "demo0", "/v1/demo0/version?sleep=1s")
+	slow := inflight(t, app, "demo0", "/v1/demo0/version?sleep=3s") // outlasts the four sweeps
 	pid := pidOf(app, "demo0")
 	for range 4 {
 		time.Sleep(250 * time.Millisecond)
