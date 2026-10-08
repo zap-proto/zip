@@ -1,0 +1,205 @@
+{
+  "components": {
+    "schemas": {
+      "Count": {
+        "properties": {
+          "everyMs": {
+            "description": "EveryMs is the pause before each tick, in milliseconds.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "n": {
+            "description": "N is how many ticks to send.",
+            "format": "uint32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n"
+        ],
+        "type": "object"
+      },
+      "Text": {
+        "properties": {
+          "text": {
+            "description": "Text is the line.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "problem-details": {
+        "description": "An RFC 9457 problem document.",
+        "properties": {
+          "code": {
+            "description": "A stable token a client can branch on, when the refusal names one.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "What was refused, for a person to read.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The HTTP status.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "The status's reason phrase.",
+            "type": "string"
+          },
+          "type": {
+            "description": "about:blank",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "status",
+          "detail"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "One JSON op, one event stream and one byte relay.",
+    "title": "Streaming",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/count": {
+      "post": {
+        "description": "Count streams n ticks as server-sent events, then [DONE], and reports how\nmany it sent in the x-sent trailer.",
+        "operationId": "post_count",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "n": 3,
+                "everyMs": 100
+              },
+              "schema": {
+                "$ref": "#/components/schemas/Count"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
+          }
+        },
+        "summary": "Count streams n ticks as server-sent events, then [DONE], and reports how many it sent in the x-sent trailer."
+      }
+    },
+    "/v1/echo": {
+      "post": {
+        "description": "Echo answers the text it was sent.",
+        "operationId": "post_echo",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "text": "hi"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/Text"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "text": "hi"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Text"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
+          }
+        },
+        "summary": "Echo answers the text it was sent."
+      }
+    },
+    "/v1/relay": {
+      "post": {
+        "description": "Relay answers the body it was sent, each chunk as it arrives, under the\ncontent type it was sent with.",
+        "operationId": "post_relay",
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/problem-details"
+                }
+              }
+            },
+            "description": "refused"
+          }
+        },
+        "summary": "Relay answers the body it was sent, each chunk as it arrives, under the content type it was sent with."
+      }
+    }
+  }
+}

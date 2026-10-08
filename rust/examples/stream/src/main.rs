@@ -2,16 +2,16 @@
 // Copyright (C) 2026, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-//! A node's info service, serving REST and ZAP from one registry.
+//! The streaming service, serving REST and ZAP from one registry.
 //!
 //! ```text
-//! info --http 127.0.0.1:8000 --zap 127.0.0.1:9653
+//! stream --http 127.0.0.1:8000 --zap 127.0.0.1:9653
 //! ```
 
 #[tokio::main]
 async fn main() {
     let mut http = Some("127.0.0.1:8000".to_string());
-    let mut zap = Some("127.0.0.1:9653".to_string());
+    let mut zap = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -24,35 +24,23 @@ async fn main() {
                 zap = args.get(i + 1).cloned();
                 i += 2;
             }
-            // What this service declared, for zipc to project. It comes from
-            // the binary, so it describes THIS build and cannot be stale.
             "--manifest" => {
-                println!("{}", info::ops::Info::manifest());
+                println!("{}", stream::Chat::manifest());
                 return;
             }
             other => {
-                eprintln!("info: unknown argument {other}");
+                eprintln!("stream: unknown argument {other}");
                 std::process::exit(2);
             }
         }
     }
-
-    let app = info::service("luxd/1.36.178", 96369);
-    println!("info: {} ops", app.ops_len());
+    let app = stream::service(stream::Chat::default());
     for (method, path) in app.routes() {
         println!("  {method} {path}");
     }
-    if let Some(a) = &http {
-        println!("info: http on {a}");
-    }
-    if let Some(a) = &zap {
-        println!("info: zap on {a}");
-    }
-    // A pod is sent SIGTERM and given 30 s before SIGKILL; the drain takes 25
-    // of them, so what is still streaming at the end is cut by us, not the kernel.
     let grace = std::time::Duration::from_secs(25);
     if let Err(e) = zip::listen(app, http.as_deref(), zap.as_deref(), zip::signal(), grace).await {
-        eprintln!("info: {e}");
+        eprintln!("stream: {e}");
         std::process::exit(1);
     }
 }

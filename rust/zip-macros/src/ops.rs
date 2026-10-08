@@ -53,7 +53,7 @@ pub fn expand(args: TokenStream, mut block: ItemImpl) -> Result<TokenStream, syn
     let stated = fragment(&about, &ops);
     let reaches: Vec<TokenStream> = ops
         .iter()
-        .flat_map(|o| [o.input.clone(), o.output.clone()])
+        .flat_map(|o| [o.input.described(), o.output.described()])
         .flatten()
         .map(|t| quote!(<#t as ::zip::Wire>::reach(&mut types);))
         .collect();
@@ -161,80 +161,165 @@ struct Op {
     verb: String,
     path: String,
     call: syn::Ident,
-    input: Option<Type>,
-    output: Option<Type>,
+    /// args is the handler's parameters after `&self`, in the order declared.
+    args: Vec<Arg>,
+    input: In,
+    output: Answer,
     doc: doc::Doc,
+}
+
+/// Arg is one parameter a handler takes.
+enum Arg {
+    /// Cx is `&zip::Cx`.
+    Cx,
+    /// Input is the op's input, by reference or by value.
+    Input { by_ref: bool },
+}
+
+/// In is what an op reads its input from.
+enum In {
+    None,
+    /// Value is a described type, bound from the body, the URL and headers.
+    Value(Box<Type>),
+    /// Body is the request body as it arrives, bound to nothing.
+    Body,
+}
+
+/// Answer is what an op answers with.
+enum Answer {
+    None,
+    /// Value is one described type, as JSON.
+    Value(Box<Type>),
+    Sse,
+    Body,
+}
+
+impl In {
+    fn described(&self) -> Option<Type> {
+        match self {
+            In::Value(t) => Some((**t).clone()),
+            _ => None,
+        }
+    }
+}
+
+impl Answer {
+    fn described(&self) -> Option<Type> {
+        match self {
+            Answer::Value(t) => Some((**t).clone()),
+            _ => None,
+        }
+    }
 }
 
 impl Op {
     fn read(verb: String, path: String, f: &syn::ImplItemFn) -> Result<Self, syn::Error> {
-        let mut input = None;
+        if f.sig.asyncness.is_none() {
+            return Err(syn::Error::new_spanned(
+                f.sig.fn_token,
+                "zip::ops: an op is an async fn; it runs on the server's tasks",
+            ));
+        }
+        let mut args = Vec::new();
+        let mut input = In::None;
         for arg in f.sig.inputs.iter() {
-            match arg {
-                FnArg::Receiver(_) => {}
-                FnArg::Typed(t) => {
-                    if input.is_some() {
+            let FnArg::Typed(t) = arg else { continue };
+            let by_ref = matches!(&*t.ty, Type::Reference(_));
+            let ty = strip(&t.ty);
+            match last(&ty).as_deref() {
+                Some("Cx") => {
+                    if !by_ref {
                         return Err(syn::Error::new_spanned(
                             arg,
-                            "zip::ops: an op takes one input; a request is one value",
+                            "zip::ops: the exchange is borrowed: `cx: &zip::Cx`",
                         ));
                     }
-                    input = Some(strip(&t.ty));
+                    args.push(Arg::Cx);
+                    continue;
+                }
+                Some("Body") => {
+                    if by_ref {
+                        return Err(syn::Error::new_spanned(
+                            arg,
+                            "zip::ops: a body is read as it arrives, so it is taken by value: `body: zip::Body`",
+                        ));
+                    }
+                    if !matches!(input, In::None) {
+                        return Err(one_input(arg));
+                    }
+                    input = In::Body;
+                }
+                _ => {
+                    if !matches!(input, In::None) {
+                        return Err(one_input(arg));
+                    }
+                    input = In::Value(Box::new(ty));
                 }
             }
+            args.push(Arg::Input { by_ref });
         }
         let output = match &f.sig.output {
-            ReturnType::Default => None,
-            ReturnType::Type(_, t) => answer(t),
+            ReturnType::Type(_, t) if last(t).as_deref() == Some("Result") => match answer(t) {
+                None => Answer::None,
+                Some(t) => match last(&t).as_deref() {
+                    Some("Sse") => Answer::Sse,
+                    Some("Body") => Answer::Body,
+                    _ => Answer::Value(Box::new(t)),
+                },
+            },
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "zip::ops: an op answers Result<T, zip::Error>; a refusal is part of every op's contract",
+                ))
+            }
         };
         Ok(Op {
             verb,
             path,
             call: f.sig.ident.clone(),
+            args,
             input,
             output,
             doc: doc::read(&f.attrs),
         })
     }
 
-    /// register is the line that puts this op on the app: decode the input the
-    /// way the document says it arrives, run the handler, write the answer.
+    /// register is the line that puts this op on the app: read the input the
+    /// way the document says it arrives, run the handler, answer.
     fn register(&self) -> TokenStream {
         let verb = self.verb.to_uppercase();
         let path = &self.path;
         let call = &self.call;
-        let run = match (&self.input, &self.output) {
-            (Some(i), Some(_)) => quote! {
-                let arg = ::zip::bind::<#i>(input)?;
-                let answer = holder.#call(&arg)?;
-                let mut out = ::std::string::String::new();
-                ::zip::Wire::write_json(&answer, &mut out);
-                Ok(::std::option::Option::Some(out))
-            },
-            (Some(i), None) => quote! {
-                let arg = ::zip::bind::<#i>(input)?;
-                holder.#call(&arg)?;
-                Ok(::std::option::Option::None)
-            },
-            (None, Some(_)) => quote! {
-                let answer = holder.#call()?;
-                let mut out = ::std::string::String::new();
-                ::zip::Wire::write_json(&answer, &mut out);
-                Ok(::std::option::Option::Some(out))
-            },
-            (None, None) => quote! {
-                holder.#call()?;
-                Ok(::std::option::Option::None)
-            },
+        let take = match &self.input {
+            In::None => quote! { ::std::mem::drop(body); },
+            In::Body => quote! { let arg = body; },
+            In::Value(i) => quote! { let arg = ::zip::bind::<#i>(&cx, body).await?; },
         };
-        let describe = match &self.input {
-            Some(i) => quote!(::std::option::Option::Some(<#i as ::zip::Wire>::describe())),
-            None => quote!(::std::option::Option::None),
+        let pass = self.args.iter().map(|a| match a {
+            Arg::Cx => quote!(&cx),
+            Arg::Input { by_ref: true } => quote!(&arg),
+            Arg::Input { by_ref: false } => quote!(arg),
+        });
+        let run = quote!(holder.#call(#(#pass),*).await?);
+        let reply = match &self.output {
+            Answer::None => quote! { #run; Ok(::zip::Reply::Empty) },
+            Answer::Value(_) => quote! { let answer = #run; ::zip::Reply::json(&answer) },
+            Answer::Sse | Answer::Body => {
+                quote! { let answer = #run; Ok(::zip::Reply::from(answer)) }
+            }
         };
         quote! {
-            app.op(#verb, #path, #describe, {
+            app.op(#verb, #path, {
                 let holder = ::std::sync::Arc::clone(&holder);
-                ::std::boxed::Box::new(move |input: &::zip::Input| { #run })
+                move |cx: ::zip::Cx, body: ::zip::Body| {
+                    let holder = ::std::sync::Arc::clone(&holder);
+                    async move {
+                        let _ = &cx;
+                        #take
+                        #reply
+                    }
+                }
             });
         }
     }
@@ -245,11 +330,11 @@ impl Op {
             .text("path", &self.path)
             .text("description", &self.doc.text)
             .text("pkg", &std::env::var("CARGO_PKG_NAME").unwrap_or_default());
-        if let Some(t) = &self.input {
-            o.text("in", &name_of(t));
+        if let Some(t) = self.input.described() {
+            o.text("in", &name_of(&t));
         }
-        if let Some(t) = &self.output {
-            o.text("out", &name_of(t));
+        if let Some(t) = self.output.described() {
+            o.text("out", &name_of(&t));
         }
         if !self.doc.example.is_empty() {
             o.raw("example", &self.doc.example);
@@ -257,7 +342,32 @@ impl Op {
         if !self.doc.response.is_empty() {
             o.raw("response", &self.doc.response);
         }
+        match self.output {
+            Answer::Sse => {
+                o.text("stream", "sse");
+            }
+            Answer::Body => {
+                o.text("stream", "bytes");
+            }
+            _ => {}
+        }
+        o.flag("raw", matches!(self.input, In::Body));
         o.finish()
+    }
+}
+
+fn one_input(arg: &FnArg) -> syn::Error {
+    syn::Error::new_spanned(
+        arg,
+        "zip::ops: an op takes one input; a request is one value",
+    )
+}
+
+/// last is the last segment of a type's path: what the macro can see of it.
+fn last(t: &Type) -> Option<String> {
+    match t {
+        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
     }
 }
 

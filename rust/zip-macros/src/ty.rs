@@ -94,7 +94,12 @@ fn wrap(fields: &str, opt: bool) -> String {
 pub fn prim(t: &Type) -> Option<&'static str> {
     let name = match t {
         Type::Reference(r) => return prim(&r.elem),
-        Type::Path(p) => p.path.segments.last()?.ident.to_string(),
+        Type::Path(p) => {
+            if any(&p.path) {
+                return Some("any");
+            }
+            p.path.segments.last()?.ident.to_string()
+        }
         _ => return None,
     };
     Some(match name.as_str() {
@@ -112,6 +117,17 @@ pub fn prim(t: &Type) -> Option<&'static str> {
         "String" | "str" => "string",
         _ => return None,
     })
+}
+
+/// any says a path is serde_json's Value: any JSON at all, which is what a
+/// relay holds when it passes a field through without reading it.
+fn any(p: &syn::Path) -> bool {
+    let names: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+    match names.as_slice() {
+        [v] => v == "Value",
+        [.., m, v] => m == "serde_json" && v == "Value",
+        [] => false,
+    }
 }
 
 fn generics(a: &PathArguments) -> Vec<&Type> {

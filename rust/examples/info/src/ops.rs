@@ -33,7 +33,7 @@ impl Info {
     ///
     /// Response: {"version": "luxd/1.36.178", "databaseVersion": "v1.4.5", "rpcProtocolVersion": 39, "gitCommit": ""}
     #[get("/node/version")]
-    fn node_version(&self) -> Result<NodeVersion, zip::Error> {
+    async fn node_version(&self) -> Result<NodeVersion, zip::Error> {
         Ok(NodeVersion {
             version: self.release.clone(),
             database_version: "v1.4.5".into(),
@@ -47,7 +47,7 @@ impl Info {
     ///
     /// Response: {"nodeID": "NodeID-7Xhw2mDxuDS44j42TCB6U5579esbSt3Lg", "nodePOP": {"publicKey": "0x8f95", "proofOfPossession": "0x86a3"}}
     #[get("/node/id")]
-    fn identity(&self) -> Result<NodeID, zip::Error> {
+    async fn identity(&self) -> Result<NodeID, zip::Error> {
         Ok(NodeID {
             node_id: "NodeID-7Xhw2mDxuDS44j42TCB6U5579esbSt3Lg".into(),
             node_pop: ProofOfPossession {
@@ -61,7 +61,7 @@ impl Info {
     ///
     /// Response: {"ip": "203.0.113.9:9651"}
     #[get("/node/ip")]
-    fn address(&self) -> Result<NodeIP, zip::Error> {
+    async fn address(&self) -> Result<NodeIP, zip::Error> {
         Ok(NodeIP {
             ip: "203.0.113.9:9651".into(),
         })
@@ -71,7 +71,7 @@ impl Info {
     ///
     /// Response: {"networkID": 96369}
     #[get("/network/id")]
-    fn network_id(&self) -> Result<NetworkID, zip::Error> {
+    async fn network_id(&self) -> Result<NetworkID, zip::Error> {
         Ok(NetworkID {
             network_id: self.network,
         })
@@ -81,7 +81,7 @@ impl Info {
     ///
     /// Response: {"networkName": "mainnet"}
     #[get("/network/name")]
-    fn network_name(&self) -> Result<NetworkName, zip::Error> {
+    async fn network_name(&self) -> Result<NetworkName, zip::Error> {
         Ok(NetworkName {
             network_name: "mainnet".into(),
         })
@@ -92,7 +92,7 @@ impl Info {
     /// Example: {"alias": "X"}
     /// Response: {"blockchainID": "2oYMBNV4eNHyqk2fjjV5nVQLDbtmNJzq5s3qs3Lo6ftnC6FByM"}
     #[get("/chain/id")]
-    fn chain_id(&self, arg: &ChainAlias) -> Result<ChainID, zip::Error> {
+    async fn chain_id(&self, arg: &ChainAlias) -> Result<ChainID, zip::Error> {
         if arg.alias.is_empty() {
             return Err(zip::Error::bad("argument 'alias' not given"));
         }
@@ -106,7 +106,7 @@ impl Info {
     /// Example: {"chain": "X"}
     /// Response: {"isBootstrapped": true}
     #[get("/chain/bootstrapped")]
-    fn bootstrapped(&self, arg: &BootstrappedArgs) -> Result<Bootstrapped, zip::Error> {
+    async fn bootstrapped(&self, arg: &BootstrappedArgs) -> Result<Bootstrapped, zip::Error> {
         if arg.chain.is_empty() {
             return Err(zip::Error::bad("argument 'chain' not given"));
         }
@@ -120,7 +120,7 @@ impl Info {
     ///
     /// Response: {"chains": [{"id": "11111111111111111111111111111111LpoYY", "name": "P-Chain", "vmID": "11111111111111111111111111111111LpoYY", "bootstrapped": true}]}
     #[get("/chains")]
-    fn chains(&self) -> Result<Chains, zip::Error> {
+    async fn chains(&self) -> Result<Chains, zip::Error> {
         Ok(Chains {
             chains: vec![Chain {
                 id: "11111111111111111111111111111111LpoYY".into(),
@@ -137,7 +137,7 @@ impl Info {
     /// Example: {"nodeIDs": []}
     /// Response: {"numPeers": "1", "peers": [{"ip": "203.0.113.9:9651", "publicIP": "203.0.113.9:9651", "nodeID": "NodeID-7Xhw2mDxuDS44j42TCB6U5579esbSt3Lg", "version": "luxd/1.36.178", "observedUptime": 99, "trackedChains": []}]}
     #[get("/peers")]
-    fn peers(&self, _arg: &PeersArgs) -> Result<Peers, zip::Error> {
+    async fn peers(&self, _arg: &PeersArgs) -> Result<Peers, zip::Error> {
         let peers = vec![Peer {
             ip: "203.0.113.9:9651".into(),
             public_ip: "203.0.113.9:9651".into(),
@@ -156,7 +156,7 @@ impl Info {
     ///
     /// Response: {"lps": {"23": {"supportWeight": "0", "objectWeight": "0", "abstainWeight": "1000000000000"}}}
     #[get("/lps")]
-    fn lps(&self) -> Result<LPs, zip::Error> {
+    async fn lps(&self) -> Result<LPs, zip::Error> {
         let mut lps = HashMap::new();
         lps.insert(
             "23".to_string(),
@@ -173,7 +173,7 @@ impl Info {
     ///
     /// Response: {"vms": {"mgj786NP7uDwBCcq6YwThhaN8FLyybkCa4zBWTQbNgmK6k9A6": ["platformvm"]}, "fxs": {"spqBHsy2UBGpjaQJezEywUy1AB98eVjJ3WQ38x1vpjsx4xPkY": "secp256k1fx"}}
     #[get("/vms")]
-    fn vms(&self) -> Result<VMs, zip::Error> {
+    async fn vms(&self) -> Result<VMs, zip::Error> {
         let mut vms = HashMap::new();
         vms.insert(
             "mgj786NP7uDwBCcq6YwThhaN8FLyybkCa4zBWTQbNgmK6k9A6".to_string(),
@@ -191,7 +191,7 @@ impl Info {
     ///
     /// Response: {"stopVertexID": "jrGWDh5Po9FMj54depyunNixpia5PN4aAYxfmNzU8n752Rjga", "epochDuration": "300000000000"}
     #[get("/upgrades")]
-    fn upgrades(&self) -> Result<Upgrades, zip::Error> {
+    async fn upgrades(&self) -> Result<Upgrades, zip::Error> {
         Ok(Upgrades {
             stop_vertex_id: "jrGWDh5Po9FMj54depyunNixpia5PN4aAYxfmNzU8n752Rjga".into(),
             epoch_duration: Uint64(300_000_000_000),
@@ -202,7 +202,7 @@ impl Info {
     ///
     /// Response: {"rewardingStakePercentage": "100.0000", "weightedAveragePercentage": "99.9999"}
     #[get("/uptime")]
-    fn uptime(&self) -> Result<Uptime, zip::Error> {
+    async fn uptime(&self) -> Result<Uptime, zip::Error> {
         Ok(Uptime {
             rewarding_stake_percentage: "100.0000".into(),
             weighted_average_percentage: "99.9999".into(),
@@ -213,7 +213,7 @@ impl Info {
     ///
     /// Response: {"txFee": "1000000", "createAssetTxFee": "10000000", "createChainTxFee": "1000000000"}
     #[get("/fees")]
-    fn fees(&self) -> Result<Fees, zip::Error> {
+    async fn fees(&self) -> Result<Fees, zip::Error> {
         Ok(Fees {
             tx_fee: Uint64(1_000_000),
             create_asset_tx_fee: Uint64(10_000_000),

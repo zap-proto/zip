@@ -10,16 +10,21 @@
 //! names and prose, once, where the type is declared, and everything that
 //! refers to the type refers to that.
 //!
-//! It emits two readers of one description. The `describe` a running service
-//! binds a request with, and the fragment `zipc` projects — both from this one
-//! pass, so what the document says a field is called is what the binder reads
-//! it under.
+//! The bytes are serde's. A field's wire name is the one serde reads it under —
+//! its `#[serde(rename)]`, else the struct's `rename_all` applied to it, else
+//! its own name — so the derive reads those attributes rather than asking for
+//! the name a second time, and what the document says a field is called is what
+//! the decoder reads it under. What serde cannot be told, and so this cannot
+//! describe — a flattened field, a name that differs by direction — is refused
+//! at compile time rather than published wrong.
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, Type};
 
 use crate::attr::Attrs;
+use crate::serde::{self as sd, Container};
 use crate::{doc, frag, ty};
 
 pub fn derive(input: DeriveInput) -> Result<TokenStream, syn::Error> {
@@ -27,6 +32,7 @@ pub fn derive(input: DeriveInput) -> Result<TokenStream, syn::Error> {
     let id = name.to_string();
     let own = Attrs::read(&input.attrs)?;
     let prose = doc::read(&input.attrs);
+    let container = Container::read(&input.attrs)?;
 
     let Data::Struct(s) = &input.data else {
         return Err(syn::Error::new_spanned(
@@ -37,10 +43,16 @@ pub fn derive(input: DeriveInput) -> Result<TokenStream, syn::Error> {
 
     match &s.fields {
         Fields::Named(named) => {
+            if container.transparent {
+                return Err(syn::Error::new_spanned(
+                    &input.ident,
+                    "zip::Wire: a transparent struct is one value; write it as a newtype",
+                ));
+            }
             let fields: Vec<Field> = named
                 .named
                 .iter()
-                .map(Field::read)
+                .map(|f| Field::read(f, &container))
                 .collect::<Result<_, _>>()?;
             Ok(shape(
                 &name,
@@ -51,7 +63,7 @@ pub fn derive(input: DeriveInput) -> Result<TokenStream, syn::Error> {
         }
         Fields::Unnamed(un) if un.unnamed.len() == 1 => {
             let inner = &un.unnamed[0].ty;
-            Ok(newtype(&name, &id, &value(&id, &own, inner), inner, &own))
+            Ok(newtype(&name, &id, &value(&id, &own, inner), &own))
         }
         _ => Err(syn::Error::new_spanned(
             &input.ident,
@@ -73,13 +85,29 @@ struct Field {
 }
 
 impl Field {
-    fn read(f: &syn::Field) -> Result<Self, syn::Error> {
+    fn read(f: &syn::Field, container: &Container) -> Result<Self, syn::Error> {
         let a = Attrs::read(&f.attrs)?;
         let name = f.ident.clone().expect("named field");
-        let json = if a.skip {
+        if a.json.is_some() {
+            return Err(syn::Error::new_spanned(
+                f,
+                "zip::Wire: a field's wire name is serde's — #[serde(rename = \"...\")]",
+            ));
+        }
+        let serde = sd::Field::read(&f.attrs)?;
+        if serde.flatten {
+            return Err(syn::Error::new_spanned(
+                f,
+                "zip::Wire: a flattened field has no name of its own to describe; name the struct it holds as a field",
+            ));
+        }
+        bytes(f, &f.ty, serde.with.as_deref())?;
+        let json = if serde.skip {
             "-".to_string()
+        } else if let Some(n) = serde.rename {
+            n
         } else {
-            a.json.clone().unwrap_or_else(|| name.to_string())
+            sd::case(&container.rename_all, &name.unraw().to_string())
         };
         Ok(Field {
             json,
@@ -91,6 +119,37 @@ impl Field {
             ty: f.ty.clone(),
             name,
         })
+    }
+}
+
+/// bytes refuses a byte field serde would write as an array of numbers. The
+/// document says a byte field is base64 in a string, which is what Go writes,
+/// so a `Vec<u8>` carries `#[serde(with = "zip::base64")]`, and one inside a
+/// container — which that attribute cannot reach — is refused.
+fn bytes(f: &syn::Field, t: &Type, with: Option<&str>) -> Result<(), syn::Error> {
+    if let Shape::Prim("bytes") = shape_of(t) {
+        if with == Some("zip::base64") {
+            return Ok(());
+        }
+        return Err(syn::Error::new_spanned(
+            f,
+            "zip::Wire: a byte field rides JSON as base64 — #[serde(with = \"zip::base64\")]",
+        ));
+    }
+    if holds_bytes(t) {
+        return Err(syn::Error::new_spanned(
+            f,
+            "zip::Wire: bytes inside a container have no base64 spelling here; make them a field of their own type",
+        ));
+    }
+    Ok(())
+}
+
+fn holds_bytes(t: &Type) -> bool {
+    match shape_of(t) {
+        Shape::Prim("bytes") => true,
+        Shape::Opt(inner) | Shape::List(inner) | Shape::Map(inner) => holds_bytes(&inner),
+        _ => false,
     }
 }
 
@@ -140,8 +199,8 @@ fn value(id: &str, a: &Attrs, inner: &Type) -> String {
     o.finish()
 }
 
-/// shape is the impl for a struct: the description a binder reads, the entry a
-/// manifest carries, and the JSON the wire binds.
+/// shape is the impl for a struct: the description a binder reads and the
+/// entry a manifest carries.
 fn shape(name: &syn::Ident, id: &str, stated: &str, fields: &[Field]) -> TokenStream {
     let descs = fields.iter().map(|f| {
         let n = f.name.to_string();
@@ -153,30 +212,6 @@ fn shape(name: &syn::Ident, id: &str, stated: &str, fields: &[Field]) -> TokenSt
         quote! {
             ::zip::FieldDesc { name: #n, json: #j, url: #u, header: #h, required: #req, scalar: #scalar }
         }
-    });
-
-    let writes = fields
-        .iter()
-        .filter(|f| f.json != "-")
-        .enumerate()
-        .map(|(i, f)| {
-            let j = &f.json;
-            let at = &f.name;
-            let lead = if i == 0 { "\"" } else { ",\"" };
-            let key = format!("{lead}{j}\":");
-            let w = write_of(&f.ty, quote!(&self.#at));
-            quote! { out.push_str(#key); #w; }
-        });
-
-    let reads = fields.iter().map(|f| {
-        let at = &f.name;
-        if f.json == "-" {
-            let d = default_of(&f.ty);
-            return quote! { #at: #d };
-        }
-        let j = &f.json;
-        let r = read_of(&f.ty, quote!(v.get(#j)));
-        quote! { #at: #r }
     });
 
     let reaches = fields
@@ -202,62 +237,50 @@ fn shape(name: &syn::Ident, id: &str, stated: &str, fields: &[Field]) -> TokenSt
                 into.push((#id, #stated));
                 #(#reaches)*
             }
-            fn write_json(&self, out: &mut ::std::string::String) {
-                out.push('{');
-                #(#writes)*
-                out.push('}');
-            }
-            fn read_json(v: &::zip::Json) -> ::std::result::Result<Self, ::zip::Error> {
-                Ok(#name { #(#reads),* })
-            }
         }
     }
 }
 
-/// newtype is the impl for a value type. `text` carries it as one word, which
-/// is what a quoted decimal is and what a URL can hold.
-fn newtype(name: &syn::Ident, id: &str, stated: &str, inner: &Type, a: &Attrs) -> TokenStream {
-    let says = quote! {
-        fn stated() -> &'static str { #stated }
-        fn reach(into: &mut ::std::vec::Vec<(&'static str, &'static str)>) {
-            if into.iter().all(|(k, _)| *k != #id) {
-                into.push((#id, #stated));
+/// newtype is the impl for a value type. A `text` one is carried as one word —
+/// what a quoted decimal is, and what a URL can hold — so its serde impls are
+/// written here, from its Display and FromStr: that is what `text` means, and
+/// serde has no derive that says it. Any other newtype is serde's, which
+/// carries a newtype as the value it holds.
+fn newtype(name: &syn::Ident, id: &str, stated: &str, a: &Attrs) -> TokenStream {
+    let a_text = a.text;
+    let wire = quote! {
+        impl ::zip::Wire for #name {
+            fn describe() -> &'static ::zip::TypeDesc {
+                static DESC: ::zip::TypeDesc = ::zip::TypeDesc { id: #id, text: #a_text, fields: &[] };
+                &DESC
+            }
+            fn stated() -> &'static str { #stated }
+            fn reach(into: &mut ::std::vec::Vec<(&'static str, &'static str)>) {
+                if into.iter().all(|(k, _)| *k != #id) {
+                    into.push((#id, #stated));
+                }
             }
         }
     };
-    if a.text {
-        return quote! {
-            impl ::zip::Wire for #name {
-                fn describe() -> &'static ::zip::TypeDesc {
-                    static DESC: ::zip::TypeDesc = ::zip::TypeDesc { id: #id, text: true, fields: &[] };
-                    &DESC
-                }
-                #says
-                fn write_json(&self, out: &mut ::std::string::String) {
-                    ::zip::json::write_str(out, &::std::string::ToString::to_string(&self.0));
-                }
-                fn read_json(v: &::zip::Json) -> ::std::result::Result<Self, ::zip::Error> {
-                    let s = v.text()?;
-                    match ::std::str::FromStr::from_str(s) {
-                        Ok(n) => Ok(#name(n)),
-                        Err(_) => Err(::zip::Error::bad(concat!("not a ", #id, ": "))),
-                    }
-                }
-            }
-        };
+    if !a.text {
+        return wire;
     }
-    let w = write_of(inner, quote!(&self.0));
-    let r = read_of(inner, quote!(::std::option::Option::Some(v)));
     quote! {
-        impl ::zip::Wire for #name {
-            fn describe() -> &'static ::zip::TypeDesc {
-                static DESC: ::zip::TypeDesc = ::zip::TypeDesc { id: #id, text: false, fields: &[] };
-                &DESC
+        #wire
+        impl ::zip::serde::Serialize for #name {
+            fn serialize<S: ::zip::serde::Serializer>(&self, s: S) -> ::std::result::Result<S::Ok, S::Error> {
+                s.collect_str(&self.0)
             }
-            #says
-            fn write_json(&self, out: &mut ::std::string::String) { #w; }
-            fn read_json(v: &::zip::Json) -> ::std::result::Result<Self, ::zip::Error> {
-                Ok(#name(#r))
+        }
+        impl<'de> ::zip::serde::Deserialize<'de> for #name {
+            fn deserialize<D: ::zip::serde::Deserializer<'de>>(d: D) -> ::std::result::Result<Self, D::Error> {
+                let text = <::std::string::String as ::zip::serde::Deserialize>::deserialize(d)?;
+                match ::std::str::FromStr::from_str(&text) {
+                    Ok(v) => Ok(#name(v)),
+                    Err(_) => Err(<D::Error as ::zip::serde::de::Error>::custom(
+                        ::std::format!("not a {}: {:?}", #id, text),
+                    )),
+                }
             }
         }
     }
@@ -272,6 +295,7 @@ fn scalar_of(t: &Type) -> TokenStream {
             "bool" => quote!(::zip::Scalar::Bool),
             "f32" | "f64" => quote!(::zip::Scalar::Number),
             "bytes" => quote!(::zip::Scalar::Text),
+            "any" => quote!(::zip::Scalar::Body),
             _ => quote!(::zip::Scalar::Number),
         },
         Shape::Opt(inner) => scalar_of(&inner),
@@ -327,6 +351,7 @@ fn shape_of(t: &Type) -> Shape {
             };
             match (name.as_str(), args.len()) {
                 ("Option", 1) => Shape::Opt(args[0].clone()),
+                ("Box", 1) | ("Arc", 1) | ("Rc", 1) => shape_of(&args[0]),
                 ("Vec", 1) | ("VecDeque", 1) => {
                     if ty::prim(&args[0]) == Some("u8") {
                         Shape::Prim("bytes")
@@ -342,144 +367,5 @@ fn shape_of(t: &Type) -> Shape {
             }
         }
         _ => Shape::Other,
-    }
-}
-
-/// write_of is the JSON one value writes.
-///
-/// Every case binds the value to a name first. A generated expression is
-/// TOKENS, and `&self.chains` followed by `.iter()` is `&(self.chains.iter())`
-/// — a reference to an iterator, which is not one. A binding has no precedence
-/// to get wrong.
-fn write_of(t: &Type, at: TokenStream) -> TokenStream {
-    match shape_of(t) {
-        Shape::Prim("string") => quote!({ let v = #at; ::zip::json::write_str(out, v); }),
-        Shape::Prim("bool") => {
-            quote!({ let v = #at; out.push_str(if *v { "true" } else { "false" }); })
-        }
-        Shape::Prim("bytes") => quote!({ let v = #at; ::zip::json::write_bytes(out, v); }),
-        Shape::Prim("f32") | Shape::Prim("f64") => {
-            quote!({ let v = #at; ::zip::json::write_float(out, *v as f64); })
-        }
-        Shape::Prim(_) => {
-            quote!({ let v = #at; out.push_str(&::std::string::ToString::to_string(v)); })
-        }
-        Shape::Opt(inner) => {
-            let w = write_of(&inner, quote!(it));
-            quote! {
-                {
-                    let v = #at;
-                    match v {
-                        ::std::option::Option::Some(it) => { #w; }
-                        ::std::option::Option::None => out.push_str("null"),
-                    }
-                }
-            }
-        }
-        Shape::List(inner) => {
-            let w = write_of(&inner, quote!(it));
-            quote! {
-                {
-                    let v = #at;
-                    out.push('[');
-                    for (i, it) in v.iter().enumerate() {
-                        if i > 0 { out.push(','); }
-                        #w;
-                    }
-                    out.push(']');
-                }
-            }
-        }
-        Shape::Map(inner) => {
-            let w = write_of(&inner, quote!(it));
-            quote! {
-                {
-                    let v = #at;
-                    // Sorted, because a map has no order and a document that
-                    // changes shape between two identical answers is one nothing
-                    // can diff.
-                    let mut keys: ::std::vec::Vec<_> = v.keys().collect();
-                    keys.sort();
-                    out.push('{');
-                    for (i, k) in keys.into_iter().enumerate() {
-                        if i > 0 { out.push(','); }
-                        ::zip::json::write_str(out, k);
-                        out.push(':');
-                        let it = &v[k];
-                        #w;
-                    }
-                    out.push('}');
-                }
-            }
-        }
-        _ => quote!({ let v = #at; ::zip::Wire::write_json(v, out); }),
-    }
-}
-
-/// read_of is one value, out of the JSON that arrived. `from` is an
-/// Option<&Json>: a field the document did not carry reads as its zero, which
-/// is what a decoder does everywhere else.
-fn read_of(t: &Type, from: TokenStream) -> TokenStream {
-    match shape_of(t) {
-        Shape::Prim("string") => quote!(::zip::json::as_text(#from)?),
-        Shape::Prim("bool") => quote!(::zip::json::as_bool(#from)?),
-        Shape::Prim("bytes") => quote!(::zip::json::as_bytes(#from)?),
-        Shape::Prim(p) => {
-            let cast = format_ident!("{}", num_of(p));
-            quote!(::zip::json::as_number(#from)? as #cast)
-        }
-        Shape::Opt(inner) => {
-            let r = read_of(&inner, quote!(::std::option::Option::Some(one)));
-            quote! {
-                match #from {
-                    ::std::option::Option::Some(one) if !one.is_null() => ::std::option::Option::Some(#r),
-                    _ => ::std::option::Option::None,
-                }
-            }
-        }
-        Shape::List(inner) => {
-            let r = read_of(&inner, quote!(::std::option::Option::Some(one)));
-            quote! {
-                {
-                    let mut got = ::std::vec::Vec::new();
-                    for one in ::zip::json::as_list(#from)? { got.push(#r); }
-                    got
-                }
-            }
-        }
-        Shape::Map(inner) => {
-            let r = read_of(&inner, quote!(::std::option::Option::Some(one)));
-            quote! {
-                {
-                    let mut got = ::std::collections::HashMap::new();
-                    for (k, one) in ::zip::json::as_map(#from)? { got.insert(k.clone(), #r); }
-                    got
-                }
-            }
-        }
-        _ => quote!(::zip::json::as_wire(#from)?),
-    }
-}
-
-/// default_of is the zero a field the wire does not carry starts at.
-fn default_of(t: &Type) -> TokenStream {
-    match shape_of(t) {
-        Shape::Opt(_) => quote!(::std::option::Option::None),
-        _ => quote!(::std::default::Default::default()),
-    }
-}
-
-fn num_of(p: &str) -> &'static str {
-    match p {
-        "i8" => "i8",
-        "i16" => "i16",
-        "i32" => "i32",
-        "i64" => "i64",
-        "u8" => "u8",
-        "u16" => "u16",
-        "u32" => "u32",
-        "f32" => "f32",
-        "f64" => "f64",
-        _ => "u64",
     }
 }

@@ -10,25 +10,41 @@
 //! above it. Nothing is declared twice.
 //!
 //! ```ignore
-//! #[zip::ops(app = "info", title = "Lux node info", version = "1.0.0")]
-//! impl Info {
-//!     /// Bootstrapped reports whether a chain has finished bootstrapping on this node.
+//! #[zip::ops(app = "chat", title = "Chat", version = "1.0.0")]
+//! impl Chat {
+//!     /// Echo answers the text it was sent.
 //!     ///
-//!     /// Example: {"chain": "X"}
-//!     /// Response: {"isBootstrapped": true}
-//!     #[get("/chain/bootstrapped")]
-//!     fn bootstrapped(&self, arg: &BootstrappedArgs) -> Result<Bootstrapped, zip::Error> {
-//!         Ok(Bootstrapped { is_bootstrapped: true })
+//!     /// Example: {"text": "hi"}
+//!     /// Response: {"text": "hi"}
+//!     #[post("/v1/echo")]
+//!     async fn echo(&self, arg: &Ping) -> Result<Pong, zip::Error> {
+//!         Ok(Pong { text: arg.text.clone() })
+//!     }
+//!
+//!     /// Complete streams a completion, one event a token.
+//!     #[post("/v1/complete")]
+//!     async fn complete(&self, cx: &zip::Cx, arg: &Prompt) -> Result<zip::Sse, zip::Error> {
+//!         let tokens = cx.trailer("x-tokens")?;
+//!         Ok(zip::Sse::new(self.model.stream(arg, tokens)).keep(Duration::from_secs(15)))
 //!     }
 //! }
 //! ```
+//!
+//! An op is an `async fn` taking `&self`, optionally `&zip::Cx` (the request's
+//! headers, and the answer's status, headers and trailers), and at most one
+//! input: a type deriving [Wire] and serde's `Deserialize`, bound from the body,
+//! the query, the path and the headers it names, or a [Body], the request body
+//! as it arrives. It answers `Result<T, zip::Error>` where T is a type deriving
+//! [Wire] and `Serialize` (one JSON value), `()` (204), [Sse] (an event stream)
+//! or [Body] (a byte stream).
 //!
 //! # Where the documents come from
 //!
 //! The macro writes what it read — the ops, the types, the prose — as the crate
 //! compiles. `zipc` projects that description into the OpenAPI document, the MCP
-//! tool list, the CLI and the .zap schema, and `zapgen` compiles the schema into
-//! the zero-copy accessors this crate's own wire is built from.
+//! tool list, the CLI and the .zap schema. A streamed answer is part of what it
+//! read: the manifest says `"stream": "sse"` or `"bytes"`, and the document
+//! publishes `text/event-stream` or `application/octet-stream` for it.
 //!
 //! The projector is one program for all three languages, which is the whole
 //! point: an operation carries one id, one summary and one schema whether it was
@@ -37,25 +53,30 @@
 //! are Rust here, all the way down. No Go runs in a service built with this.
 
 mod app;
+mod bind;
+mod body;
+mod cx;
 mod desc;
 mod error;
-pub mod json;
 
+pub mod base64;
 pub mod http;
+pub mod zap;
 pub mod zaphttp;
 
-// zap is the ZAP wire and wire is the ZAP-HTTP frames, both generated from
-// wire.zap by zapgen. They are the only wire code here, and none of it is
-// written by hand.
-include!(concat!(env!("OUT_DIR"), "/generated.rs"));
-
-pub use app::{bind, Answer, App, Call, Input, Op};
+pub use app::{App, Op};
+pub use bind::{bind, value, MAX_BODY};
+pub use body::{Body, Event, Reply, Sse};
+pub use cx::{Cx, Trailer};
 pub use desc::{FieldDesc, Scalar, TypeDesc, Wire};
 pub use error::Error;
-pub use json::Json;
 
 /// The two macros. `ops` declares a service; `Wire` makes a type say what it is.
 pub use zip_macros::{ops, Wire};
+
+/// serde is the serde zip reads and writes with, so generated code names one
+/// serde whatever a service depends on.
+pub use serde;
 
 /// manifest is this service's whole description, as one document.
 ///
@@ -83,33 +104,73 @@ pub fn manifest(ops: &str, types: &[(&str, &str)]) -> String {
     out
 }
 
-/// listen serves an app on every address given, and does not return.
+/// listen serves an app on every address given until `shutdown` resolves,
+/// then drains both doors for at most `grace` and returns.
 ///
 /// One verb, whatever the transport: an address decides which door it is, so a
 /// binary states all of its listeners the same way and a deployment changes one
 /// without touching the service.
 ///
 /// ```text
-/// info serve --zap :9653 --http :8000
+/// info --zap :9653 --http :8000
 /// ```
-pub fn listen(app: App, http: Option<&str>, zap: Option<&str>) -> std::io::Result<()> {
+pub async fn listen<F>(
+    app: App,
+    http: Option<&str>,
+    zap: Option<&str>,
+    shutdown: F,
+    grace: std::time::Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let app = std::sync::Arc::new(app);
-    let mut doors = Vec::new();
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut doors = tokio::task::JoinSet::new();
+    let door = |mut stopped: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = stopped.wait_for(|s| *s).await;
+    };
     if let Some(addr) = zap {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
         let app = std::sync::Arc::clone(&app);
-        let addr = addr.to_string();
-        doors.push(std::thread::spawn(move || zaphttp::listen(app, &addr)));
+        let stopped = door(stopped.clone());
+        doors.spawn(async move { zaphttp::serve(app, listener, stopped, grace).await });
     }
     if let Some(addr) = http {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
         let app = std::sync::Arc::clone(&app);
-        let addr = addr.to_string();
-        doors.push(std::thread::spawn(move || http::listen(app, &addr)));
+        let stopped = door(stopped.clone());
+        doors.spawn(async move { http::serve(app, listener, stopped, grace).await });
     }
-    for door in doors {
-        match door.join() {
-            Ok(r) => r?,
-            Err(_) => return Err(std::io::Error::other("a door stopped")),
-        }
+    shutdown.await;
+    let _ = stop.send(true);
+    while let Some(done) = doors.join_next().await {
+        done.map_err(std::io::Error::other)??;
     }
     Ok(())
+}
+
+/// signal resolves when the process is asked to stop: SIGINT or SIGTERM, the
+/// second being what a pod is sent.
+pub async fn signal() {
+    let interrupt = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(t) => t,
+                Err(_) => {
+                    let _ = interrupt.await;
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = interrupt => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = interrupt.await;
+    }
 }

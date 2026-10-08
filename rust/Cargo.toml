@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["zip", "zip-macros", "examples/info"]
+members = ["zip", "zip-macros", "examples/info", "examples/stream"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "BSD-3-Clause-Eco"

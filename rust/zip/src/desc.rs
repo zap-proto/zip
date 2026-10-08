@@ -65,13 +65,14 @@ pub enum Scalar {
     Body,
 }
 
-/// Wire is a type that says what it is and carries itself over JSON.
+/// Wire is a type that says what it is.
 ///
-/// Two halves of one fact. `describe` is what every projection reads — the
-/// field names, the URL names, the prose — and `write_json`/`read_json` are the
-/// bytes those names describe. They are derived together from one declaration,
-/// which is what stops a document describing a field the decoder reads under
-/// another name.
+/// `describe` is what the binder reads — the field names, the URL names, the
+/// headers — and `stated` is the same description as one manifest entry, for
+/// the projector. The bytes themselves are serde's: the derive reads the
+/// `#[serde(rename)]`, `rename_all` and `skip` a type already carries, so the
+/// name a document publishes for a field is the name serde reads it under, and
+/// there is one place either is written down.
 pub trait Wire: Sized {
     fn describe() -> &'static TypeDesc;
 
@@ -87,7 +88,4 @@ pub trait Wire: Sized {
     /// A macro sees only the item it is on, so the graph is walked by the types
     /// themselves: each one claims its entry, then asks the types of its fields.
     fn reach(into: &mut Vec<(&'static str, &'static str)>);
-
-    fn write_json(&self, out: &mut String);
-    fn read_json(v: &crate::Json) -> Result<Self, crate::Error>;
 }

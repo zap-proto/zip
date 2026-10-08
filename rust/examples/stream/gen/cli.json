@@ -1,0 +1,66 @@
+[
+  {
+    "Service": "count",
+    "Name": "create",
+    "OperationID": "post_count",
+    "Summary": "Count streams n ticks as server-sent events, then [DONE], and reports how many it sent in the x-sent trailer.",
+    "Description": "Count streams n ticks as server-sent events, then [DONE], and reports how\nmany it sent in the x-sent trailer.",
+    "Method": "POST",
+    "Path": "/v1/count",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "n",
+        "Field": "n",
+        "Type": "integer",
+        "Help": "N is how many ticks to send.",
+        "Required": true
+      },
+      {
+        "Name": "every-ms",
+        "Field": "everyMs",
+        "Type": "integer",
+        "Help": "EveryMs is the pause before each tick, in milliseconds.",
+        "Required": false
+      }
+    ],
+    "Example": {
+      "n": 3,
+      "everyMs": 100
+    }
+  },
+  {
+    "Service": "echo",
+    "Name": "create",
+    "OperationID": "post_echo",
+    "Summary": "Echo answers the text it was sent.",
+    "Description": "Echo answers the text it was sent.",
+    "Method": "POST",
+    "Path": "/v1/echo",
+    "Args": [],
+    "Flags": [
+      {
+        "Name": "text",
+        "Field": "text",
+        "Type": "string",
+        "Help": "Text is the line.",
+        "Required": true
+      }
+    ],
+    "Example": {
+      "text": "hi"
+    }
+  },
+  {
+    "Service": "relay",
+    "Name": "create",
+    "OperationID": "post_relay",
+    "Summary": "Relay answers the body it was sent, each chunk as it arrives, under the content type it was sent with.",
+    "Description": "Relay answers the body it was sent, each chunk as it arrives, under the\ncontent type it was sent with.",
+    "Method": "POST",
+    "Path": "/v1/relay",
+    "Args": [],
+    "Flags": null,
+    "Example": null
+  }
+]

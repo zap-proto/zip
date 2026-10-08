@@ -7,3 +7,15 @@ description = "A ZAP-native web framework: one registration, every projection."
 
 [dependencies]
 zip-macros = { path = "../zip-macros" }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http-body-util = "0.1"
+hyper = { version = "1.12", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.21", features = ["server", "server-auto", "server-graceful", "http1", "http2", "tokio"] }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros", "io-util"] }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.53", features = ["test-util"] }

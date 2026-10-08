@@ -1,0 +1,51 @@
+[
+  {
+    "annotations": {},
+    "description": "Count streams n ticks as server-sent events, then [DONE], and reports how\nmany it sent in the x-sent trailer.",
+    "inputSchema": {
+      "properties": {
+        "everyMs": {
+          "description": "EveryMs is the pause before each tick, in milliseconds.",
+          "format": "uint64",
+          "type": "integer"
+        },
+        "n": {
+          "description": "N is how many ticks to send.",
+          "format": "uint32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "n"
+      ],
+      "type": "object"
+    },
+    "name": "post_count"
+  },
+  {
+    "annotations": {},
+    "description": "Echo answers the text it was sent.",
+    "inputSchema": {
+      "properties": {
+        "text": {
+          "description": "Text is the line.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "post_echo"
+  },
+  {
+    "annotations": {},
+    "description": "Relay answers the body it was sent, each chunk as it arrives, under the\ncontent type it was sent with.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "post_relay"
+  }
+]

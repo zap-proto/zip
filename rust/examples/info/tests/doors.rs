@@ -11,34 +11,32 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn doors() -> (String, String) {
-    let app = Arc::new(info::service("luxd/1.36.178", 96369));
     let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let zap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let (ha, za) = (
+    let addrs = (
         http.local_addr().unwrap().to_string(),
         zap.local_addr().unwrap().to_string(),
     );
-    drop(http);
-    drop(zap);
-    for (addr, over) in [(ha.clone(), true), (za.clone(), false)] {
-        let app = Arc::clone(&app);
-        std::thread::spawn(move || {
-            if over {
-                let _ = zip::http::listen(app, &addr);
-            } else {
-                let _ = zip::zaphttp::listen(app, &addr);
-            }
+    http.set_nonblocking(true).unwrap();
+    zap.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let app = Arc::new(info::service("luxd/1.36.178", 96369));
+            let http = tokio::net::TcpListener::from_std(http).unwrap();
+            let zap = tokio::net::TcpListener::from_std(zap).unwrap();
+            let grace = Duration::from_secs(1);
+            let never = std::future::pending::<()>;
+            let _ = tokio::join!(
+                zip::http::serve(Arc::clone(&app), http, never(), grace),
+                zip::zaphttp::serve(app, zap, never(), grace),
+            );
         });
-    }
-    for _ in 0..200 {
-        if TcpStream::connect(&ha).is_ok() && TcpStream::connect(&za).is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    (ha, za)
+    });
+    addrs
 }
 
 /// over_http asks one question in text and answers with the body.
@@ -56,25 +54,24 @@ fn over_http(addr: &str, target: &str) -> (u16, String) {
 /// over_zap asks the same question in ZAP frames and answers with the body.
 fn over_zap(addr: &str, target: &str) -> (u16, String) {
     let mut c = TcpStream::connect(addr).unwrap();
-    let frame = zip::zaphttp::ask("GET", target, &[]);
-    c.write_all(&(frame.len() as u32).to_le_bytes()).unwrap();
+    let frame = zip::zap::request("GET", target, &[], &[]);
+    c.write_all(&(frame.len() as u32).to_be_bytes()).unwrap();
     c.write_all(&frame).unwrap();
     let mut head = [0u8; 4];
     c.read_exact(&mut head).unwrap();
-    let mut body = vec![0u8; u32::from_le_bytes(head) as usize];
+    let mut body = vec![0u8; u32::from_be_bytes(head) as usize];
     c.read_exact(&mut body).unwrap();
 
     // The answer is a ZAP message: the magic is there, the flags say what kind
     // of frame it is, and the fields are read where they lie.
     assert_eq!(&body[0..4], b"ZAP\0", "the answer is not a ZAP message");
-    let flags = u16::from_le_bytes([body[6], body[7]]);
     assert_eq!(
-        flags >> 8,
-        zip::zaphttp::FRAME_RESPONSE,
+        zip::zap::kind(&body),
+        Some(zip::zap::FRAME_RESPONSE),
         "not a response frame"
     );
 
-    let r = zip::wire::Response::wrap(&body).unwrap();
+    let r = zip::zap::Response::wrap(&body).unwrap();
     (r.status(), String::from_utf8(r.body().to_vec()).unwrap())
 }
 
@@ -156,4 +153,17 @@ fn the_document_is_served() {
 fn an_unknown_address_is_refused() {
     let (http, _) = doors();
     assert_eq!(over_http(&http, "/nope").0, 404);
+}
+
+/// The documents beside the source were projected from THIS declaration: the
+/// manifest the crate compiles in is the one zipc was given.
+#[test]
+fn the_documents_are_current() {
+    let written =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/gen/manifest.json")).unwrap();
+    assert_eq!(
+        written.trim_end(),
+        info::ops::Info::manifest(),
+        "the declaration changed since `make gen`"
+    );
 }

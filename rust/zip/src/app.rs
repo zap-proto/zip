@@ -2,50 +2,35 @@
 // Copyright (C) 2026, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-//! The app: a typed-op registry, and the two doors onto it.
+//! The app: a typed-op registry, and the one path from a request to an answer.
 //!
 //! An op is registered once. What answers a REST request and what answers a ZAP
-//! frame are the same closure, reached the same way — decode, run, write — so a
-//! browser and a sibling service are talking to one handler and not to two
+//! frame are the same future, reached the same way — route, bind, run, answer —
+//! so a browser and a sibling service are talking to one handler and not to two
 //! spellings of one.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex};
 
-use crate::{Error, FieldDesc, Json, Scalar, TypeDesc, Wire};
+use bytes::Bytes;
+use futures_util::future::BoxFuture;
+use futures_util::stream::BoxStream;
+use futures_util::FutureExt;
+use hyper::header::{self, HeaderMap, HeaderValue};
 
-/// Input is one request, before it is a value: what the URL carried, what the
-/// headers said, and the bytes of the body.
-pub struct Input {
-    pub method: String,
-    pub path: String,
-    pub query: Vec<(String, String)>,
-    pub params: Vec<(String, String)>,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
+use crate::cx::{lock, Out};
+use crate::{Body, Cx, Error, Reply};
 
-impl Input {
-    /// header reads one request header, case-insensitively as HTTP names are.
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-/// Call is what an op does: a request in, the answer's JSON out. None is an op
-/// that answers nothing, which is a 204.
-pub type Call = Box<dyn Fn(&Input) -> Result<Option<String>, Error> + Send + Sync>;
+type Call = Box<dyn Fn(Cx, Body) -> BoxFuture<'static, Result<Reply, Error>> + Send + Sync>;
 
 /// Op is one registered operation.
 pub struct Op {
     pub method: &'static str,
     pub path: &'static str,
-    /// input is the description of what this op takes, or None for an op that
-    /// takes nothing.
-    pub input: Option<&'static TypeDesc>,
-    pub call: Call,
+    call: Call,
     segments: Vec<Segment>,
 }
 
@@ -63,6 +48,54 @@ pub struct App {
     pub description: &'static str,
     ops: Vec<Op>,
     files: HashMap<String, (&'static str, &'static str)>,
+}
+
+/// Asked is one request as a door read it.
+pub(crate) struct Asked {
+    pub method: String,
+    pub target: String,
+    pub headers: HeaderMap,
+    pub peer: Option<SocketAddr>,
+    pub body: Body,
+}
+
+/// Answer is what a door writes back: a head, then a body that is either in
+/// hand or still being produced, then — when the op declared any — trailers.
+pub(crate) struct Answer {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub payload: Payload,
+    /// trailers is the handler's state when it declared a trailer, read once
+    /// the payload has ended.
+    pub trailers: Option<Arc<Mutex<Out>>>,
+}
+
+pub(crate) enum Payload {
+    Full(Bytes),
+    Stream(BoxStream<'static, Result<Bytes, Error>>),
+}
+
+impl Answer {
+    pub(crate) fn refusal(e: &Error, headers: HeaderMap) -> Answer {
+        let mut headers = headers;
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
+        );
+        Answer {
+            status: e.status,
+            headers,
+            payload: Payload::Full(Bytes::from(e.problem())),
+            trailers: None,
+        }
+    }
+}
+
+/// trailers is what the handler set by the time the body ended, or None when
+/// it set nothing.
+pub(crate) fn trailers(out: &Mutex<Out>) -> Option<HeaderMap> {
+    let t = std::mem::take(&mut lock(out).trailers);
+    (!t.is_empty()).then_some(t)
 }
 
 impl App {
@@ -83,18 +116,15 @@ impl App {
     }
 
     /// op registers one operation. The macro calls this; a service does not.
-    pub fn op(
-        &mut self,
-        method: &'static str,
-        path: &'static str,
-        input: Option<&'static TypeDesc>,
-        call: Call,
-    ) -> &mut Self {
+    pub fn op<F, R>(&mut self, method: &'static str, path: &'static str, call: F) -> &mut Self
+    where
+        F: Fn(Cx, Body) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<Reply, Error>> + Send + 'static,
+    {
         self.ops.push(Op {
             method,
             path,
-            input,
-            call,
+            call: Box::new(move |cx, body| Box::pin(call(cx, body))),
             segments: split(path),
         });
         self
@@ -116,22 +146,19 @@ impl App {
         self.ops.iter().map(|o| (o.method, o.path)).collect()
     }
 
-    /// answer runs a request: find the op, decode, run, write. It is the ONE
-    /// path in, so a REST request and a ZAP frame cannot diverge.
-    pub fn answer(
-        &self,
-        method: &str,
-        target: &str,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    ) -> Answer {
-        let (path, query) = split_target(target);
-        if method == "GET" {
+    /// answer runs a request: route, bind, run, answer. It is the ONE path in,
+    /// so a REST request and a ZAP frame cannot diverge.
+    pub(crate) async fn answer(&self, asked: Asked) -> Answer {
+        let (path, query) = split_target(&asked.target);
+        if asked.method == "GET" {
             if let Some((kind, text)) = self.files.get(path) {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(kind));
                 return Answer {
                     status: 200,
-                    kind,
-                    body: text.as_bytes().to_vec(),
+                    headers,
+                    payload: Payload::Full(Bytes::from_static(text.as_bytes())),
+                    trailers: None,
                 };
             }
         }
@@ -140,54 +167,85 @@ impl App {
             let Some(params) = op.bind_path(path) else {
                 continue;
             };
-            if op.method != method {
+            if op.method != asked.method {
                 allowed = true;
                 continue;
             }
-            let input = Input {
-                method: method.to_string(),
-                path: path.to_string(),
+            let cx = Cx::new(
+                asked.method,
+                path.to_string(),
                 query,
                 params,
-                headers,
-                body,
+                asked.headers,
+                asked.peer,
+            );
+            let out = Arc::clone(&cx.out);
+            let run = AssertUnwindSafe((op.call)(cx, asked.body)).catch_unwind();
+            let reply = match run.await {
+                Ok(r) => r,
+                Err(_) => Err(Error::broke("the handler panicked")),
             };
-            return match (op.call)(&input) {
-                Ok(Some(json)) => Answer {
-                    status: 200,
-                    kind: "application/json",
-                    body: json.into_bytes(),
-                },
-                Ok(None) => Answer {
-                    status: 204,
-                    kind: "application/json",
-                    body: Vec::new(),
-                },
-                Err(e) => Answer {
-                    status: e.status,
-                    kind: "application/problem+json",
-                    body: e.problem().into_bytes(),
-                },
-            };
+            return reply_to(reply, out);
         }
         let e = if allowed {
             Error::new(405, "that address does not answer this method")
         } else {
             Error::missing("no such address")
         };
-        Answer {
-            status: e.status,
-            kind: "application/problem+json",
-            body: e.problem().into_bytes(),
-        }
+        Answer::refusal(&e, HeaderMap::new())
     }
 }
 
-/// Answer is what a door writes back.
-pub struct Answer {
-    pub status: u16,
-    pub kind: &'static str,
-    pub body: Vec<u8>,
+/// reply_to is a reply as a head and a body: the kind's own status and content
+/// type, then whatever the handler set on its Cx over them.
+fn reply_to(reply: Result<Reply, Error>, out: Arc<Mutex<Out>>) -> Answer {
+    let (status, mut headers, declared) = {
+        let mut o = lock(&out);
+        (
+            o.status.take(),
+            std::mem::take(&mut o.headers),
+            std::mem::take(&mut o.declared),
+        )
+    };
+    let reply = match reply {
+        Ok(r) => r,
+        Err(e) => return Answer::refusal(&e, headers),
+    };
+    let (dflt, kind, payload) = match reply {
+        Reply::Json(b) => (200, Some("application/json"), Payload::Full(b)),
+        Reply::Empty => (204, None, Payload::Full(Bytes::new())),
+        Reply::Sse(s) => {
+            headers
+                .entry(header::CACHE_CONTROL)
+                .or_insert(HeaderValue::from_static("no-cache"));
+            (200, Some("text/event-stream"), Payload::Stream(s.bytes()))
+        }
+        Reply::Body(b) => (
+            200,
+            Some("application/octet-stream"),
+            Payload::Stream(Box::pin(b)),
+        ),
+    };
+    if let Some(kind) = kind {
+        headers
+            .entry(header::CONTENT_TYPE)
+            .or_insert(HeaderValue::from_static(kind));
+    }
+    let trailers = if declared.is_empty() {
+        None
+    } else {
+        let names: Vec<&str> = declared.iter().map(|n| n.as_str()).collect();
+        let value = HeaderValue::from_str(&names.join(", "))
+            .expect("header names joined by commas are a header value");
+        headers.insert(header::TRAILER, value);
+        Some(out)
+    };
+    Answer {
+        status: status.unwrap_or(dflt),
+        headers,
+        payload,
+        trailers,
+    }
 }
 
 impl Op {
@@ -285,98 +343,46 @@ fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// bind is one request as the value the handler takes.
-///
-/// The body carries what a body can, and the URL carries the rest — and where
-/// both spoke, the URL wins, because a URL is what addresses the resource. That
-/// is one rule for every op: a GET's whole input arrives in the URL and a POST's
-/// path parameters still bind, without either being a special case.
-pub fn bind<T: Wire>(input: &Input) -> Result<T, Error> {
-    let desc = T::describe();
-    let mut object = match body_of(input)? {
-        Json::Map(m) => m,
-        Json::Null => HashMap::new(),
-        other => return T::read_json(&other), // the body IS the whole value
-    };
-    for f in desc.fields {
-        if !f.header.is_empty() {
-            if let Some(v) = input.header(f.header) {
-                object.insert(f.json.to_string(), scalar(v, &f.scalar));
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(path: &'static str) -> Op {
+        Op {
+            method: "GET",
+            path,
+            call: Box::new(|_, _| Box::pin(async { Ok(Reply::Empty) })),
+            segments: split(path),
         }
     }
-    for (name, value) in input.query.iter().chain(input.params.iter()) {
-        if let Some(f) = field_for(desc, name) {
-            object.insert(f.json.to_string(), scalar(value, &f.scalar));
-        }
-    }
-    require(desc, &object)?;
-    T::read_json(&Json::Map(object))
-}
 
-/// require refuses a request missing a value the op declared it cannot run
-/// without.
-///
-/// It runs HERE, on the bound input, and not in the handler: the document says
-/// the field is required, so a service that only checked it in some handlers
-/// would publish a contract it keeps by habit. A field is missing when it is
-/// absent or when it is the zero its type reads as — the same rule the Go side
-/// applies, so one client sees one answer from either.
-fn require(desc: &'static TypeDesc, object: &HashMap<String, Json>) -> Result<(), Error> {
-    for f in desc.fields {
-        if !f.required {
-            continue;
-        }
-        let given = match object.get(f.json) {
-            Some(Json::Text(s)) => !s.is_empty(),
-            Some(Json::Number(n)) => *n != 0.0,
-            Some(Json::Bool(b)) => *b,
-            Some(Json::List(l)) => !l.is_empty(),
-            Some(Json::Map(m)) => !m.is_empty(),
-            Some(Json::Null) | None => false,
-        };
-        if !given {
-            return Err(Error::bad(format!("field {:?} is required", f.json)));
-        }
+    #[test]
+    fn a_pattern_binds_what_it_names() {
+        let o = op("/v1/models/:id");
+        assert_eq!(
+            o.bind_path("/v1/models/kai"),
+            Some(vec![("id".to_string(), "kai".to_string())])
+        );
+        assert_eq!(o.bind_path("/v1/models"), None);
+        assert_eq!(o.bind_path("/v1/models/kai/x"), None);
+        let rest = op("/files/*");
+        assert_eq!(
+            rest.bind_path("/files/a/b"),
+            Some(vec![("*1".to_string(), "a/b".to_string())])
+        );
     }
-    Ok(())
-}
 
-fn body_of(input: &Input) -> Result<Json, Error> {
-    if input.body.is_empty() {
-        return Ok(Json::Null);
-    }
-    let text = std::str::from_utf8(&input.body).map_err(|_| Error::bad("the body is not utf-8"))?;
-    if text.trim().is_empty() {
-        return Ok(Json::Null);
-    }
-    Json::parse(text)
-}
-
-/// field_for is the field a URL name binds to. "-" opts out, exactly as it does
-/// for the body: a field can be body-only and a field can be URL-only, and the
-/// two halves are asked separately because a route may mean two things by one
-/// word.
-fn field_for(desc: &'static TypeDesc, name: &str) -> Option<&'static FieldDesc> {
-    desc.fields.iter().find(|f| {
-        let url = f.url_name();
-        url != "-" && url.eq_ignore_ascii_case(name)
-    })
-}
-
-/// scalar is one URL value as the JSON its field expects. A list is spelled
-/// comma-separated in one value, which is what `style: form, explode: false`
-/// already publishes for a repeated parameter.
-fn scalar(text: &str, want: &Scalar) -> Json {
-    match want {
-        Scalar::Bool => Json::Bool(text == "true" || text == "1"),
-        Scalar::Number => text.parse().map(Json::Number).unwrap_or(Json::Null),
-        Scalar::List(elem) => Json::List(
-            text.split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| scalar(s, elem))
-                .collect(),
-        ),
-        _ => Json::Text(text.to_string()),
+    #[test]
+    fn a_query_is_unescaped() {
+        let (path, q) = split_target("/x?a=1%202&b=c+d&e");
+        assert_eq!(path, "/x");
+        assert_eq!(
+            q,
+            vec![
+                ("a".to_string(), "1 2".to_string()),
+                ("b".to_string(), "c d".to_string()),
+                ("e".to_string(), String::new()),
+            ]
+        );
     }
 }

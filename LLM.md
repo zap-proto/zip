@@ -14,8 +14,11 @@ Checkout: `~/work/zap/zip` (`~/work/zap-proto` links to `~/work/zap`). `~/work/h
 | race | `go test -race ./...` |
 | collector module | `cd contract && go test -count=1 ./...` |
 | example module | `cd examples/local-service && go tool zipdoc -check && go test -count=1 ./...` |
+| Rust, every crate | `cd rust && cargo test --workspace` (about 2 s once built) |
+| Rust lint | `cd rust && cargo clippy --workspace --all-targets && cargo fmt --all -- --check` |
+| Rust documents | `cd rust/examples/<info\|stream> && make gen` (needs Go: `zipc` is this checkout's `cmd/zipc`) |
 
-`./...` does not reach `contract/` or `examples/local-service/`. Each has its own go.mod with a `replace` pointing at this checkout, so it tests the working tree. CI is `hanzo.yml`, run by `.hanzo/workflows/cicd.yml` through `hanzoai/ci`: vet, the root tests and both module checks.
+`./...` does not reach `contract/`, `examples/local-service/` or `rust/`. Each has its own go.mod with a `replace` pointing at this checkout, so it tests the working tree. CI is `hanzo.yml`, run by `.hanzo/workflows/cicd.yml` through `hanzoai/ci`: vet, the root tests and both module checks.
 
 `TestSDK_CallsTheLiveServiceOverZAP` and `TestProseReachesAServiceInPackageMain` compile programs offline against this checkout (`GOPROXY=off`, zip's go.sum) and skip under `-short`.
 
@@ -46,6 +49,8 @@ Patch tags, one above the highest `v*` on GitHub. Push the commit to main, read 
 | `middleware/`, `wsx/`, `js/` | middleware; WebSocket upgrades; goja handlers |
 | `contract/` | collector contract tests, a module of its own |
 | `examples/local-service/` | the README's service, a module of its own |
+| `rust/zip`, `rust/zip-macros` | zip in Rust: `#[zip::ops]`, `#[derive(zip::Wire)]`, the hyper and ZAP doors. See Rust below. |
+| `rust/examples/info`, `rust/examples/stream` | the conformance corpus in Rust; a streaming service (JSON, SSE, byte relay) and its socket tests |
 
 ## Invariants
 
@@ -64,6 +69,54 @@ Patch tags, one above the highest `v*` on GitHub. Push the commit to main, read 
 - zip validates no tokens. Identity is read from gateway-set headers (`HeaderOrg` is `X-Org-Id`); `Authorize` runs at the invoke seam, so it covers REST, MCP, the call plane and the in-process CLI.
 - `app.Test` runs `prepare`, so `/mcp`, the OpenAPI document and the call plane answer under test as they do when serving.
 - The `/docs` page loads Swagger UI from cdn.jsdelivr.net. Embedding swagger-ui-dist 5 would add about 1.74 MB (bundle 1,552,209 bytes, CSS 185,784 bytes, Apache-2.0) to every binary that links zip.
+
+- A manifest op may say `"stream": "sse"` or `"bytes"` (the answer is written as produced, and `ProjectOpenAPI` publishes `text/event-stream` or `application/octet-stream` for it) and `"raw": true` (the request body is bytes, bound to no type). `Check` refuses a stream beside an `out` and a raw body beside an `in`. Go's own typed ops set neither; the Rust front end sets both.
+
+## Rust
+
+`rust/` is a Cargo workspace: `zip` (runtime), `zip-macros` (the two macros), `examples/info` (the corpus, compared byte for byte with `corpus/info` by `conformance_test.go`) and `examples/stream`. It is not published to crates.io; a service takes it as a git dependency pinned by commit, under the key `zip`, since the macros expand to `::zip::` paths (a service that also needs crates.io's `zip` archive crate renames that one):
+
+```toml
+zip = { git = "https://github.com/zap-proto/zip", rev = "<commit>" }
+```
+
+An op is an `async fn` in an `#[zip::ops]` impl block, with a route attribute and a doc comment. It takes `&self`, optionally `cx: &zip::Cx`, and at most one input: a `Wire + Deserialize` type bound from body, query, path and declared headers, or `body: zip::Body`, the request body as it arrives. It answers `Result<T, zip::Error>`: a `Wire + Serialize` type (200 JSON), `()` (204), `zip::Sse` or `zip::Body`.
+
+```rust
+#[zip::ops(app = "chat", title = "Chat", version = "1.0.0")]
+impl Chat {
+    /// Complete streams a completion as server-sent events.
+    #[post("/v1/chat/completions")]
+    async fn complete(&self, cx: &zip::Cx, arg: &Request) -> Result<zip::Sse, zip::Error> {
+        let key = cx.header("authorization").ok_or(zip::Error::new(401, "no key"))?;
+        let usage = cx.trailer("x-usage")?;                 // declared now, set at the end
+        let events = self.upstream(key, arg).await?         // impl Stream<Item = Result<Event, E>>
+            .map(|chunk| chunk.map(|c| zip::Event::data(c)));
+        Ok(zip::Sse::new(events).keep(Duration::from_secs(15)))
+    }
+
+    /// Relay passes bytes through, both ways, as they arrive.
+    #[post("/v1/relay")]
+    async fn relay(&self, cx: &zip::Cx, body: zip::Body) -> Result<zip::Body, zip::Error> {
+        cx.set_header("content-type", "text/event-stream")?;
+        Ok(body)
+    }
+}
+```
+
+Serve with `zip::listen(app, Some(":8000"), Some(":9653"), zip::signal(), grace).await`, or one door with `zip::http::serve(Arc<App>, TcpListener, shutdown, grace)` / `zip::zaphttp::serve(...)`. `rust/examples/stream/src/lib.rs` is the worked example and `tests/serve.rs` its socket tests.
+
+- Names are serde's. `#[derive(zip::Wire)]` reads `#[serde(rename)]`, `rename_all`, `skip` and `with`; it refuses `flatten`, a rename that differs by direction, `#[zip(json = "name")]` on a field and a `Vec<u8>` without `#[serde(with = "zip::base64")]` (serde writes bytes as a number array; the document says base64). `#[zip(...)]` holds what serde cannot: `url`, `header`, `required`, `text`, and a type's own schema (`json = r#"{...}"#`). A `text` newtype gets its serde impls from the derive (Display and FromStr). `serde_json::Value` is described as `prim: any`. A field the body may omit is an `Option` or carries `#[serde(default)]`; serde refuses a missing one otherwise.
+- `bind` reads the body straight into the type when no URL value, declared header or required field applies; otherwise through a `serde_json::Value` it merges them into. A body past `MAX_BODY` (32 MiB) is 413, by its Content-Length before any byte is read.
+- A stream item is a `Result`. `Ok` is written and flushed as yielded; `Err` ends the answer without its terminator (HTTP/1.1 truncated chunked body, HTTP/2 reset, ZAP no end frame), since the status already went out. A producer that wants to report in words sends an event and ends.
+- Client gone: hyper drops the response body and with it the op's stream. HTTP/1.1 sees it on the read side (hyper's mid-message EOF check, `half_close` off), so an idle producer is dropped too: 1 to 3 ms in `tests/serve.rs`. `Sse::keep` writes `:` comment lines in quiet intervals for proxies.
+- Trailers: `cx.trailer(name)` declares (`Trailer:` in the head) and returns a handle the stream keeps; set values go after the last chunk. HTTP/2 always carries them. hyper sends HTTP/1.1 trailers only to a request carrying `TE: trailers`, and only declared names. A JSON answer with a declared trailer goes chunked so it can carry one. Over ZAP they ride the end frame's slot (zap-proto/http v0.3.12's Go client reads past them without surfacing them).
+- `serve` stops accepting on `shutdown`, lets each connection finish what it is answering, and after `grace` drops the rest (their streams' producers with them). hyper's HTTP/1.1 header read timeout is on (a timer is set).
+- HTTP/1.1 keep-alive and HTTP/2 over cleartext (prior knowledge) on one port (`hyper_util` auto). No TLS: the ingress terminates it.
+- The ZAP door speaks zap-proto/http's frames: request 0x01, response 0x02, streamed head 0x03, data 0x04, end 0x05, each preceded by its length as a BIG-endian u32 (header blocks are little-endian). The codec is `rust/zip/src/zap.rs`, written by hand because no zapgen emits Rust (zap-proto/go's tests assert the `rust` backend fails); `zap::tests::frames_are_the_ones_go_writes` pins it to frames Go wrote. Before this, the Rust door wrote a little-endian prefix and its build ran `zapgen -lang rust`, so it never built. A Go `zap-proto/http` client reads this door's JSON, streams (chunk by chunk) and refusals.
+- A handler that panics answers 500; the server lives.
+
+Bench (dgx, shared: load 12, GPU at 96%; `examples/stream` release, server pinned to 4 Cortex-X925 cores, `bombardier` on 4 others, `POST /v1/echo` with `{"text":"hi"}`, 10 s): 64 connections 1,201,848 requests (120k/s, p50 288 µs, p99 1.78 ms); 256 connections 1,672,052 (167k/s, p50 0.86 ms, p99 32 ms).
 
 ## Known issue
 

@@ -14,6 +14,7 @@ mod attr;
 mod doc;
 mod frag;
 mod ops;
+mod serde;
 mod ty;
 mod wire;
 

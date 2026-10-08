@@ -4,16 +4,19 @@
 
 //! `#[zip(...)]` — what a declaration says about itself beyond its type.
 //!
-//! One attribute, one vocabulary, on a type and on a field alike. It is the
-//! counterpart of a Go struct tag and holds the same four facts: the name the
-//! body carries a field under, the name a URL does, the header it reads, and
-//! whether the handler refuses to run without it.
+//! One attribute, one vocabulary, on a type and on a field alike. With serde's
+//! own attributes it is the counterpart of a Go struct tag: serde says the name
+//! the body carries a field under (`#[serde(rename)]`) and whether it carries
+//! it at all (`#[serde(skip)]`); this says the rest — the name a URL carries it
+//! under, the header it reads, and whether the handler refuses to run without
+//! it.
 
 use syn::{Attribute, Expr, Lit, Meta, Token};
 
 #[derive(Default)]
 pub struct Attrs {
-    /// json is the name the body carries this under.
+    /// json is a field's wire name given here, which is refused: the name is
+    /// serde's, and two places to write it are two names.
     pub json: Option<String>,
     /// url is the name a URL carries it under; "-" opts out.
     pub url: Option<String>,
@@ -21,8 +24,6 @@ pub struct Attrs {
     pub header: Option<String>,
     /// required says the handler refuses to run without it.
     pub required: bool,
-    /// skip keeps it off the wire entirely.
-    pub skip: bool,
     /// text says this type is carried as one word, so a URL can hold it.
     pub text: bool,
     /// json_schema is the shape a type states for itself, raw.
@@ -42,7 +43,12 @@ impl Attrs {
             for item in items {
                 match &item {
                     Meta::Path(p) if p.is_ident("required") => out.required = true,
-                    Meta::Path(p) if p.is_ident("skip") => out.skip = true,
+                    Meta::Path(p) if p.is_ident("skip") => {
+                        return Err(syn::Error::new_spanned(
+                            p,
+                            "zip: whether a field rides the wire is serde's — #[serde(skip)]",
+                        ))
+                    }
                     Meta::Path(p) if p.is_ident("text") => out.text = true,
                     Meta::NameValue(nv) => {
                         let v = literal(&nv.value)?;
@@ -63,14 +69,14 @@ impl Attrs {
                         } else {
                             return Err(syn::Error::new_spanned(
                                 &nv.path,
-                                "zip: known keys are json, url, header, required, skip, text",
+                                "zip: known keys are json, url, header, required, text",
                             ));
                         }
                     }
                     other => {
                         return Err(syn::Error::new_spanned(
                             other,
-                            "zip: known keys are json, url, header, required, skip, text",
+                            "zip: known keys are json, url, header, required, text",
                         ))
                     }
                 }

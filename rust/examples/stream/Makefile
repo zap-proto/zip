@@ -21,12 +21,12 @@ ZIPC   ?= go run ../../../cmd/zipc
 ROOT   := ../..
 
 gen:
-	cd $(ROOT) && cargo run -q -p info -- --manifest > examples/info/gen/manifest.json
-	$(ZIPC) -out gen -package info gen/manifest.json
-	cd $(ROOT) && cargo build -p info
+	cd $(ROOT) && cargo run -q -p stream -- --manifest > examples/stream/gen/manifest.json
+	$(ZIPC) -out gen -package stream gen/manifest.json
+	cd $(ROOT) && cargo build -p stream
 
 run:
-	cd $(ROOT) && cargo run -p info
+	cd $(ROOT) && cargo run -p stream
 
 check:
-	cd $(ROOT) && cargo test -p info
+	cd $(ROOT) && cargo test -p stream

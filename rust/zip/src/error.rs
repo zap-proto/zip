@@ -42,17 +42,20 @@ impl Error {
     }
 
     /// problem is the body a refusal travels in — RFC 9457, the same shape the
-    /// Go side answers with, so one client reads both.
+    /// Go side answers with, so one client reads both. Its members are written
+    /// in name order, which is the order Go's encoder writes a map in.
     pub fn problem(&self) -> String {
-        let mut out = String::from("{\"detail\":");
-        crate::json::write_str(&mut out, &self.detail);
-        out.push_str(",\"status\":");
-        out.push_str(&self.status.to_string());
-        out.push_str(",\"title\":");
-        crate::json::write_str(&mut out, crate::http::reason(self.status));
-        out.push_str(",\"type\":\"about:blank\"}");
-        out
+        format!(
+            "{{\"detail\":{},\"status\":{},\"title\":{},\"type\":\"about:blank\"}}",
+            quote(&self.detail),
+            self.status,
+            quote(reason(self.status)),
+        )
     }
+}
+
+fn quote(s: &str) -> String {
+    serde_json::to_string(s).expect("a string always encodes")
 }
 
 impl fmt::Display for Error {
@@ -62,3 +65,11 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// reason is the phrase beside a status.
+pub fn reason(status: u16) -> &'static str {
+    hyper::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("Unknown")
+}

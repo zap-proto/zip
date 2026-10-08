@@ -7,3 +7,5 @@ publish = false
 
 [dependencies]
 zip = { path = "../../zip" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
