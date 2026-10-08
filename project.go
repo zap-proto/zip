@@ -69,7 +69,14 @@ func ProjectOpenAPI(m Manifest) map[string]any {
 			obj["tags"] = op.Tags
 		}
 
-		if p.hasRequestBody(op) {
+		if op.Raw && hasBody(op.Method) {
+			obj["requestBody"] = map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"application/octet-stream": map[string]any{"schema": binarySchema()},
+				},
+			}
+		} else if p.hasRequestBody(op) {
 			media := map[string]any{"schema": p.schema(TypeRef{Ref: op.In}, reg)}
 			if len(op.Example) > 0 {
 				media["example"] = json.RawMessage(op.Example)
@@ -126,7 +133,22 @@ func ProjectOpenAPI(m Manifest) map[string]any {
 		}
 
 		resp := map[string]any{}
-		if out := p.types[op.Out]; out != nil && out.Name != "" {
+		if kind, ok := streams[op.Stream]; ok {
+			schema := binarySchema()
+			if op.Stream == "sse" {
+				schema = map[string]any{"type": "string"}
+			}
+			for _, code := range statuses(op.Statuses, 200) {
+				entry := map[string]any{
+					"description": statusText(code),
+					"content":     map[string]any{kind: map[string]any{"schema": schema}},
+				}
+				if h := headerDecls(op); h != nil {
+					entry["headers"] = h
+				}
+				resp[strconv.Itoa(code)] = entry
+			}
+		} else if out := p.types[op.Out]; out != nil && out.Name != "" {
 			media := map[string]any{"schema": p.schema(TypeRef{Ref: op.Out}, reg)}
 			if len(op.Response) > 0 {
 				media["example"] = json.RawMessage(op.Response)
@@ -175,6 +197,12 @@ func ProjectOpenAPI(m Manifest) map[string]any {
 		"paths":      paths,
 		"components": map[string]any{"schemas": reg.defs},
 	}
+}
+
+// binarySchema is bytes sent as they are, which is what a raw body and a byte
+// stream both are.
+func binarySchema() map[string]any {
+	return map[string]any{"type": "string", "format": "binary"}
 }
 
 // ProjectMCP is m as an MCP tool list, in name order.

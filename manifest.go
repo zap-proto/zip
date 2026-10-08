@@ -110,6 +110,21 @@ type ManifestOp struct {
 	// OAuth says the operation answers at an OAuth address, so its refusal is an
 	// RFC 6749 error rather than an RFC 9457 problem document.
 	OAuth bool `json:"oauth,omitempty"`
+
+	// Stream says the answer is written as it is produced rather than as one
+	// JSON value: "sse" is a text/event-stream, "bytes" an octet stream. Empty
+	// is one value, Out.
+	Stream string `json:"stream,omitempty"`
+
+	// Raw says the request body is read as bytes, as sent, and binds to no
+	// type: a relay's upload. Such an op names no In.
+	Raw bool `json:"raw,omitempty"`
+}
+
+// streams are the answers a manifest may say an op streams, by media type.
+var streams = map[string]string{
+	"sse":   "text/event-stream",
+	"bytes": "application/octet-stream",
 }
 
 // TypeDesc is one type, described by what it is made of and by what it looks
@@ -260,6 +275,15 @@ func (m Manifest) Check() error {
 			if id != "" && !known[id] {
 				return fmt.Errorf("op %s names %s %q, which nothing described", op.ID, what, id)
 			}
+		}
+		if _, ok := streams[op.Stream]; op.Stream != "" && !ok {
+			return fmt.Errorf("op %s streams %q; a stream is sse or bytes", op.ID, op.Stream)
+		}
+		if op.Stream != "" && op.Out != "" {
+			return fmt.Errorf("op %s streams and names output %q; a streamed answer is not one value", op.ID, op.Out)
+		}
+		if op.Raw && op.In != "" {
+			return fmt.Errorf("op %s reads its body raw and names input %q; a raw body binds to nothing", op.ID, op.In)
 		}
 	}
 	return nil
