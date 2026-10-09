@@ -74,10 +74,10 @@ func (d specDoc) bind(op specOp, params []pathParam) ([]Arg, []Flag) {
 			Help: description, Required: required, In: in,
 		})
 	}
-	// A declared header or cookie is a flag that rides as one. Query
-	// parameters are inputs too — an operation that takes its filters in the
-	// URL must offer them as flags, or the CLI silently loses half the API.
-	for _, in := range []string{"header", "cookie", "query"} {
+	// A declared cookie is a flag that rides as one. Query parameters are
+	// inputs too — an operation that takes its filters in the URL must offer
+	// them as flags, or the CLI silently loses half the API.
+	for _, in := range []string{"cookie", "query"} {
 		for _, p := range op.Parameters {
 			if p.In == in {
 				where := in

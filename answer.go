@@ -6,6 +6,7 @@ package zip
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,32 +46,43 @@ func (Verbatim[T]) documents() reflect.Type { return reflect.TypeOf((*T)(nil)).E
 // Sse is an answer written as server-sent events (text/event-stream), one
 // [Event] per frame, each written and flushed as Send produces it.
 //
-//	return &zip.Sse[Chunk]{Keep: 15 * time.Second, Send: func(emit func(zip.Event[Chunk]) error) error {
-//	    for chunk := range chunks {
-//	        if err := emit(zip.Event[Chunk]{Data: chunk}); err != nil {
-//	            return err // the client is gone
+//	return &zip.Sse[Chunk]{Keep: 15 * time.Second, Send: func(ctx context.Context, emit func(zip.Event[Chunk]) error) error {
+//	    for {
+//	        select {
+//	        case chunk, ok := <-chunks:
+//	            if !ok {
+//	                return emit(zip.Event[Chunk]{Text: "[DONE]"})
+//	            }
+//	            if err := emit(zip.Event[Chunk]{Data: chunk}); err != nil {
+//	                return err // the client is gone
+//	            }
+//	        case <-ctx.Done():
+//	            return ctx.Err()
 //	        }
 //	    }
-//	    return emit(zip.Event[Chunk]{Text: "[DONE]"})
 //	}}, nil
 //
-// Send runs after the handler returns, once the status and headers are out. An
-// error from emit means the client has gone, and Send should return it. An
-// error Send returns ends the stream where it stands: the status already went
-// out, so it cannot be a refusal.
+// Send runs after the handler returns, once the status and headers are out, on
+// a goroutine of its own. Its ctx ends when the stream does — the client has
+// gone or the server closed the connection (found by a write, so Keep finds it
+// in a quiet stream), or a tool call has collected all it will — and a producer
+// that waits on anything selects on it. An error from emit means the stream
+// has ended, and Send should return it. An error Send returns ends the stream
+// where it stands: the status already went out, so it cannot be a refusal.
 //
 // The document publishes text/event-stream with the event's type as x-events.
 // Over MCP and the CLI the events are the result, one JSON line each.
 type Sse[T any] struct {
-	// Send produces the events, calling emit once per event in order.
-	Send func(emit func(Event[T]) error) error
+	// Send produces the events, calling emit once per event in order, until
+	// it is done or ctx ends.
+	Send func(ctx context.Context, emit func(Event[T]) error) error `zap:"-"`
 	// Keep writes an empty comment line whenever this long passes with no
 	// event, so a proxy keeps a waiting stream open and a client that left is
 	// found by the write. Zero writes none.
 	Keep time.Duration
 	// Header are the answer's headers beside Content-Type, each one the op
 	// declared ([WithResponseHeader]).
-	Header map[string]string
+	Header map[string]string `zap:"-"`
 }
 
 // ResponseHeaders are the headers the stream states.
@@ -141,8 +153,8 @@ func sseLines(s string) []string {
 func oneLine(s string) string { return strings.NewReplacer("\r", "", "\n", "").Replace(s) }
 
 // events runs Send, handing each event to frame as the bytes the stream carries
-// (wire) or as its data alone.
-func (s *Sse[T]) events(wire bool, frame func([]byte) error) (err error) {
+// (wire) or as its data alone. Once ctx ends, emit answers errGone.
+func (s *Sse[T]) events(ctx context.Context, wire bool, frame func([]byte) error) (err error) {
 	if s.Send == nil {
 		return nil
 	}
@@ -151,7 +163,10 @@ func (s *Sse[T]) events(wire bool, frame func([]byte) error) (err error) {
 			err = fmt.Errorf("zip: an event stream panicked: %v", r)
 		}
 	}()
-	return s.Send(func(e Event[T]) error {
+	return s.Send(ctx, func(e Event[T]) error {
+		if ctx.Err() != nil {
+			return errGone
+		}
 		var b []byte
 		var err error
 		if wire {
@@ -168,70 +183,78 @@ func (s *Sse[T]) events(wire bool, frame func([]byte) error) (err error) {
 
 // stream is how the REST door writes any event stream.
 type stream interface {
-	events(wire bool, frame func([]byte) error) error
+	events(ctx context.Context, wire bool, frame func([]byte) error) error
 	keepEvery() time.Duration
 }
 
 func (s *Sse[T]) keepEvery() time.Duration { return s.Keep }
 
-// errGone is what emit answers once the client has stopped reading.
+// errGone is what emit answers once the stream has ended: the client stopped
+// reading, or whoever was collecting it stopped.
 var errGone = errors.New("zip: the client is gone")
 
-// writeEvents writes a stream to w, flushing each event, with a keep-alive
-// comment in every quiet interval when the stream asks for one.
-func writeEvents(s stream, w *bufio.Writer) error {
-	every := s.keepEvery()
-	if every <= 0 {
-		return s.events(true, func(b []byte) error {
-			if _, err := w.Write(b); err != nil {
-				return errGone
-			}
-			if w.Flush() != nil {
-				return errGone
-			}
-			return nil
-		})
-	}
-	// With a keep-alive, the events are produced beside the writer, so a quiet
-	// interval can be filled without the producer's help.
+// pump runs a stream's producer beside its sink and hands the sink each frame
+// as it is produced — the bytes text/event-stream carries when wire, else the
+// event's data alone — and keepLine whenever keep passes with none. It returns
+// when the producer ends, the sink refuses a frame, or ctx ends; in the last two
+// cases the producer's ctx is cancelled, so its next emit answers errGone.
+func pump(ctx context.Context, s stream, wire bool, keep time.Duration, sink func([]byte) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	frames := make(chan []byte)
-	done := make(chan struct{})
 	ended := make(chan error, 1)
 	go func() {
-		ended <- s.events(true, func(b []byte) error {
+		ended <- s.events(ctx, wire, func(b []byte) error {
 			select {
 			case frames <- b:
 				return nil
-			case <-done:
+			case <-ctx.Done():
 				return errGone
 			}
 		})
 	}()
-	defer close(done)
-	tick := time.NewTimer(every)
-	defer tick.Stop()
+	var tick <-chan time.Time
+	var timer *time.Timer
+	if keep > 0 {
+		timer = time.NewTimer(keep)
+		defer timer.Stop()
+		tick = timer.C
+	}
 	for {
 		select {
 		case b := <-frames:
-			if _, err := w.Write(b); err != nil {
-				return errGone
+			if err := sink(b); err != nil {
+				return err
 			}
-			if w.Flush() != nil {
-				return errGone
+			if timer != nil {
+				timer.Reset(keep)
 			}
-			tick.Reset(every)
-		case <-tick.C:
-			if _, err := w.Write(keepLine); err != nil {
-				return errGone
+		case <-tick:
+			if err := sink(keepLine); err != nil {
+				return err
 			}
-			if w.Flush() != nil {
-				return errGone
-			}
-			tick.Reset(every)
+			timer.Reset(keep)
 		case err := <-ended:
 			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+}
+
+// writeEvents writes a stream to w, flushing each event, with a keep-alive
+// comment in every quiet interval when the stream asks for one. A write that
+// fails is the client gone, and ends the stream.
+func writeEvents(ctx context.Context, s stream, w *bufio.Writer) error {
+	return pump(ctx, s, true, s.keepEvery(), func(b []byte) error {
+		if _, err := w.Write(b); err != nil {
+			return errGone
+		}
+		if w.Flush() != nil {
+			return errGone
+		}
+		return nil
+	})
 }
 
 // Socket is an answer that upgrades the connection to a WebSocket whose
@@ -248,28 +271,44 @@ func writeEvents(s stream, w *bufio.Writer) error {
 // bridges it to stdin and stdout.
 type Socket[M any] struct {
 	// Serve runs on the upgraded connection.
-	Serve func(conn *ws.Conn) error
-	// Config configures the upgrade (wsx.Config).
-	Config ws.Config
+	Serve func(conn *ws.Conn) error `zap:"-"`
+	// Config configures the upgrade (wsx.Config). A nil CheckOrigin admits a
+	// browser only from the address's own origin, since a socket op may read
+	// a cookie, which a browser sends cross-site too.
+	Config ws.Config `zap:"-"`
 }
 
 // frame is the type one message carries.
 func (Socket[M]) frame() reflect.Type { return reflect.TypeOf((*M)(nil)).Elem() }
 
 func (s *Socket[M]) serve(c fiber.Ctx) error {
+	if err := upgradable(c); err != nil {
+		return err
+	}
+	serve := s.Serve
+	err := ws.Upgrade(c.RequestCtx(), s.Config, func(conn *ws.Conn) {
+		if serve != nil {
+			_ = serve(conn)
+		}
+	})
+	if errors.Is(err, ws.ErrOrigin) {
+		return Errorf(http.StatusForbidden, "%s", ws.ErrOrigin.Error())
+	}
+	return err
+}
+
+// upgradable refuses a request that cannot become a WebSocket: one carried
+// over ZAP, which runs no upgrade (501), and one that does not ask (426, with
+// Upgrade: websocket).
+func upgradable(c fiber.Ctx) error {
 	if carriedByZAP(c.RequestCtx()) {
-		return Errorf(501, "%s %s upgrades to a WebSocket, which does not cross ZAP; connect over HTTP", c.Method(), c.Path())
+		return Errorf(http.StatusNotImplemented, "%s %s upgrades to a WebSocket, which does not cross ZAP; connect over HTTP", c.Method(), c.Path())
 	}
 	if !ws.Is(c.RequestCtx()) {
 		c.Set("Upgrade", "websocket")
 		return Errorf(http.StatusUpgradeRequired, ws.Refusal)
 	}
-	serve := s.Serve
-	return ws.Upgrade(c.RequestCtx(), s.Config, func(conn *ws.Conn) {
-		if serve != nil {
-			_ = serve(conn)
-		}
-	})
+	return nil
 }
 
 // upgrader is a [Socket], whatever its message type.
@@ -574,7 +613,13 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 			c.Status(code)
 		}
 		c.Set(fiber.HeaderContentType, "text/event-stream")
-		return c.SendStreamWriter(func(w *bufio.Writer) { _ = writeEvents(x, w) })
+		// The stream outlives the handler, so its ctx is its own: it ends when a
+		// write finds the client gone — a shutdown closes the connection too —
+		// or when the producer is done.
+		return c.SendStreamWriter(func(w *bufio.Writer) {
+			defer func() { _ = recover() }()
+			_ = writeEvents(context.Background(), x, w)
+		})
 	}
 	if code != 0 {
 		c.Status(code)
@@ -598,7 +643,12 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 		}
 		return c.Send(b.Bytes)
 	}
-	return c.JSON(out, produces(op, mimeJSON))
+	// The framework's own JSON media (with its charset) unless the op names
+	// another: an op that declares nothing answers as it always has.
+	if len(op.Produces) > 0 {
+		return c.JSON(out, op.Produces[0])
+	}
+	return c.JSON(out)
 }
 
 // disposition is the Content-Disposition that saves an answer as name: the
@@ -621,8 +671,11 @@ func disposition(name string) string {
 }
 
 // copyFlushing writes r to w a read at a time, flushing each, so bytes reach
-// the client as the source yields them. It closes r when it can.
+// the client as the source yields them. It closes r when it can. It runs on the
+// server's stream goroutine, where nothing above it recovers, so a reader that
+// panics ends the answer where it stands instead of the process.
 func copyFlushing(w *bufio.Writer, r io.Reader) {
+	defer func() { _ = recover() }()
 	if c, ok := r.(io.Closer); ok {
 		defer func() { _ = c.Close() }()
 	}
@@ -667,26 +720,37 @@ const toolBound = 1 << 20
 // errBound ends a collection at the tool bound.
 var errBound = errors.New("zip: the tool result bound was reached")
 
+// toolWait is the longest a tool call collects a stream for: under the
+// sixty-second request timeout the reference MCP clients default to, so the
+// answer arrives while someone is still waiting for it.
+const toolWait = 45 * time.Second
+
 // collect reads an answer that is not one JSON value into what a call returns:
-// bytes with their media type, or a stream's events as JSON lines, bounded.
-// truncated says the bound was reached first.
-func collect(out any) (data []byte, media string, truncated bool, err error) {
+// bytes with their media type, or a stream's events as JSON lines, bounded in
+// bytes and a stream in time as well. truncated says a bound was reached
+// first; the producer of a stream cut short sees its ctx end.
+func collect(ctx context.Context, out any) (data []byte, media string, truncated bool, err error) {
 	if s, ok := out.(stream); ok {
 		var b []byte
-		err = s.events(false, func(frame []byte) error {
+		ctx, cancel := context.WithTimeout(ctx, toolWait)
+		defer cancel()
+		err = pump(ctx, s, false, 0, func(frame []byte) error {
 			if len(b)+len(frame)+1 > toolBound {
 				return errBound
 			}
 			b = append(append(b, frame...), '\n')
 			return nil
 		})
-		if errors.Is(err, errBound) {
+		if errors.Is(err, errBound) || errors.Is(err, context.DeadlineExceeded) {
 			return b, "application/jsonl", true, nil
 		}
 		return b, "application/jsonl", false, err
 	}
 	b, _ := bodyOf(out)
 	if b.Reader == nil {
+		if len(b.Bytes) > toolBound {
+			return b.Bytes[:toolBound], b.Type, true, nil
+		}
 		return b.Bytes, b.Type, false, nil
 	}
 	if c, ok := b.Reader.(io.Closer); ok {
@@ -719,8 +783,8 @@ func textual(media string) bool {
 // toolContent is an answer that is not one JSON value, as MCP tool content:
 // text as text, an image as an image, any other bytes as an embedded resource
 // whose blob is the base64 of them.
-func toolContent(id string, out any) (map[string]any, error) {
-	data, media, truncated, err := collect(out)
+func toolContent(ctx context.Context, id string, out any) (map[string]any, error) {
+	data, media, truncated, err := collect(ctx, out)
 	if err != nil {
 		return nil, err
 	}
@@ -741,4 +805,3 @@ func toolContent(id string, out any) (map[string]any, error) {
 	}
 	return result, nil
 }
-

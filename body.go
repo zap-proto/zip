@@ -147,8 +147,10 @@ type Parser interface {
 // what the document publishes the request body under.
 //
 // Without it an op with a [Body] field consumes application/octet-stream, one
-// with form fields application/x-www-form-urlencoded (multipart/form-data when
-// it takes a [File]), and any other application/json.
+// that takes a [File] multipart/form-data, and any other application/json.
+// form: fields bind a form only when the op consumes one: name
+// application/x-www-form-urlencoded or multipart/form-data here. Without that
+// the tags are another binder's and the op reads JSON as it always did.
 func Consumes(media ...string) OpOption {
 	if len(media) == 0 {
 		panic("zip: Consumes needs at least one media type")
@@ -169,11 +171,16 @@ var (
 	parserType = reflect.TypeOf((*Parser)(nil)).Elem()
 )
 
-// intake is how an op's input arrives, decided once from In at registration.
+// intake is how an op's input arrives, read once from In at registration and
+// settled against the media the op consumes.
 type intake struct {
 	// raw is the index path of In's [Body] field, nil when it has none.
 	raw []int
-	// form says In carries form fields or file parts.
+	// files says In takes a multipart part ([File]); fields says it has form:
+	// fields.
+	files, fields bool
+	// form says the op reads its body as a form: it takes a part, or it has
+	// form: fields and consumes a form media type.
 	form bool
 	// parse says *In decodes its own body ([Parser]).
 	parse bool
@@ -183,7 +190,7 @@ type intake struct {
 
 // intakeOf reads the request kind off In, refusing a shape the wire cannot
 // carry rather than registering an op that misreads it.
-func intakeOf(method string, in reflect.Type) intake {
+func intakeOf(in reflect.Type) intake {
 	var r intake
 	t := in
 	for t != nil && t.Kind() == reflect.Pointer {
@@ -201,9 +208,9 @@ func intakeOf(method string, in reflect.Type) intake {
 			}
 			r.raw = f.Index
 		case isFile(f.Type):
-			r.form = true
+			r.files = true
 		case formFieldName(f) != "":
-			r.form = true
+			r.fields = true
 		case f.Type.Kind() == reflect.Pointer && f.Type.Elem() == bodyType:
 			panic(fmt.Sprintf("zip: %s.%s is a *zip.Body; a request body is always there, so declare zip.Body", t, f.Name))
 		}
@@ -211,6 +218,14 @@ func intakeOf(method string, in reflect.Type) intake {
 			r.cookies = true
 		}
 	}
+	return r
+}
+
+// settle decides whether the body is a form, from the media the op consumes,
+// and refuses a shape the wire cannot carry rather than registering an op that
+// misreads it.
+func (r *intake) settle(method string, in reflect.Type, media []string) {
+	r.form = r.files || r.fields && formMedia(media)
 	kinds := 0
 	for _, k := range []bool{r.raw != nil, r.form, r.parse} {
 		if k {
@@ -218,12 +233,21 @@ func intakeOf(method string, in reflect.Type) intake {
 		}
 	}
 	if kinds > 1 {
-		panic(fmt.Sprintf("zip: %s takes its body more than one way (a zip.Body field, form fields, a Parse method); a request body is read once", t))
+		panic(fmt.Sprintf("zip: %s takes its body more than one way (a zip.Body field, a form, a Parse method); a request body is read once", in))
 	}
 	if kinds > 0 && !hasBody(method) {
-		panic(fmt.Sprintf("zip: %s carries no request body, so %s cannot take one", method, t))
+		panic(fmt.Sprintf("zip: %s carries no request body, so %s cannot take one", method, in))
 	}
-	return r
+}
+
+// formMedia reports whether a media list names a form encoding.
+func formMedia(media []string) bool {
+	for _, m := range media {
+		if isFormMedia(m) {
+			return true
+		}
+	}
+	return false
 }
 
 // consumes is the request media an op names, defaulted by its request kind.
@@ -235,23 +259,10 @@ func consumes(op *registeredOp) []string {
 	switch {
 	case op.req.raw != nil:
 		return []string{mimeOctet}
-	case op.req.form:
-		if takesFile(op.InType) {
-			return []string{mimeMultipart}
-		}
-		return []string{mimeForm}
+	case op.req.files:
+		return []string{mimeMultipart}
 	}
 	return nil
-}
-
-// takesFile reports whether In has a file part.
-func takesFile(in reflect.Type) bool {
-	for _, f := range wireFields(in) {
-		if isFile(f.Type) {
-			return true
-		}
-	}
-	return false
 }
 
 // isFile reports whether t binds a multipart part: File, *File, []File or []*File.
@@ -520,6 +531,20 @@ func argValues(raw json.RawMessage) ([]string, error) {
 		return []string{s}, nil
 	}
 	return []string{string(raw)}, nil
+}
+
+// clearCookies zeroes v's cookie: fields, so the request's cookie is the only
+// thing that sets one: not the body, not an argument object, not the URL. A
+// page on another site can make a browser send a body; it cannot make it send
+// a cookie it does not hold.
+func clearCookies(v any) {
+	rv := reflect.ValueOf(v).Elem()
+	for _, f := range wireFields(rv.Type()) {
+		if cookieFieldName(f) != "" {
+			fv := rv.FieldByIndex(f.Index)
+			fv.Set(reflect.Zero(fv.Type()))
+		}
+	}
 }
 
 // bindCookies copies declared cookie values onto the input, as bindHeaders does

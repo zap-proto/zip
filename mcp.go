@@ -670,7 +670,7 @@ func (a *App) tool(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 		// Neither can be wrong about it: the same code that named the tool runs it.
 		if src := a.cfg.MCP.Source; src != nil {
 			out, err := src.Call(ctx, params.Name, params.Arguments)
-			return a.answer(f, out, err)
+			return a.answer(ctx, f, out, err)
 		}
 		if p := a.openPlugin(); p != nil {
 			return a.relay(ctx, f, p)
@@ -679,14 +679,19 @@ func (a *App) tool(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 	}
 
 	if op.ans.stream == streamSocket {
-		return a.answer(f, nil, Errorf(501, "%s: %s", opName(op), NotACall))
+		return a.answer(ctx, f, nil, Errorf(501, "%s: %s", opName(op), NotACall))
 	}
 	// No URL over MCP: a tools/call carries every argument in its JSON arguments
 	// object, so the body IS the whole input — neither query nor path binds.
 	// The header reader comes off the ctx, so it answers honestly on a transport
 	// that has a request behind it and nothing on one that does not.
 	out, err := op.invoke(withOp(ctx, servedOp(op)), input{dec: jsonenc.Unmarshal, body: params.Arguments, media: mimeJSON, header: headerOf(ctx)})
-	return a.answer(f, out, err)
+	// Bytes that state no type are the op's own media, as the REST door sends
+	// them, so a tool reads them the same way.
+	if b, ok := bodyOf(unwrap(out)); ok && err == nil && b.Type == "" && (len(b.Bytes) > 0 || b.Reader != nil) {
+		b.Type = produces(op, mimeOctet)
+	}
+	return a.answer(ctx, f, out, err)
 }
 
 // answer renders one tool result. A handler error is MCP isError content and not
@@ -696,8 +701,9 @@ func (a *App) tool(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 // An answer that is not one JSON value is read into content: bytes as text when
 // their media type is text, as an image or an embedded resource's base64 blob
 // otherwise, and an event stream as its events, one JSON line each — each
-// bounded, saying so in _meta when the bound cut it.
-func (a *App) answer(f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
+// bounded in bytes and a stream in time too, saying so in _meta when the bound
+// cut it.
+func (a *App) answer(ctx context.Context, f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
 	if err != nil {
 		return f.Answer(mcpJSON(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},
@@ -706,10 +712,10 @@ func (a *App) answer(f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
 	}
 	out = unwrap(out)
 	if _, isBody := bodyOf(out); isBody {
-		return a.content(f, out)
+		return a.content(ctx, f, out)
 	}
 	if _, isStream := out.(stream); isStream {
-		return a.content(f, out)
+		return a.content(ctx, f, out)
 	}
 	text := "null"
 	if out != nil {
@@ -723,14 +729,14 @@ func (a *App) answer(f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
 }
 
 // content answers a tools/call whose answer is bytes or a stream.
-func (a *App) content(f *zapmcp.Frame, out any) *zapmcp.Frame {
+func (a *App) content(ctx context.Context, f *zapmcp.Frame, out any) *zapmcp.Frame {
 	var params struct {
 		Name string `json:"name"`
 	}
 	_ = json.Unmarshal(f.Params, &params)
-	result, err := toolContent(params.Name, out)
+	result, err := toolContent(ctx, params.Name, out)
 	if err != nil {
-		return a.answer(f, nil, err)
+		return a.answer(ctx, f, nil, err)
 	}
 	return f.Answer(mcpJSON(result))
 }
@@ -788,7 +794,7 @@ func (a *App) relay(ctx context.Context, f *zapmcp.Frame, p *plugin) *zapmcp.Fra
 	body, err := json.Marshal(f)
 	if err != nil {
 		h.release()
-		return a.answer(f, nil, err)
+		return a.answer(ctx, f, nil, err)
 	}
 	req := fasthttp.AcquireRequest()
 	resp := fasthttp.AcquireResponse()
@@ -800,11 +806,11 @@ func (a *App) relay(ctx context.Context, f *zapmcp.Frame, p *plugin) *zapmcp.Fra
 	req.SetBody(body)
 	forwardIdentity(ctx, req)
 	if err := forward(ctx, req, resp, client, host, p.spec.mcpPath(), "mcp "+p.name, h); err != nil {
-		return a.answer(f, nil, err)
+		return a.answer(ctx, f, nil, err)
 	}
 	var ans zapmcp.Frame
 	if err := json.Unmarshal(resp.Body(), &ans); err != nil {
-		return a.answer(f, nil, fmt.Errorf("mcp %s: unreadable answer: %w", p.name, err))
+		return a.answer(ctx, f, nil, fmt.Errorf("mcp %s: unreadable answer: %w", p.name, err))
 	}
 	// The child answered its own copy of the message; this hop owns the
 	// correlation, so the reply is stamped with what the CALLER sent.

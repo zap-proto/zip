@@ -129,7 +129,7 @@ func (p *projector) requestBody(op ManifestOp, reg *schemaRegistry) map[string]a
 		if f := p.bodyField(td); f != nil && f.Doc != "" {
 			body["description"] = f.Doc
 		}
-	case p.takesForm(td):
+	case formMedia(media):
 		for _, m := range media {
 			content[m] = map[string]any{"schema": p.formSchema(td, m == mimeMultipart, reg)}
 		}
@@ -163,17 +163,20 @@ func (p *projector) bodyField(td *TypeDesc) *FieldDesc {
 	return nil
 }
 
-// takesForm reports whether the input's body is a form.
-func (p *projector) takesForm(td *TypeDesc) bool {
-	if td == nil || td.Kind != "struct" {
-		return false
+// formed is the JSON names of the input's form fields, when the op reads its
+// body as a form: each is a form field and not also a query parameter or a
+// body flag.
+func (p *projector) formed(op ManifestOp, td *TypeDesc) map[string]bool {
+	out := map[string]bool{}
+	if td == nil || td.Kind != "struct" || !formMedia(op.Consumes) {
+		return out
 	}
 	for _, f := range td.Fields {
 		if f.Form != "" {
-			return true
+			out[f.JSON] = true
 		}
 	}
-	return false
+	return out
 }
 
 // formSchema is a form body: one object of the input's form fields under their
@@ -261,9 +264,10 @@ func (p *projector) parameters(op ManifestOp) []any {
 		}
 	}
 	td := p.types[op.In]
-	if !hasBody(op.Method) || p.bodyField(td) != nil || p.takesForm(td) {
+	form := p.formed(op, td)
+	if !hasBody(op.Method) || p.bodyField(td) != nil || formMedia(op.Consumes) {
 		for _, f := range url {
-			if named[strings.ToLower(f.name)] {
+			if named[strings.ToLower(f.name)] || form[f.field] {
 				continue
 			}
 			decls = append(decls, describe(map[string]any{
@@ -304,7 +308,7 @@ func (p *projector) responses(op ManifestOp, reg *schemaRegistry) map[string]any
 			break
 		}
 	}
-	byStatus := p.alternatives(op.Out, primary)
+	byStatus := p.alternatives(op.Out, codes)
 	for _, code := range codes {
 		entry := map[string]any{"description": statusText(code)}
 		if h := headerDecls(op); h != nil {
@@ -370,28 +374,44 @@ func (p *projector) answers(out string) bool {
 	return td != nil && (td.Name != "" || td.Kind == "union")
 }
 
-// alternatives files an op's JSON answer by status: the value under the
-// primary status, or each alternative of a union under the status it states.
-func (p *projector) alternatives(out string, primary int) map[int][]TypeRef {
+// alternatives files an op's JSON answer by status. An alternative of a
+// union that states its own status is filed under it; the answer, or each
+// alternative that states none, is filed under every declared status that is
+// not a redirect and that no alternative claimed — an op that declares 200 and
+// 201 answers the same value under either. A named union none of whose
+// alternatives states a status is its own schema at each, one component every
+// op that answers it shares.
+func (p *projector) alternatives(out string, codes []int) map[int][]TypeRef {
 	td := p.types[out]
 	if td == nil || !p.answers(out) {
 		return nil
 	}
-	if td.Kind != "union" {
-		return map[int][]TypeRef{primary: {{Ref: out}}}
+	stated := map[int][]TypeRef{}
+	var unstated []TypeRef
+	if td.Kind == "union" {
+		for _, alt := range td.OneOf {
+			if a := p.types[alt.Ref]; a != nil && a.Status != 0 {
+				stated[a.Status] = append(stated[a.Status], alt)
+			} else {
+				unstated = append(unstated, alt)
+			}
+		}
+	}
+	if td.Kind != "union" || td.Name != "" && len(stated) == 0 {
+		unstated = []TypeRef{{Ref: out}}
 	}
 	by := map[int][]TypeRef{}
-	for _, alt := range td.OneOf {
-		code := primary
-		if a := p.types[alt.Ref]; a != nil && a.Status != 0 {
-			code = a.Status
-		}
-		by[code] = append(by[code], alt)
+	for code, alts := range stated {
+		by[code] = alts
 	}
-	if td.Name != "" && len(by) == 1 {
-		// A named union answered at one status is its own schema, one
-		// component every op that answers it shares.
-		return map[int][]TypeRef{primary: {{Ref: out}}}
+	for _, code := range codes {
+		if code >= 300 && code < 400 || len(unstated) == 0 {
+			continue
+		}
+		if _, taken := stated[code]; taken {
+			continue
+		}
+		by[code] = append(by[code], unstated...)
 	}
 	return by
 }
@@ -485,15 +505,16 @@ func ProjectCLI(m Manifest) []Command {
 
 // bind splits an op's input into positional args and flags: the URL addresses
 // the resource, so what addresses it is positional and what modifies the
-// request is a flag. A declared header or cookie is a flag that rides as one;
-// a body taken as sent is --body; a form field is a flag and a file part a
-// --field; what is left rides the JSON body, or the query when the body is not
-// JSON.
+// request is a flag. A declared cookie is a flag that rides as one; a body
+// taken as sent is --body; a form field is a flag and a file part a --field;
+// what is left rides the JSON body, or the query when the body is not JSON. A
+// declared header is a flag under its field's name, riding the body or the
+// query as it always has, which the header binder reads beside it.
 //
-// The flags come in the order the document lists them — headers, cookies,
-// then the query or the JSON body, then the form. The JSON body's fields come
-// in field order, which a schema's properties cannot carry, so a document
-// lists them by name.
+// The flags come in the order the document lists them — cookies, then the
+// query or the JSON body, then the form. The JSON body's fields come in field
+// order, which a schema's properties cannot carry, so a document lists them by
+// name.
 func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 	params := pathParams(op.Path)
 	td := p.types[op.In]
@@ -518,30 +539,26 @@ func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 			In:       in,
 		})
 	}
-	beside := map[string]bool{}
-	for _, f := range td.Fields {
-		if f.Header != "" {
-			add(f.Header, f.Header, p.flagType(f.Type), f.Doc, f.Required, "header")
-			beside[f.JSON] = true
-		}
-	}
+	// A cookie is a flag that rides as one: nothing else sets it.
 	for _, f := range td.Fields {
 		if f.Cookie != "" {
 			add(f.Cookie, f.Cookie, p.flagType(f.Type), f.Doc, f.Required, "cookie")
-			beside[f.JSON] = true
 		}
 	}
-	raw, form := p.bodyField(td), p.takesForm(td)
+	raw, formed := p.bodyField(td), p.formed(op, td)
+	form := formMedia(op.Consumes)
 	if hasBody(op.Method) && raw == nil && !form {
 		// Every field the JSON body carries, as the document's body schema
-		// lists it: a declared header or cookie rides the body too.
+		// lists it: a declared header rides the body too.
 		for _, f := range td.Fields {
-			add(f.JSON, urlName(f), p.flagType(f.Type), p.doc(op.In, f.JSON), f.Required, "")
+			if f.Cookie == "" {
+				add(f.JSON, urlName(f), p.flagType(f.Type), p.doc(op.In, f.JSON), f.Required, "")
+			}
 		}
 		return args, flags
 	}
 	for _, f := range p.urlFields(op.In) {
-		if beside[f.field] {
+		if formed[f.field] {
 			continue
 		}
 		kind, _ := f.schema["type"].(string)
@@ -672,8 +689,8 @@ func (p *projector) fill(into map[string]any, td *TypeDesc, reg *schemaRegistry)
 	props := map[string]any{}
 	var required []string
 	for _, f := range td.Fields {
-		if f.JSON == "-" {
-			continue
+		if f.JSON == "-" || f.Cookie != "" {
+			continue // a cookie rides only as one, never in the body
 		}
 		fs := p.schema(f.Type, reg)
 		if f.Doc != "" {

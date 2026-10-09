@@ -188,11 +188,12 @@ func WithStatus(codes ...int) OpOption {
 type StatusCoder interface{ StatusCode() int }
 
 // statusOf is the code an answer carries: what the value states if it states
-// anything, else the op's first declared status, else the default. A value that
-// states zero states nothing. relayed says the answer is an upstream's, whose
-// 4xx and 5xx pass through as the upstream's refusal ([Verbatim]).
+// anything, else the op's first declared status, else the default. A [Body] or
+// a [Redirect] that states zero states nothing; any other value stating zero
+// states a status it did not declare. relayed says the answer is an upstream's,
+// whose 4xx and 5xx pass through as the upstream's refusal ([Verbatim]).
 func statusOf(op *registeredOp, out any, relayed bool) (int, error) {
-	if sc, ok := out.(StatusCoder); ok && sc.StatusCode() != 0 {
+	if sc, ok := out.(StatusCoder); ok && (sc.StatusCode() != 0 || !ownStatus(out)) {
 		got := sc.StatusCode()
 		for _, declared := range op.Statuses {
 			if declared == got {
@@ -222,6 +223,14 @@ func statusOf(op *registeredOp, out any, relayed bool) (int, error) {
 		return op.Statuses[0], nil
 	}
 	return 0, nil
+}
+
+// ownStatus reports whether an answer is one of zip's kinds whose zero status
+// means the op's own: a [Body] or a [Redirect], or a type embedding one.
+func ownStatus(out any) bool {
+	_, body := out.(answerBody)
+	_, redirect := out.(redirector)
+	return body || redirect
 }
 
 // WithResponseHeader declares the headers this op may set on its answer.
@@ -636,6 +645,7 @@ func (op *registeredOp) settle() {
 	if len(op.Consumes) > 0 && !hasBody(op.Method) {
 		panic(fmt.Sprintf("zip: %s %s carries no request body, so it consumes nothing", op.Method, op.Path))
 	}
+	op.req.settle(op.Method, op.InType, op.Consumes)
 	op.Consumes = consumes(op)
 	op.ans.settle(op)
 }
@@ -666,7 +676,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 	for _, o := range opts {
 		o(op)
 	}
-	op.req = intakeOf(method, op.InType)
+	op.req = intakeOf(op.InType)
 	op.ans = answerOf(op.OutType)
 	op.settle()
 	op.readsHeaders = len(headerFields(op.InType)) > 0
@@ -800,6 +810,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 			bindHeaders(&in, wire.header)
 		}
 		if op.req.cookies {
+			clearCookies(&in)
 			bindCookies(&in, wire.cookie)
 		}
 		bindURL(&in, wire.query)
@@ -851,6 +862,14 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		served := Op{Method: meta.Method, Path: c.Route().Path, OperationID: op.OperationID}
 		if served.OperationID == "" {
 			served.OperationID = ID(meta.Method, served.Path)
+		}
+		// An op that answers a WebSocket refuses a request that cannot become one
+		// before its handler runs, so a handler with effects (a one-time ticket)
+		// runs only for a connection it will get.
+		if op.ans.stream == streamSocket {
+			if err := upgradable(c); err != nil {
+				return err
+			}
 		}
 		out, err := op.invoke(withOp(callerContext(c), served), wire)
 		if err != nil {

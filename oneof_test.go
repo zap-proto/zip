@@ -76,7 +76,7 @@ func either(_ context.Context, in *eitherIn) (*zip.Or[piece, zip.Sse[piece]], er
 	if !in.Stream {
 		return &zip.Or[piece, zip.Sse[piece]]{A: &piece{Text: "whole"}}, nil
 	}
-	return &zip.Or[piece, zip.Sse[piece]]{B: &zip.Sse[piece]{Send: func(emit func(zip.Event[piece]) error) error {
+	return &zip.Or[piece, zip.Sse[piece]]{B: &zip.Sse[piece]{Send: func(_ context.Context, emit func(zip.Event[piece]) error) error {
 		for _, w := range []string{"a", "b"} {
 			if err := emit(zip.Event[piece]{Data: piece{Text: w}}); err != nil {
 				return err
@@ -118,7 +118,7 @@ func TestOr_ValueOrStream(t *testing.T) {
 func TestSse_FramesAndKeepAlive(t *testing.T) {
 	app := zip.New(zip.Config{AppName: "sse", DisableStartupMessage: true})
 	app.Get("/v1/events", func(context.Context, *struct{}) (*zip.Sse[piece], error) {
-		return &zip.Sse[piece]{Keep: 10 * time.Millisecond, Send: func(emit func(zip.Event[piece]) error) error {
+		return &zip.Sse[piece]{Keep: 10 * time.Millisecond, Send: func(_ context.Context, emit func(zip.Event[piece]) error) error {
 			if err := emit(zip.Event[piece]{Event: "start", ID: "1", Retry: 500, Data: piece{Text: "x\ny"}}); err != nil {
 				return err
 			}

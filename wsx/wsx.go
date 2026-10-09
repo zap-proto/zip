@@ -48,6 +48,12 @@ func Upgrade(fn Handler, opts ...Config) zip.Handler {
 	if len(opts) > 0 {
 		cfg = opts[0]
 	}
+	// An untyped upgrade admits every origin unless told otherwise: zip is
+	// multi-tenant and such a route gates on its own. A typed [zip.Socket]
+	// keeps the library's same-origin default.
+	if cfg.CheckOrigin == nil {
+		cfg.CheckOrigin = func(*fasthttp.RequestCtx) bool { return true }
+	}
 	// TERMINAL: the upgrade takes over the connection, so this answers the
 	// address it is registered at and never yields to anything after it.
 	// zip.Terminal is what makes app.Use(wsx.Upgrade(…)) a build error instead

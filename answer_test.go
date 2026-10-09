@@ -173,7 +173,7 @@ func TestAnswer_JSONWireIsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := io.ReadAll(resp.Body)
-	if resp.Header.Get("Content-Type") != "application/json" || string(b) != `{"id":"x"}` {
+	if resp.Header.Get("Content-Type") != "application/json; charset=utf-8" || string(b) != `{"id":"x"}` {
 		t.Errorf("%q %s", resp.Header.Get("Content-Type"), b)
 	}
 }

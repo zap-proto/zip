@@ -156,6 +156,12 @@ func (a *App) installCallPlane() {
 		// through a text format on the way. JSON is the BOUNDARY encoding — it
 		// belongs on the REST routes a browser reaches and in the MCP envelope an
 		// agent reads, and has no place inside the binary protocol.
+		//
+		// A connection is not a call at all, so an op that answers one is
+		// refused before its handler runs.
+		if op.ans.stream == streamSocket {
+			return sendCallError(fc, Errorf(fiber.StatusNotImplemented, "%s: %s", opName(op), NotACall))
+		}
 		out, err := op.invoke(withOp(callerContext(fc), servedOp(op)), input{dec: zapenc.Unmarshal, body: fc.Body(), media: CallContentType, header: func(k string) string { return fc.Get(k) }})
 		if err != nil {
 			return sendCallError(fc, err)
@@ -176,14 +182,12 @@ func (a *App) installCallPlane() {
 			fc.Status(fiber.StatusAccepted)
 			return fc.Send(body)
 		}
-		// An answer that is not one value is not a message. A connection is not
-		// a call at all; an event stream is written as the REST door writes it,
-		// which over ZAP is zap-proto/http's head, data and end frames. Bytes
-		// that stream are read whole, since a reply here is one message.
-		switch x := unwrap(out).(type) {
-		case upgrader:
-			return sendCallError(fc, Errorf(fiber.StatusNotImplemented, "%s: %s", opName(op), NotACall))
-		case stream:
+		// An answer that is not one value is not a message. An event stream is
+		// written as the REST door writes it, which over ZAP is zap-proto/http's
+		// head, data and end frames. Bytes that stream are read whole, since a
+		// reply here is one message. A union that holds a value crosses as the
+		// union, which is the type the far side decodes.
+		if x, ok := unwrap(out).(stream); ok {
 			return writeAnswer(fc, op, x)
 		}
 		if b, ok := bodyOf(unwrap(out)); ok && b.Reader != nil {

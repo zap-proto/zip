@@ -68,36 +68,38 @@ type Command struct {
 	// Name is the operation token under the service ("invoices-list").
 	Name string
 
-	// OperationID is the op's identity — the SAME token the OpenAPI document's
-	// operationId, the MCP tool's name and zip.Call all address it by. A command
-	// is a projection of an op, not a second thing with a second name, and this
-	// is what says WHICH op it projects.
+	// A command is a projection of an op, not a second thing with a second
+	// name, and its operation id is what says WHICH op it projects.
+
+	// OperationID is the operation's identity: the same token the document's
+	// operationId and the MCP tool's name carry.
 	OperationID string
 
-	// Summary is the one-line help, from the handler's doc comment when
-	// cmd/zipdoc has run.
+	// Summary is the one-line help, from the handler's doc comment.
 	Summary string
 	// Description is the full prose, from the same doc comment.
 	Description string
 
 	// Method is the operation's HTTP method.
 	Method string
-	// Path is the operation's route pattern in fiber's ":name" form, whatever
-	// the derivation read it from.
+	// Path is the operation's route pattern, its parameters as ":name".
 	Path string
 
-	// Args are the path parameters, in path order, as positional arguments. The
-	// URL is the addressing authority (see bindPath), so what addresses the
-	// resource is positional and what modifies the request is a flag.
+	// The URL is the addressing authority (see bindPath), so what addresses
+	// the resource is positional and what modifies the request is a flag.
+
+	// Args are the path parameters, in path order, as positional arguments.
 	Args []Arg
 
-	// Flags are the remaining In fields.
+	// Flags are the operation's other inputs, one flag each.
 	Flags []Flag
 
-	// Example is the op's example input from the doc comment, rendered by the
-	// help as a runnable command line. It reaches a spec-derived command either
-	// from the request body or, for a bodyless method, rebuilt from the
-	// parameters the document had to split it across.
+	// A spec-derived command reads its example from the request body or, for a
+	// bodyless method, rebuilds it from the parameters the document had to
+	// split it across.
+
+	// Example is the operation's example input, which the help renders as a
+	// runnable command line.
 	Example json.RawMessage
 
 	// Consumes are the media the request body is sent in when it is not
@@ -105,9 +107,9 @@ type Command struct {
 	// fields and --field parts.
 	Consumes []string `json:",omitempty"`
 
-	// Stream is "sse", "bytes" or "socket" when the answer is not one JSON
-	// value: the runner prints events as they arrive, writes the bytes, or
-	// bridges the connection to stdin and stdout.
+	// Stream is sse, bytes or socket when the answer is not one JSON value: the
+	// runner prints events as they arrive, writes the bytes, or bridges the
+	// connection to standard input and output.
 	Stream string `json:",omitempty"`
 
 	// op is set only by App.Commands: it is what LocalInvoke runs. A
@@ -137,10 +139,10 @@ type Flag struct {
 	Help string
 	// Required says the command refuses to run without it.
 	Required bool
-	// In is where the value rides: "" the JSON body or the query, "header" or
-	// "cookie" a request header or cookie, "form" a form field, "file" a
-	// multipart part (--field name=@path), "body" the request body itself
-	// (--body @path, or - for stdin).
+	// In is where the value rides: empty for the JSON body or the query, cookie
+	// for a request cookie, form for a form field, file for a multipart part
+	// (--field name=@path), body for the request body itself (--body @path, or
+	// - for standard input).
 	In string `json:",omitempty"`
 }
 
@@ -387,13 +389,13 @@ type Invoker func(ctx context.Context, c Command, path map[string]string, body [
 //
 // A command's arguments are named, so they bind as path values, and a CLI has
 // no URL for the "?a=b" half: everything else arrives as one argument object,
-// exactly as it does over MCP. The flags that ride as a header or a cookie are
-// handed to the op as one, which is the request fact it declared.
+// exactly as it does over MCP. A flag that rides as a cookie is handed to the
+// op as one, the only way a cookie field is set.
 func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []byte) (any, error) {
 	if c.op == nil || c.op.invoke == nil {
 		return nil, fmt.Errorf("%s %s is not registered in this process — give the CLI a Remote invoker", c.Service, c.Name)
 	}
-	rest, header, cookie, err := c.split(body)
+	rest, cookie, err := c.split(body)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +408,6 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 		}
 	}
 	wire := input{dec: jsonenc.Unmarshal, media: mimeJSON, path: path,
-		header: func(k string) string { return header[k] },
 		cookie: func(k string) string { return cookie[k] }}
 	if len(rest) > 0 {
 		if wire.body, err = json.Marshal(rest); err != nil {
@@ -417,32 +418,28 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 }
 
 // split takes a command's argument object apart: the values that ride as
-// headers and cookies, keyed by the header and the cookie, and the rest.
-func (c Command) split(body []byte) (rest map[string]json.RawMessage, header, cookie map[string]string, err error) {
+// cookies, keyed by the cookie, and the rest.
+func (c Command) split(body []byte) (rest map[string]json.RawMessage, cookie map[string]string, err error) {
 	rest = map[string]json.RawMessage{}
-	header, cookie = map[string]string{}, map[string]string{}
+	cookie = map[string]string{}
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &rest); err != nil {
-			return nil, nil, nil, fmt.Errorf("%s %s: the arguments are not an object: %w", c.Service, c.Name, err)
+			return nil, nil, fmt.Errorf("%s %s: the arguments are not an object: %w", c.Service, c.Name, err)
 		}
 	}
 	for _, f := range c.Flags {
 		raw, ok := rest[f.Field]
-		if !ok || (f.In != "header" && f.In != "cookie") {
+		if !ok || f.In != "cookie" {
 			continue
 		}
 		v, err := queryValue(raw)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
-		if f.In == "header" {
-			header[f.Field] = v
-		} else {
-			cookie[f.Field] = v
-		}
+		cookie[f.Field] = v
 		delete(rest, f.Field)
 	}
-	return rest, header, cookie, nil
+	return rest, cookie, nil
 }
 
 // Remote executes a command against a running zip service, and reads that
@@ -465,19 +462,19 @@ func (r Remote) Spec(ctx context.Context) ([]byte, error) {
 // Invoke sends one command to the service. Its signature is Invoker's, so it
 // drops into a CLI wherever LocalInvoke would.
 //
-// The request is built the way the op takes it: header and cookie flags as
-// headers and cookies; a --body as the bytes themselves under the media the op
-// consumes; form fields and --field parts as a form; the rest as the JSON body,
-// or as the query when the method carries no body or the body is not JSON. An
-// answer that is not one JSON value comes back as it arrives — a [Body] whose
-// Reader the runner writes, events as the stream yields them, a [Redirect] for
-// a 3xx, and for an op that upgrades, the open connection.
+// The request is built the way the op takes it: cookie flags as cookies; a
+// --body as the bytes themselves under the media the op consumes; form fields
+// and --field parts as a form; the rest as the JSON body, or as the query when
+// the method carries no body or the body is not JSON. An answer that is not one
+// JSON value comes back as it arrives — a [Body] whose Reader the runner
+// writes, events as the stream yields them, a [Redirect] for a 3xx with no
+// body, and for an op that upgrades, the open connection.
 func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, body []byte) (any, error) {
 	url := c.Path
 	for name, val := range path {
 		url = strings.ReplaceAll(url, ":"+name, urlEscape(val))
 	}
-	rest, header, cookie, err := c.split(body)
+	rest, cookie, err := c.split(body)
 	if err != nil {
 		return nil, err
 	}
@@ -536,9 +533,9 @@ func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, b
 		}
 	}
 	if c.Stream == streamSocket {
-		return r.dial(ctx, url, header, cookie)
+		return r.dial(ctx, url, cookie)
 	}
-	return r.send(ctx, c, url, payload, media, header, cookie)
+	return r.send(ctx, c, url, payload, media, cookie)
 }
 
 // form encodes a command's form fields and file parts, and takes them out of
@@ -610,15 +607,12 @@ func (c Command) form(rest map[string]json.RawMessage) ([]byte, string, error) {
 
 // send performs one request and reads its answer the way the command says it
 // comes back.
-func (r Remote) send(ctx context.Context, c Command, path string, body []byte, media string, header, cookie map[string]string) (any, error) {
+func (r Remote) send(ctx context.Context, c Command, path string, body []byte, media string, cookie map[string]string) (any, error) {
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	if len(body) > 0 {
 		req.SetBody(body)
 		req.Header.SetContentType(media)
-	}
-	for k, v := range header {
-		req.Header.Set(k, v)
 	}
 	for k, v := range cookie {
 		req.Header.SetCookie(k, v)
@@ -630,8 +624,10 @@ func (r Remote) send(ctx context.Context, c Command, path string, body []byte, m
 		return nil, err
 	}
 	code := resp.StatusCode()
-	if code >= 300 && code < 400 {
-		to := string(resp.Header.Peek("Location"))
+	// A redirect carries no body, and is answered as where it sends the
+	// client; a 3xx that carries one is read as any other answer is.
+	if location := resp.Header.Peek("Location"); code >= 300 && code < 400 && len(location) > 0 && len(resp.Body()) == 0 {
+		to := string(location)
 		fasthttp.ReleaseResponse(resp)
 		return &Redirect{To: to, Status: code}, nil
 	}
@@ -672,7 +668,7 @@ func (a *answerStream) Close() error {
 }
 
 // dial opens the WebSocket an op upgrades to, over the address Base names.
-func (r Remote) dial(ctx context.Context, path string, header, cookie map[string]string) (*ws.Conn, error) {
+func (r Remote) dial(ctx context.Context, path string, cookie map[string]string) (*ws.Conn, error) {
 	scheme, host, _, err := transportFor(r.Base)
 	if err != nil {
 		return nil, err
@@ -688,9 +684,6 @@ func (r Remote) dial(ctx context.Context, path string, header, cookie map[string
 	}
 	h := http.Header{}
 	for k, v := range r.Header {
-		h.Set(k, v)
-	}
-	for k, v := range header {
 		h.Set(k, v)
 	}
 	for k, v := range cookie {
@@ -1198,7 +1191,7 @@ func writeResult(ctx context.Context, w io.Writer, in io.Reader, res any) error 
 	case upgrader:
 		return fmt.Errorf("zip: %s; reach it over HTTP", NotACall)
 	case stream:
-		return x.events(false, func(frame []byte) error {
+		return x.events(ctx, false, func(frame []byte) error {
 			_, err := fmt.Fprintln(w, string(frame))
 			return err
 		})

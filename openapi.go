@@ -865,8 +865,8 @@ func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fiel
 	var required []string
 	for _, f := range wireFields(t) {
 		name := jsonFieldName(f)
-		if name == "-" {
-			continue // exists, but the body does not carry it.
+		if name == "-" || cookieFieldName(f) != "" {
+			continue // exists, but the body does not carry it: a cookie rides only as one.
 		}
 		fs := schemaOf(f.Type, reg, fields)
 		if d := fields[typeName(t)+"."+name]; d != "" {
@@ -1035,10 +1035,10 @@ func urlFieldName(f reflect.StructField) string {
 	if tag, ok := f.Tag.Lookup("url"); ok {
 		return jsontag.Name(f.Name, tag)
 	}
-	// The body taken as sent, a form field, a file part and a cookie each ride
-	// where they are declared, and a URL that could also carry one would be a
-	// second way to say it — for a cookie, a way for a link to set a session.
-	if f.Type == bodyType || formFieldName(f) != "" || cookieFieldName(f) != "" {
+	// The body taken as sent and a cookie each ride where they are declared,
+	// and a URL that could also carry one would be a second way to say it —
+	// for a cookie, a way for a link to set a session.
+	if f.Type == bodyType || cookieFieldName(f) != "" {
 		return "-"
 	}
 	return jsonFieldName(f)

@@ -41,7 +41,12 @@ func token(_ context.Context, in *tokenIn) (*tokenOut, error) {
 	return &tokenOut{Grant: in.Grant, Code: in.Code, Scope: in.Scope, Device: in.Device}, nil
 }
 
+// tokenApp registers the token op; with no options it consumes a url-encoded
+// form, which is what makes its form: fields a form.
 func tokenApp(opts ...zip.OpOption) *zip.App {
+	if len(opts) == 0 {
+		opts = []zip.OpOption{zip.Consumes("application/x-www-form-urlencoded")}
+	}
 	app := zip.New(zip.Config{AppName: "auth", DisableStartupMessage: true})
 	zip.Describe("POST /v1/token", zip.Doc{
 		Description: "Token trades a grant for a token.",
@@ -232,5 +237,56 @@ func TestForm_CookieIsNotAQueryValue(t *testing.T) {
 		if m := p.(map[string]any); m["in"] == "query" {
 			t.Errorf("the cookie is published as a query parameter: %v", m)
 		}
+	}
+}
+
+// form: tags alone are another binder's convention, and an op that consumes no
+// form keeps the wire it had: a GET registers and binds its query, a POST binds
+// its JSON body.
+func TestForm_TagsAloneAreAnotherBinders(t *testing.T) {
+	type searchIn struct {
+		Q string `json:"q" form:"q"`
+	}
+	app := zip.New(zip.Config{AppName: "g", DisableStartupMessage: true})
+	app.Get("/v1/search", func(_ context.Context, in *searchIn) (*tokenOut, error) { return &tokenOut{Code: in.Q}, nil })
+	app.Post("/v1/token", token)
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/v1/search?q=hi", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got tokenOut
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if resp.StatusCode != 200 || got.Code != "hi" {
+		t.Errorf("GET: %d %+v", resp.StatusCode, got)
+	}
+	code, got := postForm(t, app, "application/json", []byte(`{"grant_type":"g","code":"c"}`), "")
+	if code != 200 || got.Grant != "g" || got.Code != "c" {
+		t.Errorf("POST: %d %+v", code, got)
+	}
+	content := opIn(t, app, "/v1/token", "post")["requestBody"].(map[string]any)["content"].(map[string]any)
+	if _, ok := content["application/json"]; !ok || len(content) != 1 {
+		t.Errorf("content = %v, want JSON as before", content)
+	}
+}
+
+// A cookie field is set by the request's cookie and by nothing else: a body
+// that names it, which a page on another site can make a browser send, sets
+// nothing.
+func TestForm_CookieIsNotABodyValue(t *testing.T) {
+	both := tokenApp(zip.Consumes("application/x-www-form-urlencoded", "application/json"))
+	body := []byte(`{"grant_type":"g","device":"forged"}`)
+	if _, got := postForm(t, both, "text/plain", body, ""); got.Device != "" {
+		t.Errorf("a text/plain body set the cookie field: %q", got.Device)
+	}
+	if _, got := postForm(t, both, "application/json", body, ""); got.Device != "" || got.Grant != "g" {
+		t.Errorf("a JSON body set the cookie field: %+v", got)
+	}
+	if _, got := postForm(t, both, "application/json", body, "device=d1"); got.Device != "d1" {
+		t.Errorf("the cookie did not set its field: %+v", got)
+	}
+	props := opIn(t, both, "/v1/token", "post")["requestBody"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"]
+	if b, _ := json.Marshal(props); strings.Contains(string(b), "device") {
+		t.Errorf("the JSON body schema publishes the cookie: %s", b)
 	}
 }

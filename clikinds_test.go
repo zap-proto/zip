@@ -18,7 +18,7 @@ import (
 )
 
 // Every kind of request and answer is a command. Bytes are named with @file or
-// -, a multipart part with --field name=@file, a header or cookie is a flag
+// -, a multipart part with --field name=@file, a cookie is a flag
 // that rides as one, and an answer that is not one JSON value is written as it
 // is: bytes to the output or --out, events as they arrive, a redirect's
 // Location, a WebSocket bridged to the terminal.
@@ -27,23 +27,15 @@ func kindsApp() *zip.App {
 	app := zip.New(zip.Config{AppName: "kinds", DisableStartupMessage: true})
 	app.Post("/v1/books/:org/scan", scan, zip.Consumes("application/pdf", "image/png"))
 	app.Post("/v1/upload", upload)
-	app.Post("/v1/token", token)
+	app.Post("/v1/token", token, zip.Consumes("application/x-www-form-urlencoded"))
 	app.Get("/v1/reports/:id", report, zip.Produces("application/pdf"), zip.WithStatus(200, 202))
 	app.Get("/v1/login", func(context.Context, *struct{}) (*zip.Redirect, error) {
 		return &zip.Redirect{To: "https://id.example/authorize"}, nil
 	})
 	app.Post("/v1/ask", either)
 	app.Get("/v1/rooms", room)
-	app.Post("/v1/hdr", func(_ context.Context, in *hdrIn) (*mkOut, error) { return &mkOut{ID: in.Org + "/" + in.Name}, nil })
-	app.Get("/v1/hdr", func(_ context.Context, in *hdrIn) (*mkOut, error) { return &mkOut{ID: in.Org + "/" + in.Name}, nil })
 	app.Get("/v1/me", func(_ context.Context, in *meIn) (*mkOut, error) { return &mkOut{ID: in.Session}, nil })
 	return app
-}
-
-// hdrIn reads a declared header beside its other fields.
-type hdrIn struct {
-	Name string `json:"name"`
-	Org  string `json:"org" header:"X-Org-Id"`
 }
 
 // meIn reads a session cookie.
@@ -193,10 +185,6 @@ func TestCLIKinds_Remote(t *testing.T) {
 		t.Errorf("socket printed %q", got)
 	}
 	var who mkOut
-	_ = json.Unmarshal([]byte(run("", argv(t, cmds, "GET", "/v1/hdr", "--x-org-id", "acme", "--name", "n")...)), &who)
-	if who.ID != "acme/n" {
-		t.Errorf("header op saw %+v", who)
-	}
 	_ = json.Unmarshal([]byte(run("", argv(t, cmds, "GET", "/v1/me", "--session", "s1")...)), &who)
 	if who.ID != "s1" {
 		t.Errorf("cookie op saw %+v", who)

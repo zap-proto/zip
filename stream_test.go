@@ -125,7 +125,7 @@ func TestListenZAP_TypedStream(t *testing.T) {
 	release := make(chan struct{})
 	app := zip.New(zip.Config{AppName: "typed-stream", DisableStartupMessage: true})
 	app.Get("/v1/events", func(context.Context, *struct{}) (*zip.Sse[piece], error) {
-		return &zip.Sse[piece]{Send: func(emit func(zip.Event[piece]) error) error {
+		return &zip.Sse[piece]{Send: func(_ context.Context, emit func(zip.Event[piece]) error) error {
 			for _, w := range []string{"a", "b"} {
 				<-release
 				if err := emit(zip.Event[piece]{Data: piece{Text: w}}); err != nil {
