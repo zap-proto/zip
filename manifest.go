@@ -112,19 +112,35 @@ type ManifestOp struct {
 	OAuth bool `json:"oauth,omitempty"`
 
 	// Stream says the answer is written as it is produced rather than as one
-	// JSON value: "sse" is a text/event-stream, "bytes" an octet stream. Empty
-	// is one value, Out.
+	// JSON value: "sse" is a text/event-stream, "bytes" an octet stream,
+	// "socket" an upgrade to a WebSocket. Empty is one value, Out. Beside an
+	// Out it means either: the op answers the value or the stream.
 	Stream string `json:"stream,omitempty"`
 
 	// Raw says the request body is read as bytes, as sent, and binds to no
 	// type: a relay's upload. Such an op names no In.
 	Raw bool `json:"raw,omitempty"`
+
+	// Consumes are the media the request body is declared in when it is not
+	// application/json; Produces the media of the answer when it is not
+	// application/json, or, for a stream of bytes, application/octet-stream.
+	Consumes []string `json:"consumes,omitempty"`
+	Produces []string `json:"produces,omitempty"`
+
+	// Event is the type id of one frame of the stream: an sse event's data, a
+	// socket's message. Empty says the frames are not typed.
+	Event string `json:"event,omitempty"`
+
+	// Verbatim says the answer is an upstream's, relayed as it was sent, so a
+	// refusal may be the upstream's own rather than this service's.
+	Verbatim bool `json:"verbatim,omitempty"`
 }
 
 // streams are the answers a manifest may say an op streams, by media type.
 var streams = map[string]string{
-	"sse":   "text/event-stream",
-	"bytes": "application/octet-stream",
+	streamSSE:    "text/event-stream",
+	streamBytes:  mimeOctet,
+	streamSocket: "",
 }
 
 // TypeDesc is one type, described by what it is made of and by what it looks
@@ -176,6 +192,18 @@ type TypeDesc struct {
 	Len int `json:"len,omitempty"`
 
 	Fields []FieldDesc `json:"fields,omitempty"`
+
+	// OneOf are the alternatives of a union (kind "union"): a value is exactly
+	// one of them.
+	OneOf []TypeRef `json:"oneOf,omitempty"`
+
+	// Status is the status an answer of this type states for itself, when it is
+	// one alternative of a union answer.
+	Status int `json:"status,omitempty"`
+
+	// Binary says the type is bytes where a body or a form part carries it: a
+	// request body taken as sent, a file part.
+	Binary bool `json:"binary,omitempty"`
 }
 
 // FieldDesc is one field of a struct.
@@ -185,10 +213,17 @@ type FieldDesc struct {
 	Name string `json:"name"`
 	JSON string `json:"json"`
 
-	// URL is the name a URL carries it under and Header the request header it
-	// reads. Both empty means it rides the body alone.
+	// URL is the name a URL carries it under, Header the request header and
+	// Cookie the request cookie it reads. All empty means it rides the body
+	// alone.
 	URL    string `json:"url,omitempty"`
 	Header string `json:"header,omitempty"`
+	Cookie string `json:"cookie,omitempty"`
+
+	// Form is the form key it binds when the body is a form. Body says it IS
+	// the request body, taken as sent.
+	Form string `json:"form,omitempty"`
+	Body bool   `json:"body,omitempty"`
 
 	Required bool   `json:"required,omitempty"`
 	Doc      string `json:"doc,omitempty"`
@@ -202,6 +237,10 @@ type FieldDesc struct {
 	// "map[string]info.LP" when the file says HashMap<String, Lp> is worse than
 	// saying nothing.
 	Spell string `json:"spell,omitempty"`
+
+	// from is the type that declares the field when it is promoted from an
+	// embedded struct, by its reflect name — where its prose is filed.
+	from string
 }
 
 // TypeRef names a field's type: a primitive by its spelling, a described type
@@ -264,6 +303,11 @@ func (m Manifest) Check() error {
 				return err
 			}
 		}
+		for _, alt := range td.OneOf {
+			if err := resolves(known, td.ID+" alternative", alt); err != nil {
+				return err
+			}
+		}
 		if td.Elem != nil {
 			if err := resolves(known, td.ID+" element", *td.Elem); err != nil {
 				return err
@@ -277,10 +321,13 @@ func (m Manifest) Check() error {
 			}
 		}
 		if _, ok := streams[op.Stream]; op.Stream != "" && !ok {
-			return fmt.Errorf("op %s streams %q; a stream is sse or bytes", op.ID, op.Stream)
+			return fmt.Errorf("op %s streams %q; a stream is sse, bytes or socket", op.ID, op.Stream)
 		}
-		if op.Stream != "" && op.Out != "" {
-			return fmt.Errorf("op %s streams and names output %q; a streamed answer is not one value", op.ID, op.Out)
+		if op.Stream == streamSocket && op.Out != "" {
+			return fmt.Errorf("op %s upgrades and names output %q; an upgrade is the whole answer", op.ID, op.Out)
+		}
+		if op.Event != "" && !known[op.Event] {
+			return fmt.Errorf("op %s names event %q, which nothing described", op.ID, op.Event)
 		}
 		if op.Raw && op.In != "" {
 			return fmt.Errorf("op %s reads its body raw and names input %q; a raw body binds to nothing", op.ID, op.In)
@@ -331,9 +378,14 @@ func (a *App) Manifest() Manifest {
 			Pkg:             op.Pkg,
 			Origin:          op.Origin,
 			In:              d.describe(op.InType, op.Origin),
-			Out:             d.describe(op.OutType, op.Origin),
+			Out:             d.answer(op.ans, op.Origin),
 			Gated:           op.rule != nil && op.rule() != nil,
 			OAuth:           oauth[op.Method+" "+op.Path],
+			Stream:          op.ans.stream,
+			Event:           d.describe(op.ans.frame, op.Origin),
+			Consumes:        op.Consumes,
+			Produces:        op.Produces,
+			Verbatim:        op.ans.verbatim,
 		}
 		if hasDoc {
 			mo.Description = doc.Description
@@ -375,6 +427,17 @@ func (d *describer) describe(t reflect.Type, origin string) string {
 	td := &TypeDesc{ID: id, Name: t.Name(), Pkg: t.PkgPath(), Spell: goName(t), Text: readsText(t)}
 	d.out = append(d.out, td) // claimed before the fields are walked: the cycle guard.
 
+	// A union is its alternatives. It writes itself, so its fields are not its
+	// wire form, and it states no schema of its own: the alternatives do.
+	if alts := alternatives(t); len(alts) > 0 {
+		td.Kind = "union"
+		for _, alt := range alts {
+			td.OneOf = append(td.OneOf, d.ref(alt, origin))
+		}
+		return id
+	}
+	td.Binary = t == bodyType || t == fileType
+
 	if isMarshaler(t) {
 		switch {
 		case declaredSchema(t) != nil:
@@ -414,6 +477,40 @@ func (d *describer) describe(t reflect.Type, origin string) string {
 	return id
 }
 
+// answer describes what an op answers with as one JSON value: the value's type,
+// a union's own type, or an anonymous union of an [Or]'s JSON alternatives.
+// Each alternative that states its own status carries it.
+func (d *describer) answer(a answer, origin string) string {
+	id := ""
+	switch {
+	case a.union != nil:
+		id = d.describe(a.union, origin)
+	case len(a.json) == 1:
+		id = d.describe(a.json[0], origin)
+	case len(a.json) > 1:
+		d.anon++
+		td := &TypeDesc{ID: fmt.Sprintf("#%d", d.anon), Kind: "union"}
+		d.out = append(d.out, td)
+		for _, t := range a.json {
+			td.OneOf = append(td.OneOf, d.ref(t, origin))
+		}
+		id = td.ID
+	}
+	for t, code := range a.statuses {
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if alt, ok := d.byType[t]; ok {
+			for _, td := range d.out {
+				if td.ID == alt {
+					td.Status = code
+				}
+			}
+		}
+	}
+	return id
+}
+
 // state gives a value type the shape it shows on the wire, since it has no
 // fields to be described by. A type that already stated its own keeps it.
 func (d *describer) state(td *TypeDesc, t reflect.Type) {
@@ -431,9 +528,15 @@ func (d *describer) fields(td *TypeDesc, t reflect.Type, origin string) {
 			JSON:     jsonFieldName(f),
 			URL:      urlFieldName(f),
 			Header:   headerFieldName(f),
+			Cookie:   cookieFieldName(f),
+			Form:     formFieldName(f),
+			Body:     f.Type == bodyType,
 			Required: strings.Contains(f.Tag.Get("validate"), "required"),
 			Type:     d.ref(f.Type, origin),
 			Spell:    goName(f.Type),
+		}
+		if from := declaring(t, f.Index); from != t {
+			fd.from = from.Name()
 		}
 		if fd.URL == fd.JSON {
 			fd.URL = "" // says nothing: the wire name is the URL name.
@@ -493,6 +596,10 @@ func (d *describer) prose(fields map[string]string) {
 			}
 			if s := fields[td.Name+"."+td.Fields[i].JSON]; s != "" {
 				td.Fields[i].Doc = s
+			} else if from := td.Fields[i].from; from != "" {
+				// Promoted from an embedded struct: its prose is filed under the
+				// type that declares it, which is where zipdoc read it.
+				td.Fields[i].Doc = fields[from+"."+td.Fields[i].JSON]
 			}
 		}
 	}
@@ -522,13 +629,13 @@ func (d *describer) id(t reflect.Type, origin string) string {
 		d.anon++
 		return fmt.Sprintf("#%d", d.anon)
 	}
-	base := qual + t.Name()
+	base := qual + componentName(t)
 	if !d.taken[base] {
 		d.taken[base] = true
 		return base
 	}
 	if p := t.PkgPath(); p != "" {
-		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + t.Name()
+		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + componentName(t)
 	}
 	for name, n := base, 2; ; n++ {
 		if !d.taken[name] {

@@ -31,6 +31,7 @@ Patch tags, one above the highest `v*` on GitHub. Push the commit to main, read 
 | Files | Hold |
 |---|---|
 | `typed.go` | `Get`, `Post`, `Put`, `Patch`, `Delete`, the `With*` options, `registeredOp`. `invoke` decodes the body, binds declared headers, the query and the path, then `run` validates, authorizes and calls the handler. |
+| `body.go`, `answer.go`, `oneof.go` | the request kinds (`Body` field, `Parser`, `form:`/`cookie:` fields, `File`, `Consumes`) and the answer kinds (`Body`, `Verbatim`, `Sse`, `Socket`, `Redirect`, `CookieCoder`, `Produces`, `Or` and the `OneOf()` union). `intakeOf` and `answerOf` read them off In and Out once; `writeAnswer` is the one place they reach the REST wire. |
 | `openapi.go` | the document (`buildOpenAPI`), `schemaOf`, `ID`, `SpecPath`, `DocsPath`, the Swagger UI page, the `default` refusal response |
 | `mcp.go` | `App.MCP` (the door as a `zapmcp.Handler`), the `POST /mcp` adapter, `negotiate`, `MCPConfig` |
 | `cli.go`, `clispec.go` | `Commands`, `CLI`, `LocalInvoke`, `Remote`, `CommandsFromSpec` |
@@ -71,7 +72,8 @@ Patch tags, one above the highest `v*` on GitHub. Push the commit to main, read 
 - `app.Test` runs `prepare`, so `/mcp`, the OpenAPI document and the call plane answer under test as they do when serving.
 - The `/docs` page loads Swagger UI from cdn.jsdelivr.net. Embedding swagger-ui-dist 5 would add about 1.74 MB (bundle 1,552,209 bytes, CSS 185,784 bytes, Apache-2.0) to every binary that links zip.
 
-- A manifest op may say `"stream": "sse"` or `"bytes"` (the answer is written as produced, and `ProjectOpenAPI` publishes `text/event-stream` or `application/octet-stream` for it) and `"raw": true` (the request body is bytes, bound to no type). `Check` refuses a stream beside an `out` and a raw body beside an `in`. Go's own typed ops set neither; the Rust front end sets both.
+- A manifest op may say `"stream": "sse"`, `"bytes"` or `"socket"` (the answer is written as produced, or the connection upgrades; `ProjectOpenAPI` publishes `text/event-stream` with `x-events`, binary media, or `101` with `x-socket`) and `"raw": true` (the request body is bytes, bound to no type; the Rust front end's). A stream beside an `out` means either. `Check` refuses a socket beside an `out` and a raw body beside an `in`.
+- Every wire is a typed op. A request body that is not JSON is a `zip.Body` field (bytes and Content-Type as sent), a `Parser` In (decodes itself; the document keeps In's schema), or `form:` fields and `*zip.File` parts; `cookie:` is an `in: cookie` parameter. An answer that is not one JSON value is a `Body` (bytes, filename, its own status and headers; a `Reader` streams chunked), `Verbatim[T]` (a relay's bytes documented as T; the upstream's 4xx/5xx pass undeclared), `Sse[T]`, `Socket[M]` (GET only; 426 without an upgrade, 501 over ZAP), `Redirect` or a `CookieCoder`. A union is a type whose `OneOf()` result types are its alternatives; `Or[A,B]` is the stock one and files an alternative under its value-receiver `StatusCode()`. Over MCP bytes are base64 (in) and tool content (out), a stream is collected as JSON lines up to `toolBound`, and a socket op is no tool (`_meta.refused`). The call plane writes an `Sse` as the REST door does and refuses a `Socket`.
 
 ## Rust
 

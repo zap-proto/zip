@@ -42,6 +42,8 @@ func CommandsFromSpec(spec []byte) ([]Command, error) {
 			}
 			c.Args, c.Flags = doc.bind(op, pathParams(route))
 			c.Example = op.example()
+			c.Consumes = op.consumes()
+			c.Stream = op.stream()
 			cmds = append(cmds, c)
 		}
 	}
@@ -63,21 +65,53 @@ func (d specDoc) bind(op specOp, params []pathParam) ([]Arg, []Flag) {
 	}
 
 	var flags []Flag
-	add := func(name, typ, description string, required bool) {
+	add := func(name, typ, description string, required bool, in string) {
 		if isParam(params, name) {
 			return
 		}
 		flags = append(flags, Flag{
 			Name: kebab(name), Field: name, Type: specType(typ),
-			Help: description, Required: required,
+			Help: description, Required: required, In: in,
 		})
 	}
-	// Query parameters are inputs too — an operation that takes its filters in
-	// the URL must offer them as flags, or the CLI silently loses half the API.
-	for _, p := range op.Parameters {
-		if p.In == "query" {
-			add(p.Name, p.Schema.Type, p.Description, p.Required)
+	// A declared header or cookie is a flag that rides as one. Query
+	// parameters are inputs too — an operation that takes its filters in the
+	// URL must offer them as flags, or the CLI silently loses half the API.
+	for _, in := range []string{"header", "cookie", "query"} {
+		for _, p := range op.Parameters {
+			if p.In == in {
+				where := in
+				if in == "query" {
+					where = ""
+				}
+				add(p.Name, p.Schema.Type, p.Description, p.Required, where)
+			}
 		}
+	}
+	if form := op.form(); form != nil {
+		s := d.resolve(form.Schema)
+		req := map[string]bool{}
+		for _, r := range s.Required {
+			req[r] = true
+		}
+		names := make([]string, 0, len(s.Properties))
+		for name := range s.Properties {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			p := s.Properties[name]
+			in, kind := "form", specType(p.Type)
+			if p.Format == "binary" || p.Items != nil && p.Items.Format == "binary" {
+				in, kind = "file", "file"
+			}
+			flags = append(flags, Flag{Name: kebab(name), Field: name, Type: kind, Help: p.Description, Required: req[name], In: in})
+		}
+		return args, flags
+	}
+	if op.bytes() {
+		flags = append(flags, Flag{Name: "body", Field: "body", Type: "file", Help: op.RequestBody.Description, In: "body"})
+		return args, flags
 	}
 	if body := op.body(); body != nil {
 		s := d.resolve(body.Schema)
@@ -92,7 +126,7 @@ func (d specDoc) bind(op specOp, params []pathParam) ([]Arg, []Flag) {
 		sort.Strings(names) // a map has no order; a CLI must
 		for _, name := range names {
 			p := s.Properties[name]
-			add(name, p.Type, p.Description, req[name])
+			add(name, p.Type, p.Description, req[name], "")
 		}
 	}
 	return args, flags
@@ -133,8 +167,11 @@ type specOp struct {
 	Description string      `json:"description"`
 	Parameters  []specParam `json:"parameters"`
 	RequestBody *struct {
-		Content map[string]specMedia `json:"content"`
+		Description string               `json:"description"`
+		Content     map[string]specMedia `json:"content"`
 	} `json:"requestBody"`
+	// Socket is "websocket" for an op whose answer is an upgrade.
+	Socket string `json:"x-socket"`
 	// Responses is read by the SDK projection, which needs the ANSWER's type as
 	// well as the request's. A command does not: it prints whatever came back.
 	Responses map[string]struct {
@@ -181,6 +218,72 @@ func (o specOp) body() *specMedia {
 		return &m
 	}
 	return nil
+}
+
+// form returns the form request media, if the body is a form.
+func (o specOp) form() *specMedia {
+	if o.RequestBody == nil {
+		return nil
+	}
+	for _, media := range []string{mimeMultipart, mimeForm} {
+		if m, ok := o.RequestBody.Content[media]; ok {
+			return &m
+		}
+	}
+	return nil
+}
+
+// bytes reports whether the request body is bytes taken as sent.
+func (o specOp) bytes() bool {
+	if o.RequestBody == nil || o.body() != nil || o.form() != nil {
+		return false
+	}
+	for _, m := range o.RequestBody.Content {
+		if m.Schema.Format == "binary" {
+			return true
+		}
+	}
+	return false
+}
+
+// consumes are the request media when they are not application/json alone,
+// sorted, as [ProjectCLI] spells them.
+func (o specOp) consumes() []string {
+	if o.RequestBody == nil {
+		return nil
+	}
+	if _, ok := o.RequestBody.Content[mimeJSON]; ok && len(o.RequestBody.Content) == 1 {
+		return nil
+	}
+	out := make([]string, 0, len(o.RequestBody.Content))
+	for m := range o.RequestBody.Content {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// stream is the kind of answer that is not one JSON value: an upgrade, an
+// event stream, or bytes.
+func (o specOp) stream() string {
+	if o.Socket != "" {
+		return streamSocket
+	}
+	kind := ""
+	for code, r := range o.Responses {
+		if len(code) != 3 || code[0] != '2' {
+			continue
+		}
+		for media, m := range r.Content {
+			switch {
+			case media == "text/event-stream":
+				return streamSSE
+			case m.Schema.Format == "binary":
+				kind = streamBytes
+			}
+		}
+	}
+	return kind
 }
 
 // example is the op's example input, reassembled from wherever the document had

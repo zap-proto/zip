@@ -2,6 +2,7 @@ package zip_test
 
 import (
 	"bufio"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -116,3 +117,65 @@ func readOneEvent(br *bufio.Reader) (string, error) {
 type streamTimeout struct{}
 
 func (*streamTimeout) Error() string { return "timed out waiting for streamed event over ZAP" }
+
+// A typed op's event stream crosses ZAP the way an untyped one does: as
+// zap-proto/http's head, data and end frames, each event as it is sent. A
+// typed op that upgrades is answered 501 over ZAP, which carries no upgrade.
+func TestListenZAP_TypedStream(t *testing.T) {
+	release := make(chan struct{})
+	app := zip.New(zip.Config{AppName: "typed-stream", DisableStartupMessage: true})
+	app.Get("/v1/events", func(context.Context, *struct{}) (*zip.Sse[piece], error) {
+		return &zip.Sse[piece]{Send: func(emit func(zip.Event[piece]) error) error {
+			for _, w := range []string{"a", "b"} {
+				<-release
+				if err := emit(zip.Event[piece]{Data: piece{Text: w}}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}}, nil
+	})
+	app.Get("/v1/rooms", room)
+
+	addr := freeAddr(t)
+	go func() { _ = app.Listen(addr) }() // bare addr = ZAP
+	defer func() { _ = app.Shutdown() }()
+	tr := http.Dial("tcp", addr)
+	defer tr.CloseIdleConnections()
+	do := func(path string) *fasthttp.Response {
+		req := fasthttp.AcquireRequest()
+		defer fasthttp.ReleaseRequest(req)
+		resp := fasthttp.AcquireResponse()
+		req.SetRequestURI(path)
+		req.Header.SetMethod("GET")
+		var err error
+		for i := 0; i < 50; i++ {
+			if err = tr.Do(req, resp); err == nil {
+				return resp
+			}
+			time.Sleep(40 * time.Millisecond)
+		}
+		t.Fatalf("GET %s over ZAP: %v", path, err)
+		return nil
+	}
+
+	resp := do("/v1/events")
+	defer fasthttp.ReleaseResponse(resp)
+	if !resp.IsBodyStream() || string(resp.Header.ContentType()) != "text/event-stream" {
+		t.Fatalf("not a stream: %q", resp.Header.ContentType())
+	}
+	br := bufio.NewReader(resp.BodyStream())
+	for _, w := range []string{"a", "b"} {
+		release <- struct{}{}
+		got, err := readOneEvent(br)
+		if err != nil || got != "data: {\"text\":\""+w+"\"}\n\n" {
+			t.Fatalf("event %s = %q, %v", w, got, err)
+		}
+	}
+
+	up := do("/v1/rooms?room=r1")
+	defer fasthttp.ReleaseResponse(up)
+	if up.StatusCode() != 501 {
+		t.Errorf("an upgrade over ZAP answered %d, want 501", up.StatusCode())
+	}
+}

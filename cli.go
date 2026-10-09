@@ -1,17 +1,29 @@
 package zip
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/zap-proto/zip/internal/jsonenc"
 	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	neturl "net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/fasthttp/websocket"
 	"github.com/valyala/fasthttp"
+
+	"github.com/zap-proto/zip/internal/jsonenc"
+	"github.com/zap-proto/zip/internal/ws"
 )
 
 // CLI — the FOURTH projection. The same typed-op registry (a.registry) that produces
@@ -86,6 +98,16 @@ type Command struct {
 	// parameters the document had to split it across.
 	Example json.RawMessage
 
+	// Consumes are the media the request body is sent in when it is not
+	// application/json, sorted: bytes as sent for --body, a form for form
+	// fields and --field parts.
+	Consumes []string `json:",omitempty"`
+
+	// Stream is "sse", "bytes" or "socket" when the answer is not one JSON
+	// value: the runner prints events as they arrive, writes the bytes, or
+	// bridges the connection to stdin and stdout.
+	Stream string `json:",omitempty"`
+
 	// op is set only by App.Commands: it is what LocalInvoke runs. A
 	// spec-derived command has none and must be executed remotely.
 	op *registeredOp
@@ -100,10 +122,15 @@ type Arg struct {
 // Flag is one In field as a flag.
 type Flag struct {
 	Name     string // the flag, kebab-cased and without the dashes: "organization-id"
-	Field    string // the JSON field it sets: "organizationId"
-	Type     string // string | integer | number | boolean | json
+	Field    string // the name it is sent under: the JSON field, the header, the cookie or the form key
+	Type     string // string | integer | number | boolean | json | file
 	Help     string
 	Required bool
+	// In is where the value rides: "" the JSON body or the query, "header" or
+	// "cookie" a request header or cookie, "form" a form field, "file" a
+	// multipart part (--field name=@path), "body" the request body itself
+	// (--body @path, or - for stdin).
+	In string `json:",omitempty"`
 }
 
 // Commands projects every registered typed op into a command. This is the whole
@@ -121,88 +148,6 @@ func (a *App) Commands() []Command {
 		cmds[i].op = ops[cmds[i].OperationID]
 	}
 	return cmds
-}
-
-// newCommand fills in everything that comes from the op's identity and its doc,
-// which is the half both derivations share.
-func newCommand(method, path, id, summary string, doc Doc, has bool) Command {
-	svc, name := commandName(method, path, id)
-	c := Command{Service: svc, Name: name, OperationID: id, Summary: summary, Method: method, Path: path}
-	if has {
-		c.Description = doc.Description
-		c.Example = doc.Example
-		if c.Summary == "" {
-			c.Summary = firstSentence(doc.Description)
-		}
-	}
-	return c
-}
-
-// bindIn splits an In type into positional args and flags. A field whose name
-// matches a path parameter is positional and is NOT also a flag: the URL
-// addresses the resource, so offering a second way to set the same value would
-// be two ways to say one thing (and bindPath would overrule one of them).
-//
-// body says the method carries one (hasBody). A bodyless op's input rides the
-// URL, so its flags are exactly the URL-bindable fields — the SAME urlFields
-// list the document reads. Offering the rest would offer flags the wire cannot
-// carry: a `--tags '["a"]'` on a DELETE marshalled fine, went out as a query
-// value, and was dropped by the binder, so the command silently did nothing.
-func bindIn(in reflect.Type, params []pathParam, fieldDocs map[string]string, body bool) ([]Arg, []Flag) {
-	args := make([]Arg, 0, len(params))
-	for _, p := range params {
-		// The argument a person types is the DOCUMENT's name: a wildcard's router
-		// key is *1, which is not something to ask anyone to write.
-		args = append(args, Arg{Name: p.Name, Help: fieldDocs[typeName(in)+"."+p.Name]})
-	}
-	if in == nil {
-		return args, nil
-	}
-	t := in
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		return args, nil
-	}
-	var flags []Flag
-	// url is the name the URL carries the field under, which is what decides
-	// whether a flag would be a SECOND way to say what the path already says. It
-	// is not always the field's JSON name: a body field tagged `url:"-"` shares
-	// its name with a path param on purpose (the worker's source vs its name), and
-	// offering no flag for it left the command unable to send the body at all.
-	add := func(name, url, kind string, required bool) {
-		if name == "-" || isParam(params, url) {
-			return
-		}
-		flags = append(flags, Flag{
-			Name:     kebab(name),
-			Field:    name,
-			Type:     kind,
-			Help:     fieldDocs[t.Name()+"."+name],
-			Required: required,
-		})
-	}
-	if body {
-		// wireFields, so an embedded body type's promoted fields get flags. Reading
-		// only the outer type left a command unable to send them at all.
-		for _, f := range wireFields(t) {
-			add(jsonFieldName(f), urlFieldName(f), flagType(f.Type), strings.Contains(f.Tag.Get("validate"), "required"))
-		}
-	} else {
-		for _, f := range urlFields(t) {
-			kind, _ := f.schema["type"].(string)
-			add(f.name, f.name, specType(kind), f.required)
-		}
-	}
-	// The args' help lives under the field's own json name, which is what the
-	// extraction keyed it by; look it up now that the type is in hand.
-	for i, a := range args {
-		if a.Help == "" {
-			args[i].Help = fieldDocs[t.Name()+"."+a.Name]
-		}
-	}
-	return args, flags
 }
 
 func isParam(params []pathParam, name string) bool {
@@ -392,7 +337,10 @@ func kebab(s string) string {
 		case r >= 'A' && r <= 'Z':
 			prevLower := i > 0 && (rs[i-1] >= 'a' && rs[i-1] <= 'z' || rs[i-1] >= '0' && rs[i-1] <= '9')
 			nextLower := i+1 < len(rs) && rs[i+1] >= 'a' && rs[i+1] <= 'z'
-			if i > 0 && (prevLower || nextLower) {
+			// A word a separator already opened takes no second one: a header
+			// is X-Org-Id, and its flag is x-org-id.
+			opened := i > 0 && strings.ContainsRune("-_ .", rs[i-1])
+			if i > 0 && !opened && (prevLower || nextLower) {
 				b.WriteByte('-')
 			}
 			b.WriteRune(r + ('a' - 'A'))
@@ -425,16 +373,65 @@ type Invoker func(ctx context.Context, c Command, path map[string]string, body [
 // LocalInvoke runs the handler in this process, through the op's own invoke
 // seam. It is the whole reason a fused binary needs no client: the command IS
 // the handler call.
+//
+// A command's arguments are named, so they bind as path values, and a CLI has
+// no URL for the "?a=b" half: everything else arrives as one argument object,
+// exactly as it does over MCP. The flags that ride as a header or a cookie are
+// handed to the op as one, which is the request fact it declared.
 func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []byte) (any, error) {
 	if c.op == nil || c.op.invoke == nil {
 		return nil, fmt.Errorf("%s %s is not registered in this process — give the CLI a Remote invoker", c.Service, c.Name)
 	}
-	// No query map and no headers: a command's arguments are named, so they bind
-	// as path values, and a CLI has neither a URL for the "?a=b" half nor a
-	// request to read headers from. A declared header field is simply supplied
-	// as an argument here — which is why the honest answer on a transport with
-	// no request is "nothing", not a panic.
-	return c.op.invoke(withOp(ctx, servedOp(c.op)), jsonenc.Unmarshal, body, nil, path, nil)
+	rest, header, cookie, err := c.split(body)
+	if err != nil {
+		return nil, err
+	}
+	// The body flag is sent under "body", which the document can name; the
+	// op's own field may be named otherwise.
+	if raw := c.op.req.raw; raw != nil {
+		if v, ok := rest["body"]; ok {
+			delete(rest, "body")
+			rest[jsonFieldName(deref(c.op.InType).FieldByIndex(raw))] = v
+		}
+	}
+	wire := input{dec: jsonenc.Unmarshal, media: mimeJSON, path: path,
+		header: func(k string) string { return header[k] },
+		cookie: func(k string) string { return cookie[k] }}
+	if len(rest) > 0 {
+		if wire.body, err = json.Marshal(rest); err != nil {
+			return nil, err
+		}
+	}
+	return c.op.invoke(withOp(ctx, servedOp(c.op)), wire)
+}
+
+// split takes a command's argument object apart: the values that ride as
+// headers and cookies, keyed by the header and the cookie, and the rest.
+func (c Command) split(body []byte) (rest map[string]json.RawMessage, header, cookie map[string]string, err error) {
+	rest = map[string]json.RawMessage{}
+	header, cookie = map[string]string{}, map[string]string{}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &rest); err != nil {
+			return nil, nil, nil, fmt.Errorf("%s %s: the arguments are not an object: %w", c.Service, c.Name, err)
+		}
+	}
+	for _, f := range c.Flags {
+		raw, ok := rest[f.Field]
+		if !ok || (f.In != "header" && f.In != "cookie") {
+			continue
+		}
+		v, err := queryValue(raw)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if f.In == "header" {
+			header[f.Field] = v
+		} else {
+			cookie[f.Field] = v
+		}
+		delete(rest, f.Field)
+	}
+	return rest, header, cookie, nil
 }
 
 // Remote executes a command against a running zip service, and reads that
@@ -456,50 +453,279 @@ func (r Remote) Spec(ctx context.Context) ([]byte, error) {
 
 // Invoke sends one command to the service. Its signature is Invoker's, so it
 // drops into a CLI wherever LocalInvoke would.
+//
+// The request is built the way the op takes it: header and cookie flags as
+// headers and cookies; a --body as the bytes themselves under the media the op
+// consumes; form fields and --field parts as a form; the rest as the JSON body,
+// or as the query when the method carries no body or the body is not JSON. An
+// answer that is not one JSON value comes back as it arrives — a [Body] whose
+// Reader the runner writes, events as the stream yields them, a [Redirect] for
+// a 3xx, and for an op that upgrades, the open connection.
 func (r Remote) Invoke(ctx context.Context, c Command, path map[string]string, body []byte) (any, error) {
 	url := c.Path
 	for name, val := range path {
 		url = strings.ReplaceAll(url, ":"+name, urlEscape(val))
 	}
-	// A bodyless method's non-path inputs belong in the query string, which is
-	// where the route's own decoder looks for them. hasBody is THE rule, read
-	// here as well as by the document and by the route itself.
-	if !hasBody(c.Method) && len(body) > 0 {
-		q, err := queryOf(body)
+	rest, header, cookie, err := c.split(body)
+	if err != nil {
+		return nil, err
+	}
+	var payload []byte
+	var media string
+	kind := ""
+	for _, f := range c.Flags {
+		switch f.In {
+		case "body", "form", "file":
+			kind = f.In
+		}
+		if kind == "body" {
+			break
+		}
+	}
+	switch {
+	case kind == "body":
+		if raw, ok := rest["body"]; ok {
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				return nil, fmt.Errorf("--body: %w", err)
+			}
+			delete(rest, "body")
+		}
+		media = mimeOctet
+		if len(c.Consumes) > 0 {
+			media = c.Consumes[0]
+		}
+	case kind == "form" || kind == "file":
+		payload, media, err = c.form(rest)
+		if err != nil {
+			return nil, err
+		}
+	case hasBody(c.Method) && c.Stream != streamSocket:
+		if len(rest) > 0 {
+			if payload, err = json.Marshal(rest); err != nil {
+				return nil, err
+			}
+			media = mimeJSON
+			if len(c.Consumes) > 0 && !containsString(c.Consumes, mimeJSON) {
+				media = c.Consumes[0]
+			}
+		}
+		rest = nil
+	}
+	if len(rest) > 0 {
+		b, err := json.Marshal(rest)
+		if err != nil {
+			return nil, err
+		}
+		q, err := queryOf(b)
 		if err != nil {
 			return nil, err
 		}
 		if q != "" {
 			url += "?" + q
 		}
-		body = nil
 	}
-	out, err := r.do(ctx, c.Method, url, body)
+	if c.Stream == streamSocket {
+		return r.dial(ctx, url, header, cookie)
+	}
+	return r.send(ctx, c, url, payload, media, header, cookie)
+}
+
+// form encodes a command's form fields and file parts, and takes them out of
+// rest: url-encoded, or multipart when the op consumes it or a part is a file.
+func (c Command) form(rest map[string]json.RawMessage) ([]byte, string, error) {
+	multi := containsString(c.Consumes, mimeMultipart)
+	for _, f := range c.Flags {
+		if f.In == "file" {
+			multi = true
+		}
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	values := neturl.Values{}
+	for _, f := range c.Flags {
+		raw, ok := rest[f.Field]
+		if !ok || (f.In != "form" && f.In != "file") {
+			continue
+		}
+		delete(rest, f.Field)
+		if f.In == "file" {
+			var parts []File
+			if raw[0] == '[' {
+				if err := json.Unmarshal(raw, &parts); err != nil {
+					return nil, "", fmt.Errorf("--field %s: %w", f.Field, err)
+				}
+			} else {
+				var one File
+				if err := json.Unmarshal(raw, &one); err != nil {
+					return nil, "", fmt.Errorf("--field %s: %w", f.Field, err)
+				}
+				parts = []File{one}
+			}
+			for _, part := range parts {
+				h := textproto.MIMEHeader{}
+				h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, f.Field, part.Name))
+				h.Set("Content-Type", nonEmpty(part.Type, mimeOctet))
+				w, err := mw.CreatePart(h)
+				if err != nil {
+					return nil, "", err
+				}
+				if _, err := w.Write(part.Bytes); err != nil {
+					return nil, "", err
+				}
+			}
+			continue
+		}
+		vals, err := argValues(raw)
+		if err != nil {
+			return nil, "", fmt.Errorf("--%s: %w", f.Name, err)
+		}
+		for _, v := range vals {
+			values.Add(f.Field, v)
+			if multi {
+				if err := mw.WriteField(f.Field, v); err != nil {
+					return nil, "", err
+				}
+			}
+		}
+	}
+	if !multi {
+		return []byte(values.Encode()), mimeForm, nil
+	}
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), mw.FormDataContentType(), nil
+}
+
+// send performs one request and reads its answer the way the command says it
+// comes back.
+func (r Remote) send(ctx context.Context, c Command, path string, body []byte, media string, header, cookie map[string]string) (any, error) {
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	if len(body) > 0 {
+		req.SetBody(body)
+		req.Header.SetContentType(media)
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	for k, v := range cookie {
+		req.Header.SetCookie(k, v)
+	}
+	resp := fasthttp.AcquireResponse()
+	resp.StreamBody = c.Stream != ""
+	if err := r.exchange(ctx, c.Method, path, req, resp); err != nil {
+		fasthttp.ReleaseResponse(resp)
+		return nil, err
+	}
+	code := resp.StatusCode()
+	if code >= 300 && code < 400 {
+		to := string(resp.Header.Peek("Location"))
+		fasthttp.ReleaseResponse(resp)
+		return &Redirect{To: to, Status: code}, nil
+	}
+	ct := string(resp.Header.ContentType())
+	if c.Stream == "" || code >= 400 || code == fasthttp.StatusNoContent {
+		out := append([]byte(nil), resp.Body()...)
+		fasthttp.ReleaseResponse(resp)
+		if code >= 400 {
+			return nil, fmt.Errorf("%s %s: %d %s", c.Method, path, code, strings.TrimSpace(string(out)))
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		if c.Stream == "" && !textual(ct) || c.Stream == streamBytes {
+			return &Body{Type: ct, Bytes: out}, nil
+		}
+		return json.RawMessage(out), nil
+	}
+	if s := resp.BodyStream(); s != nil {
+		return &Body{Type: ct, Reader: &answerStream{Reader: s, resp: resp}}, nil
+	}
+	out := append([]byte(nil), resp.Body()...)
+	fasthttp.ReleaseResponse(resp)
+	return &Body{Type: ct, Bytes: out}, nil
+}
+
+// answerStream is a streamed answer's body, holding its response until it is
+// closed.
+type answerStream struct {
+	io.Reader
+	resp *fasthttp.Response
+}
+
+func (a *answerStream) Close() error {
+	err := a.resp.CloseBodyStream()
+	fasthttp.ReleaseResponse(a.resp)
+	return err
+}
+
+// dial opens the WebSocket an op upgrades to, over the address Base names.
+func (r Remote) dial(ctx context.Context, path string, header, cookie map[string]string) (*ws.Conn, error) {
+	scheme, host, _, err := transportFor(r.Base)
 	if err != nil {
 		return nil, err
 	}
-	if len(out) == 0 {
-		return nil, nil
+	var url string
+	switch scheme {
+	case "http":
+		url = "ws://" + host + path
+	case "https":
+		url = "wss://" + host + path
+	default:
+		return nil, fmt.Errorf("zip: a WebSocket is reached over http or https, and %q is %s", r.Base, scheme)
 	}
-	return json.RawMessage(out), nil
+	h := http.Header{}
+	for k, v := range r.Header {
+		h.Set(k, v)
+	}
+	for k, v := range header {
+		h.Set(k, v)
+	}
+	for k, v := range cookie {
+		h.Add("Cookie", (&http.Cookie{Name: k, Value: v}).String())
+	}
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, url, h)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	return conn, nil
 }
 
 // do performs one request over the transport Base names, bounded by ctx.
 func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	scheme, host, t, err := transportFor(r.Base)
-	if err != nil {
-		return nil, err
-	}
-	if t.Dial == nil {
-		return nil, fmt.Errorf("zip: transport %q cannot dial (serve-only)", scheme)
-	}
 	req, resp := fasthttp.AcquireRequest(), fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
+	if len(body) > 0 {
+		req.SetBody(body)
+		req.Header.SetContentType("application/json")
+	}
+	if err := r.exchange(ctx, method, path, req, resp); err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), resp.Body()...)
+	if code := resp.StatusCode(); code >= 400 {
+		return nil, fmt.Errorf("%s %s: %d %s", method, path, code, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
 
+// exchange sends req and fills resp over the transport Base names.
+func (r Remote) exchange(ctx context.Context, method, path string, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	scheme, host, t, err := transportFor(r.Base)
+	if err != nil {
+		return err
+	}
+	if t.Dial == nil {
+		return fmt.Errorf("zip: transport %q cannot dial (serve-only)", scheme)
+	}
 	req.SetRequestURI(path)
 	req.SetHost(host)
 	req.Header.SetMethod(method)
@@ -526,21 +752,29 @@ func (r Remote) do(ctx context.Context, method, path string, body []byte) ([]byt
 	if scheme == "https" {
 		req.URI().SetScheme("https")
 	}
-	if len(body) > 0 {
-		req.SetBody(body)
-		req.Header.SetContentType("application/json")
-	}
 	for k, v := range r.Header {
 		req.Header.Set(k, v)
 	}
 	if err := do(ctx, t.Dial(host), req, resp); err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	out := append([]byte(nil), resp.Body()...)
-	if code := resp.StatusCode(); code >= 400 {
-		return nil, fmt.Errorf("%s %s: %d %s", method, path, code, strings.TrimSpace(string(out)))
+	return nil
+}
+
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
 	}
-	return out, nil
+	return false
+}
+
+func nonEmpty(s, dflt string) string {
+	if s == "" {
+		return dflt
+	}
+	return s
 }
 
 // Query is the query string that carries in to a bodyless op.
@@ -665,6 +899,10 @@ type CLI struct {
 	Commands []Command
 	Invoke   Invoker
 	Out      io.Writer
+	// In is the standard input: what `--body -` reads, and what a command
+	// that opens a WebSocket sends, one text message per line. Nil reads
+	// nothing.
+	In io.Reader
 }
 
 // CLI returns the command line for everything registered on this app, executed
@@ -727,28 +965,54 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		cmd.help(out, c.Name)
 		return nil
 	}
-	path, body, err := cmd.parse(rest)
+	path, body, to, media, err := cmd.parse(rest, c.In)
 	if err != nil {
 		cmd.help(out, c.Name)
 		return err
+	}
+	if containsString(cmd.Consumes, media) {
+		// The file's own type, when the op takes it, is what the body is sent
+		// as; otherwise the first the op names.
+		cmd.Consumes = append([]string{media}, cmd.Consumes...)
 	}
 	res, err := c.Invoke(ctx, cmd, path, body)
 	if err != nil {
 		return err
 	}
-	return writeResult(out, res)
+	if to != "" {
+		f, err := os.Create(to)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		out = f
+	}
+	return writeResult(ctx, out, c.In, res)
 }
 
 // parse turns the remaining argv into the two values an op's invoke seam takes:
 // the path parameters and the JSON body. Only flags that were actually given
 // appear in the body — an absent flag must not become a zero that overwrites a
 // server-side default.
-func (c Command) parse(args []string) (map[string]string, []byte, error) {
+//
+// Bytes are named, not typed: `--body @file` sends a file as the request body
+// (`--body -` the standard input), and `--field name=@file` sends one as a
+// multipart part, as curl spells both. Each crosses as its base64 string, the
+// form an argument object carries bytes in. `--out file` writes an answer that
+// is not one JSON value to that file instead of the output; it is the runner's
+// own flag, read only where the op names none of that name.
+func (c Command) parse(args []string, stdin io.Reader) (path map[string]string, body []byte, to, media string, err error) {
 	byName := make(map[string]Flag, len(c.Flags))
+	parts := map[string]Flag{}
 	for _, f := range c.Flags {
+		if f.In == "file" {
+			parts[f.Field] = f
+			continue
+		}
 		byName[f.Name] = f
 	}
 	fields := map[string]json.RawMessage{}
+	files := map[string][]File{}
 	var positional []string
 
 	for i := 0; i < len(args); i++ {
@@ -759,48 +1023,116 @@ func (c Command) parse(args []string) (map[string]string, []byte, error) {
 		}
 		name, val, hasVal := strings.Cut(strings.TrimPrefix(a, "--"), "=")
 		f, ok := byName[name]
-		if !ok {
-			return nil, nil, fmt.Errorf("unknown flag --%s for %s %s", name, c.Service, c.Name)
+		runner := !ok && (name == "out" || name == "field" && len(parts) > 0)
+		if !ok && !runner {
+			return nil, nil, "", "", fmt.Errorf("unknown flag --%s for %s %s", name, c.Service, c.Name)
 		}
 		if !hasVal {
 			// A boolean stands alone; anything else takes the next argument.
-			if f.Type == "boolean" {
+			if ok && f.Type == "boolean" {
 				val = "true"
 			} else {
 				if i+1 >= len(args) {
-					return nil, nil, fmt.Errorf("--%s needs a value", name)
+					return nil, nil, "", "", fmt.Errorf("--%s needs a value", name)
 				}
 				i++
 				val = args[i]
 			}
 		}
-		raw, err := encodeFlag(f, val)
-		if err != nil {
-			return nil, nil, err
+		switch {
+		case name == "out" && !ok:
+			to = val
+			continue
+		case name == "field" && !ok:
+			part, from, _ := strings.Cut(val, "=")
+			pf, known := parts[part]
+			if !known {
+				return nil, nil, "", "", fmt.Errorf("--field %s: %s %s takes no part of that name", part, c.Service, c.Name)
+			}
+			b, rerr := readNamed(pf.Name, from, stdin)
+			if rerr != nil {
+				return nil, nil, "", "", rerr
+			}
+			files[pf.Field] = append(files[pf.Field], File{Name: filepath.Base(strings.TrimPrefix(from, "@")), Type: mediaOf(from), Bytes: b})
+			continue
+		}
+		if f.In == "body" {
+			media = mediaOf(val)
+			b, rerr := readNamed(f.Name, val, stdin)
+			if rerr != nil {
+				return nil, nil, "", "", rerr
+			}
+			raw, merr := json.Marshal(b)
+			if merr != nil {
+				return nil, nil, "", "", merr
+			}
+			fields[f.Field] = raw
+			continue
+		}
+		raw, ferr := encodeFlag(f, val)
+		if ferr != nil {
+			return nil, nil, "", "", ferr
 		}
 		fields[f.Field] = raw
 	}
+	for name, got := range files {
+		var raw []byte
+		var merr error
+		if len(got) == 1 {
+			raw, merr = json.Marshal(got[0])
+		} else {
+			raw, merr = json.Marshal(got)
+		}
+		if merr != nil {
+			return nil, nil, "", "", merr
+		}
+		fields[name] = raw
+	}
 
 	if len(positional) != len(c.Args) {
-		return nil, nil, fmt.Errorf("%s %s takes %d argument(s): %s",
+		return nil, nil, "", "", fmt.Errorf("%s %s takes %d argument(s): %s",
 			c.Service, c.Name, len(c.Args), argNames(c.Args))
 	}
-	path := make(map[string]string, len(c.Args))
+	path = make(map[string]string, len(c.Args))
 	for i, a := range c.Args {
 		path[a.Name] = positional[i]
 	}
 	for _, f := range c.Flags {
 		if f.Required {
 			if _, ok := fields[f.Field]; !ok {
-				return nil, nil, fmt.Errorf("--%s is required", f.Name)
+				return nil, nil, "", "", fmt.Errorf("--%s is required", f.Name)
 			}
 		}
 	}
 	if len(fields) == 0 {
-		return path, nil, nil
+		return path, nil, to, media, nil
 	}
-	body, err := json.Marshal(fields)
-	return path, body, err
+	body, err = json.Marshal(fields)
+	return path, body, to, media, err
+}
+
+// readNamed reads the bytes a flag names: @path is the file at path, and - is
+// the standard input.
+func readNamed(flag, val string, stdin io.Reader) ([]byte, error) {
+	switch {
+	case val == "-":
+		if stdin == nil {
+			return nil, fmt.Errorf("--%s -: there is no standard input", flag)
+		}
+		return io.ReadAll(stdin)
+	case strings.HasPrefix(val, "@"):
+		return os.ReadFile(val[1:])
+	}
+	return nil, fmt.Errorf("--%s takes @file or -, not %q", flag, val)
+}
+
+// mediaOf is the media type a file's extension names, octet-stream when it
+// names none.
+func mediaOf(path string) string {
+	if m := mime.TypeByExtension(filepath.Ext(path)); m != "" {
+		return m
+	}
+	return mimeOctet
 }
 
 // encodeFlag turns one flag value into the JSON it stands for, refusing a value
@@ -835,9 +1167,41 @@ func encodeFlag(f Flag, val string) (json.RawMessage, error) {
 	}
 }
 
-func writeResult(w io.Writer, res any) error {
+// writeResult prints an answer. One JSON value is printed indented. Bytes are
+// written as they are, as they arrive when they stream. An event stream is
+// printed one event per line as each arrives. A redirect prints where it sends
+// the client. An open WebSocket is bridged: each line of in is sent as a text
+// message and each message received is printed on a line, until either side
+// ends.
+func writeResult(ctx context.Context, w io.Writer, in io.Reader, res any) error {
+	res = unwrap(res)
 	if res == nil {
 		return nil
+	}
+	switch x := res.(type) {
+	case *Redirect:
+		_, err := fmt.Fprintln(w, x.To)
+		return err
+	case *ws.Conn:
+		return bridge(ctx, x, in, w)
+	case upgrader:
+		return fmt.Errorf("zip: %s; reach it over HTTP", NotACall)
+	case stream:
+		return x.events(false, func(frame []byte) error {
+			_, err := fmt.Fprintln(w, string(frame))
+			return err
+		})
+	}
+	if b, ok := bodyOf(res); ok {
+		if b.Reader == nil {
+			_, err := w.Write(b.Bytes)
+			return err
+		}
+		if c, ok := b.Reader.(io.Closer); ok {
+			defer func() { _ = c.Close() }()
+		}
+		_, err := io.Copy(w, b.Reader)
+		return err
 	}
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
@@ -845,6 +1209,36 @@ func writeResult(w io.Writer, res any) error {
 	}
 	_, err = fmt.Fprintln(w, string(b))
 	return err
+}
+
+// bridge joins a WebSocket to a terminal: lines in, messages out.
+func bridge(ctx context.Context, conn *ws.Conn, in io.Reader, w io.Writer) error {
+	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	if in != nil {
+		go func() {
+			lines := bufio.NewScanner(in)
+			for lines.Scan() {
+				if conn.WriteMessage(websocket.TextMessage, lines.Bytes()) != nil {
+					return
+				}
+			}
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		}()
+	}
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) || ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if _, err := fmt.Fprintln(w, string(msg)); err != nil {
+			return err
+		}
+	}
 }
 
 func (c *CLI) find(service, name string) []Command {
@@ -971,7 +1365,7 @@ func (c Command) help(w io.Writer, bin string) {
 		width = max(width, len(a.Name)+2)
 	}
 	for _, f := range c.Flags {
-		width = max(width, len(f.Name)+len(f.Type)+3)
+		width = max(width, len(f.usage()))
 	}
 	if len(c.Args) > 0 {
 		fmt.Fprintf(w, "Arguments:\n")
@@ -987,13 +1381,27 @@ func (c Command) help(w io.Writer, bin string) {
 			if f.Required {
 				help = strings.TrimSpace(help + " (required)")
 			}
-			fmt.Fprintf(w, "  %-*s  %s\n", width, "--"+f.Name+" "+f.Type, help)
+			fmt.Fprintf(w, "  %-*s  %s\n", width, f.usage(), help)
 		}
 		fmt.Fprintln(w)
+	}
+	if c.Stream != "" && c.Stream != streamSocket {
+		fmt.Fprintf(w, "The answer is written to the output as it arrives; --out <file> writes it to a file.\n\n")
 	}
 	if ex := c.exampleLine(bin); ex != "" {
 		fmt.Fprintf(w, "Example:\n  %s\n", ex)
 	}
+}
+
+// usage is how a flag is written on a command line.
+func (f Flag) usage() string {
+	switch f.In {
+	case "body":
+		return "--" + f.Name + " @file|-"
+	case "file":
+		return "--field " + f.Field + "=@file"
+	}
+	return "--" + f.Name + " " + f.Type
 }
 
 // exampleLine renders the doc comment's Example body as the command line that

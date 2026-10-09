@@ -40,6 +40,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/zap-proto/zip/internal/zapenc"
 )
 
 // ZAPSchema renders the ZAP IDL that apps' typed ops describe, under pkg.
@@ -458,6 +460,9 @@ func (e *emitter) opacity(t reflect.Type, decl string, s Slot) {
 func (e *emitter) dropped(t reflect.Type, decl string) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+		if zapenc.Skipped(f) {
+			continue // it says it does not cross: not a loss
+		}
 		if !f.IsExported() {
 			// An unexported field crosses nowhere and is nobody's contract —
 			// EXCEPT an embedded type, whose field name is its type name and so is

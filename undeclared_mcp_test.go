@@ -29,7 +29,7 @@ func TestAnUndeclaredTypedOpIsNotAnMCPTool(t *testing.T) {
 		return &hiddenOut{OK: true}, nil
 	})
 
-	tools, _ := app.composeTools()
+	tools, _, _ := app.composeTools()
 	var got []struct {
 		Name string `json:"name"`
 	}

@@ -330,6 +330,11 @@ type App struct {
 	// without re-parsing the array on every request.
 	mcpNames atomic.Pointer[map[string]bool]
 
+	// mcpRefused names the ops that are not tools, and why — rendered with
+	// mcpList and answered in tools/list's _meta, so a client reading the list
+	// sees every op accounted for.
+	mcpRefused atomic.Pointer[map[string]string]
+
 	// The ZAP-native MCP listener, when Config.MCP.Addr named one. It is a
 	// zapmcp.Server over App.MCP — the door served on the wire it was designed
 	// for, with no HTTP anywhere in the path. Guarded by mcpMu so a second Listen

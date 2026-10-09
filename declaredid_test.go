@@ -68,7 +68,7 @@ func TestDeclaredOperationIDSurvivesComposition(t *testing.T) {
 	}
 
 	// The MCP tool name.
-	_, tools := host.composeTools()
+	_, tools, _ := host.composeTools()
 	if !tools["CreateRole"] {
 		var got []string
 		for n := range tools {

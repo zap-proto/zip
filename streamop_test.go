@@ -76,7 +76,7 @@ func TestProjectOpenAPIStreams(t *testing.T) {
 func TestCheckRefusesACrookedStream(t *testing.T) {
 	for name, op := range map[string]zip.ManifestOp{
 		"unknown stream": {Method: "GET", Path: "/a", Stream: "ws"},
-		"stream and out": {Method: "GET", Path: "/a", Stream: "sse", Out: "Prompt"},
+		"socket and out": {Method: "GET", Path: "/a", Stream: "socket", Out: "Prompt"},
 		"raw and in":     {Method: "POST", Path: "/a", Raw: true, In: "Prompt"},
 	} {
 		m := streamed()

@@ -309,7 +309,7 @@ func TestReadZAP_ADeclaredOpDoesNotRun(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "no implementation") {
 		t.Errorf("refusal does not say why: %v", err)
 	}
-	if _, err := op.invoke(context.Background(), nil, nil, nil, nil, nil); err == nil {
+	if _, err := op.invoke(context.Background(), input{}); err == nil {
 		t.Error("a declared op ran over a transport")
 	}
 }

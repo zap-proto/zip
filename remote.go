@@ -170,18 +170,18 @@ func remoteApp(parent *App, prefix, addr string, d Declaration) (*App, error) {
 // The rules it obeys are zip's own, read from the one place each lives: path
 // parameters are substituted out of the arguments, and hasBody decides whether
 // what remains rides as a body or as a query string.
-func remoteInvoke(client Client, host, method, pattern string) func(context.Context, decoder, []byte, map[string]string, map[string]string, func(string) string) (any, error) {
-	return func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error) {
+func remoteInvoke(client Client, host, method, pattern string) func(context.Context, input) (any, error) {
+	return func(ctx context.Context, in input) (any, error) {
 		args := map[string]any{}
-		if len(rawIn) > 0 {
-			if err := dec(rawIn, &args); err != nil {
+		if len(in.body) > 0 {
+			if err := in.dec(in.body, &args); err != nil {
 				return nil, ErrBadRequest("invalid body: " + err.Error())
 			}
 		}
-		for k, v := range query {
+		for k, v := range in.query {
 			args[k] = v
 		}
-		for k, v := range path {
+		for k, v := range in.path {
 			args[k] = v
 		}
 

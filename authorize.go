@@ -75,9 +75,21 @@ const Held = "held"
 // reads it off the error lane — so no projection can report a held op as a
 // finished one.
 type Approval struct {
-	Status string `json:"status"` // always Held
+	// Status is always held: the op stopped for sign-off and did not run.
+	Status string `json:"status"`
+	// Clause names the clause of the rule that asked for sign-off.
 	Clause string `json:"clause"`
+	// Reason is what a person reads before answering.
 	Reason string `json:"reason,omitempty"`
+}
+
+// approvalProse is Approval's field comments, as the document carries them.
+// zip's own types are not lifted by zipdoc, so the sentences are stated here
+// once and TestApprovalProseIsItsComments holds them to the comments above.
+var approvalProse = map[string]string{
+	"Approval.status": "Status is always held: the op stopped for sign-off and did not run.",
+	"Approval.clause": "Clause names the clause of the rule that asked for sign-off.",
+	"Approval.reason": "Reason is what a person reads before answering.",
 }
 
 // Error lets an Approval travel the lane every Go caller already reads. A held

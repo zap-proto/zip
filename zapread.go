@@ -316,7 +316,7 @@ func (a *App) schemaOp(name string, in, out reflect.Type) {
 	unimplemented := func() error {
 		return Errorf(501, "%s is declared by a schema; no implementation of it is linked into this process", name)
 	}
-	op.invoke = func(context.Context, decoder, []byte, map[string]string, map[string]string, func(string) string) (any, error) {
+	op.invoke = func(context.Context, input) (any, error) {
 		return nil, unimplemented()
 	}
 	op.direct = func(context.Context, any) (any, error) { return nil, unimplemented() }

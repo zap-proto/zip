@@ -23,7 +23,7 @@ func TestToolNames_RideTheOperationIDRule(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	raw, names := host.composeTools()
+	raw, names, _ := host.composeTools()
 	_ = raw
 	var got []string
 	for n := range names {
@@ -90,7 +90,7 @@ func TestToolNames_AreNotPositional(t *testing.T) {
 		if err := host.Build(); err != nil {
 			t.Fatalf("build: %v", err)
 		}
-		_, set := host.composeTools()
+		_, set, _ := host.composeTools()
 		var out []string
 		for n := range set {
 			out = append(out, n)

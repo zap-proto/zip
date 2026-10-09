@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
 
@@ -246,9 +245,10 @@ func (a *App) hasCaller() bool {
 // plugin at run time must not serve a list frozen at boot, and the alternative
 // (rendering per request) would give back the memcpy that makes tools/list free.
 func (a *App) renderTools() {
-	list, names := a.composeTools()
+	list, names, refused := a.composeTools()
 	a.mcpList.Store(&list)
 	a.mcpNames.Store(&names)
+	a.mcpRefused.Store(&refused)
 }
 
 // mcpTool is one tool descriptor with its name lifted out, so the composed list
@@ -266,7 +266,7 @@ type mcpTool struct {
 // It returns the rendered bytes AND the set of names in them, because the
 // per-caller half has to know what the build-time half already claims and reading
 // that back out of the bytes would re-parse hundreds of schemas per request.
-func (a *App) composeTools() (json.RawMessage, map[string]bool) {
+func (a *App) composeTools() (json.RawMessage, map[string]bool, map[string]string) {
 	own := a.Registry()
 	pluginTools := a.tools()
 	all := make([]mcpTool, 0, len(own)+len(pluginTools))
@@ -282,29 +282,37 @@ func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 			hidden[r.method+" "+o.abs(r.path)] = true
 		}
 	}
+	// An op kept out of the contract is kept out of the tool list.
+	//
+	// [Undeclared] promises exactly this — "and so in none of the projections
+	// built from it: the OpenAPI document, the MCP tool list, the CLI commands,
+	// the by-name call plane" — and the miss costs most here: a document nobody
+	// reads lists a dead address, but a tool list is what an agent CALLS.
+	skip := map[string]bool{}
 	for _, op := range own {
-		// An op kept out of the contract is kept out of the tool list.
-		//
-		// [Undeclared] promises exactly this — "and so in none of the
-		// projections built from it: the OpenAPI document, the MCP tool list,
-		// the CLI commands, the by-name call plane" — and this projection was
-		// the one that did not hold it, because the registry is every op that
-		// registered while the undeclared fact rides the route entry.
-		//
-		// It is the projection where the miss costs most: a document nobody
-		// reads lists a dead address, but a tool list is what an agent CALLS.
-		//
-		// Asked of Declares rather than tracked here, so there is one answer to
-		// "is this in the contract?" and no second list to fall out of step.
 		if hidden[op.Method+" "+op.Path] {
+			skip[opName(op)] = true
+		}
+	}
+	// The tools are [ProjectMCP] over this app's manifest: one projection,
+	// whether it is served here, embedded by a host as a catalogue, or read
+	// in-process through MCPTools.
+	m := a.Manifest()
+	for _, t := range ProjectMCP(m) {
+		name := t["name"].(string)
+		if skip[name] {
 			continue
 		}
-		b, err := json.Marshal(mcpToolOf(op))
+		b, err := json.Marshal(t)
 		if err != nil {
-			a.logger.Warn("zip mcp: op has no renderable schema", "op", opName(op), "err", err)
+			a.logger.Warn("zip mcp: op has no renderable schema", "op", name, "err", err)
 			continue
 		}
-		all = append(all, mcpTool{name: opName(op), raw: b})
+		all = append(all, mcpTool{name: name, raw: b})
+	}
+	refused := RefusedMCP(m)
+	for name := range skip {
+		delete(refused, name)
 	}
 	all = append(all, pluginTools...)
 	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
@@ -317,9 +325,9 @@ func (a *App) composeTools() (json.RawMessage, map[string]bool) {
 	}
 	b, err := json.Marshal(raws)
 	if err != nil {
-		return json.RawMessage("[]"), names
+		return json.RawMessage("[]"), names, refused
 	}
-	return b, names
+	return b, names, refused
 }
 
 // installTools adds one plugin's catalogue to the composed surface, refusing a
@@ -433,7 +441,11 @@ func (a *App) MCP(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 			"serverInfo":      map[string]any{"name": a.mcpName(), "version": a.cfg.OpenAPI.Version},
 		}))
 	case "tools/list":
-		return f.Answer(mcpJSON(map[string]any{"tools": a.list(ctx)}))
+		result := map[string]any{"tools": a.list(ctx)}
+		if refused := a.mcpRefused.Load(); refused != nil && len(*refused) > 0 {
+			result["_meta"] = map[string]any{"refused": *refused}
+		}
+		return f.Answer(mcpJSON(result))
 	case "tools/call":
 		return a.tool(ctx, f)
 	case "ping":
@@ -634,65 +646,6 @@ func (a *App) mcpTools() []map[string]any {
 	return ProjectMCP(a.Manifest())
 }
 
-func (a *App) mcpToolsReflect() []map[string]any {
-	reg := a.Registry()
-	tools := make([]map[string]any, 0, len(reg))
-	for _, op := range reg {
-		tools = append(tools, mcpToolOf(op))
-	}
-	sort.Slice(tools, func(i, j int) bool {
-		return tools[i]["name"].(string) < tools[j]["name"].(string)
-	})
-	return tools
-}
-
-// mcpToolOf is the ONE op→tool descriptor. Both the in-process projection
-// (MCPTools) and the composed list read it, so a host's catalogue and a plugin's
-// own /mcp can never describe one op two ways.
-func mcpToolOf(op *registeredOp) map[string]any {
-	doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
-	desc := op.Summary
-	if hasDoc && doc.Description != "" {
-		desc = doc.Description
-	}
-	return map[string]any{
-		"name":        opName(op),
-		"description": desc,
-		"inputSchema": rootSchemaOf(op.InType, docFields(hasDoc, doc)),
-		// readOnlyHint is derived from the METHOD, because that is where the
-		// answer already lives: a GET op is a read by construction, and no op can
-		// be annotated inconsistently with the route it IS.
-		//
-		// It is not decoration. An MCP client that cannot tell a read from a write
-		// must assume WRITE, and Slackbot says so outright — an unclassified tool
-		// defaults to write classification and prompts the user Allow / Always /
-		// Deny before EVERY call. Measured on cloud's 1,323-tool surface: 0 carried
-		// annotations, so every read cost a confirmation. That is the difference
-		// between an agent that answers and one that interrogates.
-		//
-		// Only the true half is emitted. readOnlyHint:false is the client's own
-		// default, and writing it would claim we had classified a mutation when all
-		// we know is that it is not a GET.
-		"annotations": mcpAnnotationsOf(op),
-	}
-}
-
-// mcpAnnotationsOf carries what the protocol lets a server say about a tool
-// beyond its schema. Today that is readOnlyHint alone.
-//
-// HEAD is included with GET: it is a read whose body is discarded, so a client
-// that treats it as a mutation is wrong in the only direction that costs a
-// prompt. Everything else — POST, PUT, PATCH, DELETE — is left unsaid rather
-// than asserted safe, so an unknown or custom method fails toward caution.
-func mcpAnnotationsOf(op *registeredOp) map[string]any {
-	switch op.Method {
-	case http.MethodGet, http.MethodHead:
-		return map[string]any{"readOnlyHint": true}
-	default:
-		return map[string]any{}
-	}
-}
-
 // tool runs a tools/call: find the op by name, invoke the SAME handler core the
 // REST route uses, and return its JSON result as MCP text content. A handler
 // error is reported as MCP isError content (not a JSON-RPC error), per the spec
@@ -725,23 +678,38 @@ func (a *App) tool(ctx context.Context, f *zapmcp.Frame) *zapmcp.Frame {
 		return f.Fail(zapmcp.CodeParams, "unknown tool: "+params.Name)
 	}
 
+	if op.ans.stream == streamSocket {
+		return a.answer(f, nil, Errorf(501, "%s: %s", opName(op), NotACall))
+	}
 	// No URL over MCP: a tools/call carries every argument in its JSON arguments
 	// object, so the body IS the whole input — neither query nor path binds.
 	// The header reader comes off the ctx, so it answers honestly on a transport
 	// that has a request behind it and nothing on one that does not.
-	out, err := op.invoke(withOp(ctx, servedOp(op)), jsonenc.Unmarshal, params.Arguments, nil, nil, headerOf(ctx))
+	out, err := op.invoke(withOp(ctx, servedOp(op)), input{dec: jsonenc.Unmarshal, body: params.Arguments, media: mimeJSON, header: headerOf(ctx)})
 	return a.answer(f, out, err)
 }
 
 // answer renders one tool result. A handler error is MCP isError content and not
 // a JSON-RPC error, per the spec — the model sees the failure and can react. ONE
 // renderer, so a typed op, a [Source] and a relayed plugin answer the same shape.
+//
+// An answer that is not one JSON value is read into content: bytes as text when
+// their media type is text, as an image or an embedded resource's base64 blob
+// otherwise, and an event stream as its events, one JSON line each — each
+// bounded, saying so in _meta when the bound cut it.
 func (a *App) answer(f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
 	if err != nil {
 		return f.Answer(mcpJSON(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},
 			"isError": true,
 		}))
+	}
+	out = unwrap(out)
+	if _, isBody := bodyOf(out); isBody {
+		return a.content(f, out)
+	}
+	if _, isStream := out.(stream); isStream {
+		return a.content(f, out)
 	}
 	text := "null"
 	if out != nil {
@@ -752,6 +720,19 @@ func (a *App) answer(f *zapmcp.Frame, out any, err error) *zapmcp.Frame {
 	return f.Answer(mcpJSON(map[string]any{
 		"content": []map[string]any{{"type": "text", "text": text}},
 	}))
+}
+
+// content answers a tools/call whose answer is bytes or a stream.
+func (a *App) content(f *zapmcp.Frame, out any) *zapmcp.Frame {
+	var params struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(f.Params, &params)
+	result, err := toolContent(params.Name, out)
+	if err != nil {
+		return a.answer(f, nil, err)
+	}
+	return f.Answer(mcpJSON(result))
 }
 
 // toolOwner is the plugin that declared name in its catalogue, or nil.

@@ -8,6 +8,10 @@
 //	        _ = c.WriteMessage(wsx.TextMessage, msg)
 //	    }
 //	}))
+//
+// A typed op that answers a WebSocket returns a [zip.Socket] instead; both run
+// the same upgrade (internal/ws), so a connection is accepted and refused the
+// same way at either kind of route.
 package wsx
 
 import (
@@ -15,10 +19,11 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/zap-proto/zip"
+	"github.com/zap-proto/zip/internal/ws"
 )
 
 // Conn is the WebSocket connection passed to wsx handlers.
-type Conn = websocket.Conn
+type Conn = ws.Conn
 
 // Message-type constants re-exported for convenience.
 const (
@@ -32,16 +37,9 @@ const (
 // Handler is the wsx handler signature.
 type Handler func(c *Conn) error
 
-// Config configures the WebSocket upgrade.
-type Config struct {
-	ReadBufferSize    int
-	WriteBufferSize   int
-	Subprotocols      []string
-	EnableCompression bool
-	// CheckOrigin defaults to allow-all (zip is multi-tenant; gate via
-	// CORS or auth middleware at the route level instead).
-	CheckOrigin func(ctx *fasthttp.RequestCtx) bool
-}
+// Config configures the WebSocket upgrade. It is the type [zip.Socket]'s
+// Config field holds.
+type Config = ws.Config
 
 // Upgrade returns a zip.Handler that upgrades the HTTP connection to a
 // WebSocket and calls fn with the established *Conn.
@@ -49,17 +47,6 @@ func Upgrade(fn Handler, opts ...Config) zip.Handler {
 	var cfg Config
 	if len(opts) > 0 {
 		cfg = opts[0]
-	}
-	up := &websocket.FastHTTPUpgrader{
-		ReadBufferSize:    cfg.ReadBufferSize,
-		WriteBufferSize:   cfg.WriteBufferSize,
-		Subprotocols:      cfg.Subprotocols,
-		EnableCompression: cfg.EnableCompression,
-	}
-	if cfg.CheckOrigin != nil {
-		up.CheckOrigin = cfg.CheckOrigin
-	} else {
-		up.CheckOrigin = func(ctx *fasthttp.RequestCtx) bool { return true }
 	}
 	// TERMINAL: the upgrade takes over the connection, so this answers the
 	// address it is registered at and never yields to anything after it.
@@ -72,12 +59,10 @@ func Upgrade(fn Handler, opts ...Config) zip.Handler {
 		// (RFC 9110 §15.5.22) with the protocol to switch to, as a client error,
 		// rather than handed to the upgrader, whose handshake error is reported
 		// as a server fault.
-		if !websocket.FastHTTPIsWebSocketUpgrade(rc) {
+		if !ws.Is(rc) {
 			c.SetHeader("Upgrade", "websocket")
-			return zip.Errorf(fasthttp.StatusUpgradeRequired, "this address speaks WebSocket: connect with an Upgrade: websocket request")
+			return zip.Errorf(fasthttp.StatusUpgradeRequired, ws.Refusal)
 		}
-		return up.Upgrade(rc, func(ws *Conn) {
-			_ = fn(ws)
-		})
+		return ws.Upgrade(rc, cfg, func(conn *Conn) { _ = fn(conn) })
 	})
 }

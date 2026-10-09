@@ -233,5 +233,6 @@ func (o *Operation[In, Out]) With(opts ...OpOption) *Operation[In, Out] {
 	for _, opt := range opts {
 		opt(o.op)
 	}
+	o.op.settle()
 	return o
 }

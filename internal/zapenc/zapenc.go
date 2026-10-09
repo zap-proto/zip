@@ -39,7 +39,9 @@
 //
 // Anything else — a map, an interface, a channel, a FIXED-SIZE ARRAY — is
 // refused at encode rather than dropped. A field that silently does not cross is
-// the failure this package exists to make impossible.
+// the failure this package exists to make impossible. A field that says so
+// itself, with the tag zap:"-", is the exception: it does not cross, and it was
+// never meant to.
 //
 // # A type that owns its wire is not reflected over
 //
@@ -274,10 +276,12 @@ func buildLayout(t reflect.Type) (*layout, error) {
 	off := 0
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
-		if !sf.IsExported() {
+		if !sf.IsExported() || Skipped(sf) {
 			// An unexported field cannot be read or written by reflection, so it
 			// cannot cross. Skipping it silently is right — it was never part of
-			// the contract — but it must not consume a slot either.
+			// the contract — but it must not consume a slot either. A field
+			// tagged zap:"-" says the same about itself: it is part of the value
+			// in this process and not of the message.
 			continue
 		}
 		f, err := fieldOf(sf.Type)
@@ -771,6 +775,11 @@ func f32bits(f float32) uint32 { return math.Float32bits(f) }
 func f64bits(f float64) uint64 { return math.Float64bits(f) }
 func f32from(u uint32) float32 { return math.Float32frombits(u) }
 func f64from(u uint64) float64 { return math.Float64frombits(u) }
+
+// Skipped reports whether a field opts out of the message with zap:"-": a value
+// that lives only in the process holding it, such as a reader an answer
+// streams from. It takes no slot and is not a loss.
+func Skipped(f reflect.StructField) bool { return f.Tag.Get("zap") == "-" }
 
 // ---- the layout, for whoever needs to write it down -------------------------
 

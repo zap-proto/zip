@@ -68,121 +68,27 @@ func ProjectOpenAPI(m Manifest) map[string]any {
 		if len(op.Tags) > 0 {
 			obj["tags"] = op.Tags
 		}
-
-		if op.Raw && hasBody(op.Method) {
-			obj["requestBody"] = map[string]any{
-				"required": true,
-				"content": map[string]any{
-					"application/octet-stream": map[string]any{"schema": binarySchema()},
-				},
-			}
-		} else if p.hasRequestBody(op) {
-			media := map[string]any{"schema": p.schema(TypeRef{Ref: op.In}, reg)}
-			if len(op.Example) > 0 {
-				media["example"] = json.RawMessage(op.Example)
-			}
-			obj["requestBody"] = map[string]any{
-				"required": true,
-				"content":  map[string]any{"application/json": media},
-			}
+		if body := p.requestBody(op, reg); body != nil {
+			obj["requestBody"] = body
 		}
-
-		url := p.urlFields(op.In)
-		example := exampleFields(op.Example)
-		describe := func(decl map[string]any, docField, wire string) map[string]any {
-			if help := p.doc(op.In, docField); help != "" {
-				decl["description"] = help
-			}
-			if v, ok := example[wire]; ok {
-				decl["example"] = v
-			}
-			return decl
+		if params := p.parameters(op); len(params) > 0 {
+			obj["parameters"] = params
 		}
-
-		params := pathParams(op.Path)
-		decls := make([]any, 0, len(params))
-		named := make(map[string]bool, len(params))
-		for _, q := range params {
-			named[strings.ToLower(q.Name)] = true
-			named[strings.ToLower(q.Key)] = true
-			decls = append(decls, describe(map[string]any{
-				"name": q.Name, "in": "path", "required": true,
-				"schema": url.paramSchema(q.Key),
-			}, url.docKey(q.Key), q.Key))
+		if op.Stream == streamSocket {
+			obj["x-socket"] = "websocket"
 		}
-		for _, h := range p.headerFields(op.In) {
-			named[strings.ToLower(h.field)] = true
-			decls = append(decls, describe(map[string]any{
-				"name": h.header, "in": "header", "required": h.required,
-				"schema": h.schema,
-			}, h.field, h.field))
-		}
-		if !hasBody(op.Method) {
-			for _, f := range url {
-				if named[strings.ToLower(f.name)] {
-					continue
-				}
-				decls = append(decls, describe(map[string]any{
-					"name": f.name, "in": "query", "required": f.required,
-					"schema": f.schema,
-				}, url.docKey(f.name), f.name))
-			}
-		}
-		if len(decls) > 0 {
-			obj["parameters"] = decls
-		}
-
-		resp := map[string]any{}
-		if kind, ok := streams[op.Stream]; ok {
-			schema := binarySchema()
-			if op.Stream == "sse" {
-				schema = map[string]any{"type": "string"}
-			}
-			for _, code := range statuses(op.Statuses, 200) {
-				entry := map[string]any{
-					"description": statusText(code),
-					"content":     map[string]any{kind: map[string]any{"schema": schema}},
-				}
-				if h := headerDecls(op); h != nil {
-					entry["headers"] = h
-				}
-				resp[strconv.Itoa(code)] = entry
-			}
-		} else if out := p.types[op.Out]; out != nil && out.Name != "" {
-			media := map[string]any{"schema": p.schema(TypeRef{Ref: op.Out}, reg)}
-			if len(op.Response) > 0 {
-				media["example"] = json.RawMessage(op.Response)
-			}
-			for _, code := range statuses(op.Statuses, 200) {
-				entry := map[string]any{
-					"description": statusText(code),
-					"content":     map[string]any{"application/json": media},
-				}
-				if h := headerDecls(op); h != nil {
-					entry["headers"] = h
-				}
-				resp[strconv.Itoa(code)] = entry
-			}
-		} else {
-			for _, code := range statuses(op.Statuses, 204) {
-				entry := map[string]any{"description": statusText(code)}
-				if h := headerDecls(op); h != nil {
-					entry["headers"] = h
-				}
-				resp[strconv.Itoa(code)] = entry
-			}
-		}
+		resp := p.responses(op, reg)
 		if op.Gated {
 			if _, taken := resp["202"]; !taken {
 				resp["202"] = map[string]any{
 					"description": "held for approval",
 					"content": map[string]any{
-						"application/json": map[string]any{"schema": schemaOf(approvalType, reg, nil)},
+						"application/json": map[string]any{"schema": schemaOf(approvalType, reg, approvalProse)},
 					},
 				}
 			}
 		}
-		resp["default"] = refusalResponse(reg, op.OAuth)
+		resp["default"] = refusalResponse(reg, op.OAuth, op.Verbatim)
 		obj["responses"] = resp
 		paths[path][strings.ToLower(op.Method)] = obj
 	}
@@ -199,17 +105,312 @@ func ProjectOpenAPI(m Manifest) map[string]any {
 	}
 }
 
+// requestBody is an op's requestBody object, nil when it takes none. Its kind is
+// read off the input: a field that IS the body (bytes as sent), form fields
+// (one object, its file parts binary in a multipart form), or a value (the
+// input's schema), each under the media the op consumes.
+func (p *projector) requestBody(op ManifestOp, reg *schemaRegistry) map[string]any {
+	if !hasBody(op.Method) {
+		return nil
+	}
+	content := map[string]any{}
+	media := op.Consumes
+	td := p.types[op.In]
+	body := map[string]any{"required": true, "content": content}
+	switch {
+	case op.Raw || p.bodyField(td) != nil:
+		if len(media) == 0 {
+			media = []string{mimeOctet}
+		}
+		for _, m := range media {
+			content[m] = map[string]any{"schema": binarySchema()}
+		}
+		// The bytes are the field, so the field's prose is the body's.
+		if f := p.bodyField(td); f != nil && f.Doc != "" {
+			body["description"] = f.Doc
+		}
+	case p.takesForm(td):
+		for _, m := range media {
+			content[m] = map[string]any{"schema": p.formSchema(td, m == mimeMultipart, reg)}
+		}
+	case p.hasRequestBody(op):
+		if len(media) == 0 {
+			media = []string{mimeJSON}
+		}
+		for _, m := range media {
+			entry := map[string]any{"schema": p.schema(TypeRef{Ref: op.In}, reg)}
+			if len(op.Example) > 0 {
+				entry["example"] = json.RawMessage(op.Example)
+			}
+			content[m] = entry
+		}
+	default:
+		return nil
+	}
+	return body
+}
+
+// bodyField is the input's field that IS the request body, or nil.
+func (p *projector) bodyField(td *TypeDesc) *FieldDesc {
+	if td == nil || td.Kind != "struct" {
+		return nil
+	}
+	for i := range td.Fields {
+		if td.Fields[i].Body {
+			return &td.Fields[i]
+		}
+	}
+	return nil
+}
+
+// takesForm reports whether the input's body is a form.
+func (p *projector) takesForm(td *TypeDesc) bool {
+	if td == nil || td.Kind != "struct" {
+		return false
+	}
+	for _, f := range td.Fields {
+		if f.Form != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// formSchema is a form body: one object of the input's form fields under their
+// form names. A file part is binary in a multipart form and its {name, type,
+// bytes} object where the form arrives as JSON.
+func (p *projector) formSchema(td *TypeDesc, multipart bool, reg *schemaRegistry) map[string]any {
+	props := map[string]any{}
+	var required []string
+	for _, f := range td.Fields {
+		if f.Form == "" {
+			continue
+		}
+		var fs map[string]any
+		switch {
+		case multipart && p.binary(f.Type):
+			fs = binarySchema()
+		case multipart && f.Type.List != nil && p.binary(*f.Type.List):
+			fs = map[string]any{"type": "array", "items": binarySchema()}
+		default:
+			fs = p.schema(f.Type, reg)
+		}
+		if f.Doc != "" {
+			fs["description"] = f.Doc
+		}
+		props[f.Form] = fs
+		if f.Required {
+			required = append(required, f.Form)
+		}
+	}
+	out := map[string]any{"type": "object", "properties": props}
+	if len(required) > 0 {
+		out["required"] = required
+	}
+	return out
+}
+
+// binary reports whether a field's type is bytes where a form part carries it.
+func (p *projector) binary(r TypeRef) bool {
+	td := p.types[r.Ref]
+	return td != nil && td.Binary
+}
+
+// parameters are an op's path, header, cookie and query parameters. The query
+// carries the input's URL-borne fields whenever the body does not: for a method
+// without one, and for a body that is bytes as sent or a form.
+func (p *projector) parameters(op ManifestOp) []any {
+	url := p.urlFields(op.In)
+	example := exampleFields(op.Example)
+	describe := func(decl map[string]any, docField, wire string) map[string]any {
+		if help := p.doc(op.In, docField); help != "" {
+			decl["description"] = help
+		}
+		if v, ok := example[wire]; ok {
+			decl["example"] = v
+		}
+		return decl
+	}
+	params := pathParams(op.Path)
+	decls := make([]any, 0, len(params))
+	named := make(map[string]bool, len(params))
+	for _, q := range params {
+		named[strings.ToLower(q.Name)] = true
+		named[strings.ToLower(q.Key)] = true
+		decls = append(decls, describe(map[string]any{
+			"name": q.Name, "in": "path", "required": true,
+			"schema": url.paramSchema(q.Key),
+		}, url.docKey(q.Key), q.Key))
+	}
+	for _, h := range p.headerFields(op.In) {
+		named[strings.ToLower(h.field)] = true
+		decls = append(decls, describe(map[string]any{
+			"name": h.header, "in": "header", "required": h.required,
+			"schema": h.schema,
+		}, h.field, h.field))
+	}
+	if td := p.types[op.In]; td != nil && td.Kind == "struct" {
+		for _, f := range td.Fields {
+			if f.Cookie == "" {
+				continue
+			}
+			decls = append(decls, describe(map[string]any{
+				"name": f.Cookie, "in": "cookie", "required": f.Required,
+				"schema": p.schema(f.Type, nil),
+			}, f.JSON, f.JSON))
+		}
+	}
+	td := p.types[op.In]
+	if !hasBody(op.Method) || p.bodyField(td) != nil || p.takesForm(td) {
+		for _, f := range url {
+			if named[strings.ToLower(f.name)] {
+				continue
+			}
+			decls = append(decls, describe(map[string]any{
+				"name": f.name, "in": "query", "required": f.required,
+				"schema": f.schema,
+			}, url.docKey(f.name), f.name))
+		}
+	}
+	return decls
+}
+
+// responses are an op's answers by status: each declared status with what it
+// carries. A 3xx carries no body, only the headers that send the client on. A
+// stream is published at the op's first status that is not a redirect: an
+// event stream with the event's type as x-events, bytes under the media the op
+// produces, an upgrade as 101 with the message's type. A JSON answer is filed
+// under its status; a union files each alternative under the status it states,
+// several at one status being a oneOf.
+func (p *projector) responses(op ManifestOp, reg *schemaRegistry) map[string]any {
+	resp := map[string]any{}
+	if op.Stream == streamSocket {
+		entry := map[string]any{"description": "switching protocols"}
+		if op.Event != "" {
+			entry["x-events"] = p.schema(TypeRef{Ref: op.Event}, reg)
+		}
+		resp["101"] = entry
+		return resp
+	}
+	dflt := 200
+	if op.Stream == "" && !p.answers(op.Out) {
+		dflt = 204
+	}
+	codes := statuses(op.Statuses, dflt)
+	primary := codes[0]
+	for _, code := range codes {
+		if code < 300 || code >= 400 {
+			primary = code
+			break
+		}
+	}
+	byStatus := p.alternatives(op.Out, primary)
+	for _, code := range codes {
+		entry := map[string]any{"description": statusText(code)}
+		if h := headerDecls(op); h != nil {
+			entry["headers"] = h
+		}
+		if code >= 300 && code < 400 {
+			resp[strconv.Itoa(code)] = entry
+			continue
+		}
+		content := map[string]any{}
+		if alts := byStatus[code]; len(alts) > 0 {
+			var schema map[string]any
+			if len(alts) == 1 {
+				schema = p.schema(alts[0], reg)
+			} else {
+				one := make([]any, len(alts))
+				for i, a := range alts {
+					one[i] = p.schema(a, reg)
+				}
+				schema = map[string]any{"oneOf": one}
+			}
+			media := map[string]any{"schema": schema}
+			if len(op.Response) > 0 && code == primary {
+				media["example"] = json.RawMessage(op.Response)
+			}
+			jsonMedia := []string{mimeJSON}
+			if len(op.Produces) > 0 && op.Stream != streamBytes {
+				jsonMedia = op.Produces
+			}
+			for _, m := range jsonMedia {
+				content[m] = media
+			}
+		}
+		if code == primary || (op.Stream == streamBytes && !p.answers(op.Out)) {
+			switch op.Stream {
+			case streamSSE:
+				entry := map[string]any{"schema": map[string]any{"type": "string"}}
+				if op.Event != "" {
+					entry["x-events"] = p.schema(TypeRef{Ref: op.Event}, reg)
+				}
+				content[streams[streamSSE]] = entry
+			case streamBytes:
+				media := op.Produces
+				if len(media) == 0 {
+					media = []string{mimeOctet}
+				}
+				for _, m := range media {
+					content[m] = map[string]any{"schema": binarySchema()}
+				}
+			}
+		}
+		if len(content) > 0 {
+			entry["content"] = content
+		}
+		resp[strconv.Itoa(code)] = entry
+	}
+	return resp
+}
+
+// answers reports whether an op answers a JSON value.
+func (p *projector) answers(out string) bool {
+	td := p.types[out]
+	return td != nil && (td.Name != "" || td.Kind == "union")
+}
+
+// alternatives files an op's JSON answer by status: the value under the
+// primary status, or each alternative of a union under the status it states.
+func (p *projector) alternatives(out string, primary int) map[int][]TypeRef {
+	td := p.types[out]
+	if td == nil || !p.answers(out) {
+		return nil
+	}
+	if td.Kind != "union" {
+		return map[int][]TypeRef{primary: {{Ref: out}}}
+	}
+	by := map[int][]TypeRef{}
+	for _, alt := range td.OneOf {
+		code := primary
+		if a := p.types[alt.Ref]; a != nil && a.Status != 0 {
+			code = a.Status
+		}
+		by[code] = append(by[code], alt)
+	}
+	if td.Name != "" && len(by) == 1 {
+		// A named union answered at one status is its own schema, one
+		// component every op that answers it shares.
+		return map[int][]TypeRef{primary: {{Ref: out}}}
+	}
+	return by
+}
+
 // binarySchema is bytes sent as they are, which is what a raw body and a byte
 // stream both are.
 func binarySchema() map[string]any {
 	return map[string]any{"type": "string", "format": "binary"}
 }
 
-// ProjectMCP is m as an MCP tool list, in name order.
+// ProjectMCP is m as an MCP tool list, in name order. An op that upgrades to a
+// connection is not a tool ([NotACall]); [RefusedMCP] names it.
 func ProjectMCP(m Manifest) []map[string]any {
 	p := newProjector(m)
 	tools := make([]map[string]any, 0, len(m.Ops))
 	for _, op := range m.Ops {
+		if op.Stream == streamSocket {
+			continue
+		}
 		desc := op.Summary
 		if op.Description != "" {
 			desc = op.Description
@@ -229,6 +430,18 @@ func ProjectMCP(m Manifest) []map[string]any {
 		return tools[i]["name"].(string) < tools[j]["name"].(string)
 	})
 	return tools
+}
+
+// RefusedMCP names the ops of m that are not tools, each with the reason: what
+// tools/list's _meta says about the ops it leaves out.
+func RefusedMCP(m Manifest) map[string]string {
+	out := map[string]string{}
+	for _, op := range m.Ops {
+		if op.Stream == streamSocket {
+			out[op.ID] = NotACall
+		}
+	}
+	return out
 }
 
 // ProjectCLI is m as a command tree.
@@ -253,6 +466,11 @@ func ProjectCLI(m Manifest) []Command {
 			Method:      op.Method,
 			Path:        op.Path,
 			Example:     op.Example,
+			Stream:      op.Stream,
+		}
+		if len(op.Consumes) > 0 {
+			c.Consumes = append([]string(nil), op.Consumes...)
+			sort.Strings(c.Consumes)
 		}
 		c.Service, c.Name = commandName(op.Method, op.Path, op.ID)
 		if c.Summary == "" {
@@ -267,7 +485,14 @@ func ProjectCLI(m Manifest) []Command {
 
 // bind splits an op's input into positional args and flags: the URL addresses
 // the resource, so what addresses it is positional and what modifies the
-// request is a flag.
+// request is a flag. A declared header or cookie is a flag that rides as one;
+// a body taken as sent is --body; a form field is a flag and a file part a
+// --field; what is left rides the JSON body, or the query when the body is not
+// JSON.
+//
+// The flags come in the order the document lists them — headers, cookies,
+// then the query or the JSON body, then the form — so a command derived here
+// and one derived from the document are the same command.
 func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 	params := pathParams(op.Path)
 	td := p.types[op.In]
@@ -279,7 +504,7 @@ func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 		return args, nil
 	}
 	var flags []Flag
-	add := func(name, url, kind string, required bool) {
+	add := func(name, url, kind, help string, required bool, in string) {
 		if name == "-" || isParam(params, url) {
 			return
 		}
@@ -287,19 +512,61 @@ func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 			Name:     kebab(name),
 			Field:    name,
 			Type:     kind,
-			Help:     p.doc(op.In, name),
+			Help:     help,
 			Required: required,
+			In:       in,
 		})
 	}
-	if hasBody(op.Method) {
+	beside := map[string]bool{}
+	for _, f := range td.Fields {
+		if f.Header != "" {
+			add(f.Header, f.Header, p.flagType(f.Type), f.Doc, f.Required, "header")
+			beside[f.JSON] = true
+		}
+	}
+	for _, f := range td.Fields {
+		if f.Cookie != "" {
+			add(f.Cookie, f.Cookie, p.flagType(f.Type), f.Doc, f.Required, "cookie")
+			beside[f.JSON] = true
+		}
+	}
+	raw, form := p.bodyField(td), p.takesForm(td)
+	if hasBody(op.Method) && raw == nil && !form {
+		// Every field the JSON body carries, as the document's body schema
+		// lists it: a declared header or cookie rides the body too. A schema's
+		// properties have no order, so both derivations sort them by name.
+		n := len(flags)
 		for _, f := range td.Fields {
-			add(f.JSON, urlName(f), p.flagType(f.Type), f.Required)
+			add(f.JSON, urlName(f), p.flagType(f.Type), p.doc(op.In, f.JSON), f.Required, "")
 		}
-	} else {
-		for _, f := range p.urlFields(op.In) {
-			kind, _ := f.schema["type"].(string)
-			add(f.name, f.name, specType(kind), f.required)
+		body := flags[n:]
+		sort.Slice(body, func(i, j int) bool { return body[i].Field < body[j].Field })
+		return args, flags
+	}
+	for _, f := range p.urlFields(op.In) {
+		if beside[f.field] {
+			continue
 		}
+		kind, _ := f.schema["type"].(string)
+		add(f.name, f.name, specType(kind), p.doc(op.In, f.name), f.required, "")
+	}
+	if raw != nil {
+		flags = append(flags, Flag{Name: "body", Field: "body", Type: "file", Help: raw.Doc, In: "body"})
+	}
+	if form {
+		var parts []Flag
+		for _, f := range td.Fields {
+			if f.Form == "" {
+				continue
+			}
+			in, kind := "form", p.flagType(f.Type)
+			if p.binary(f.Type) || f.Type.List != nil && p.binary(*f.Type.List) {
+				in, kind = "file", "file"
+			}
+			parts = append(parts, Flag{Name: kebab(f.Form), Field: f.Form, Type: kind, Help: f.Doc, Required: f.Required, In: in})
+		}
+		sort.Slice(parts, func(i, j int) bool { return parts[i].Field < parts[j].Field })
+		flags = append(flags, parts...)
 	}
 	return args, flags
 }
@@ -355,6 +622,13 @@ func (p *projector) schema(r TypeRef, reg *schemaRegistry) map[string]any {
 			return map[string]any{"type": "array", "items": p.schema(*td.Elem, reg)}
 		case "map":
 			return map[string]any{"type": "object", "additionalProperties": p.schema(*td.Elem, reg)}
+		case "union":
+			if reg == nil || td.Name == "" {
+				out := map[string]any{}
+				p.fill(out, td, reg)
+				return out
+			}
+			return reg.ref(p.define(td, reg))
 		case "struct":
 			if reg == nil {
 				return map[string]any{"type": "object"}
@@ -388,8 +662,16 @@ func (p *projector) define(td *TypeDesc, reg *schemaRegistry) string {
 	return name
 }
 
-// fill is [structSchema] over a described struct.
+// fill is [structSchema] over a described struct, and a union's oneOf.
 func (p *projector) fill(into map[string]any, td *TypeDesc, reg *schemaRegistry) {
+	if td.Kind == "union" {
+		one := make([]any, len(td.OneOf))
+		for i, alt := range td.OneOf {
+			one[i] = p.schema(alt, reg)
+		}
+		into["oneOf"] = one
+		return
+	}
 	props := map[string]any{}
 	var required []string
 	for _, f := range td.Fields {

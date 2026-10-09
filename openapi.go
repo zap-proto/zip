@@ -5,7 +5,6 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -63,263 +62,6 @@ func (a *App) buildOpenAPI() map[string]any {
 	return ProjectOpenAPI(a.Manifest())
 }
 
-func (a *App) buildOpenAPIReflect() map[string]any {
-	cfg := a.cfg.OpenAPI
-	if cfg.Title == "" {
-		cfg.Title = a.cfg.AppName
-	}
-	if cfg.Title == "" {
-		cfg.Title = "zip API"
-	}
-	if cfg.Version == "" {
-		cfg.Version = "0.0.0"
-	}
-
-	paths := map[string]map[string]any{}
-	// One registry for the whole document: a type reached by two ops is one
-	// definition in components.schemas that both point at.
-	reg := newSchemaRegistry(specDefs)
-	// The addresses whose refusals speak RFC 6749, read from the same walk the
-	// error handler is built from, so the document and the wire agree.
-	oauth := composeOAuth(a.plan())
-
-	// Sort ops by path,method for deterministic output.
-	ops := append([]*registeredOp{}, a.Registry()...)
-	sort.Slice(ops, func(i, j int) bool {
-		if ops[i].Path != ops[j].Path {
-			return ops[i].Path < ops[j].Path
-		}
-		return ops[i].Method < ops[j].Method
-	})
-
-	for _, op := range ops {
-		// Whose types these are. Empty for this app's own ops, so a document
-		// with nothing composed into it is byte-identical to one from an app
-		// that composes nothing.
-		reg.origin = op.Origin
-
-		// The document's spelling of the router's pattern, from [Template], which
-		// is the one place that rule lives. This built its own along the way —
-		// replace "/:" with "/{", then repair the missing brace by calling
-		// Template anyway — and the shortcut answered for two shapes it was never
-		// asked about. A path carrying a parameter AND a literal "}" satisfied the
-		// repair's guard without being repaired, so it published "{name" unclosed;
-		// and a wildcard has no "/:" at all, so "*" reached the document verbatim,
-		// which no path template can mean. A caller reading a route table named
-		// that segment one thing and this named it another, and the two resolve as
-		// different operations rather than one address spelled twice.
-		path := Template(op.Path)
-
-		if _, ok := paths[path]; !ok {
-			paths[path] = map[string]any{}
-		}
-		// opName is the ONE place the id rule lives, shared with the MCP tool
-		// list, the op-call plane and the Authorizer's Op — so an operation is
-		// addressed by the same token whichever projection you came through.
-		opObj := map[string]any{
-			"operationId": opName(op),
-			"summary":     op.Summary,
-		}
-		// Prose and examples extracted from the source by cmd/zipdoc. Absent
-		// when the generator has not run, which degrades to the schema-only
-		// spec rather than failing — a spec without descriptions is still a
-		// usable spec.
-		doc, hasDoc := docFor(op.Pkg, op.Method, op.Path)
-		if hasDoc {
-			if doc.Description != "" {
-				opObj["description"] = doc.Description
-			}
-			if op.Summary == "" {
-				opObj["summary"] = firstSentence(doc.Description)
-			}
-		}
-		if len(op.Tags) > 0 {
-			opObj["tags"] = op.Tags
-		}
-
-		// Request body.
-		if hasRequestBody(op) {
-			media := map[string]any{"schema": schemaOf(op.InType, reg, docFields(hasDoc, doc))}
-			// An example is what makes a spec explorable — it is the difference
-			// between a reference someone reads and one they can press "try it"
-			// on.
-			if hasDoc && len(doc.Example) > 0 {
-				media["example"] = json.RawMessage(doc.Example)
-			}
-			opObj["requestBody"] = map[string]any{
-				"required": true,
-				"content":  map[string]any{"application/json": media},
-			}
-		}
-
-		// Path parameters. OpenAPI requires every templated segment to be declared,
-		// so they are derived from the route pattern itself — the same string the
-		// router matches on, so the spec cannot describe a parameter the route does
-		// not have (or omit one it does).
-		// A parameter's prose lives with the field it binds to, under the same
-		// "<Type>.<field>" key the in-process CLI reads. Looking it up here
-		// rather than restating it is what keeps a generated client and a
-		// linked-in one describing the same argument the same way — the
-		// alternative is a spec that silently has nothing to say about an
-		// argument the registry documents fine.
-		fields := docFields(hasDoc, doc)
-		inName := typeName(op.InType)
-		// A parameter's example is that field's value in the op's OWN example —
-		// the one the doc comment already wrote, split across the parameters
-		// that carry it. A bodyless op has no requestBody for the example to
-		// live in, and an example that only survives for methods with a body is
-		// an example missing from every GET and DELETE in the document.
-		example := exampleFields(doc.Example)
-		// Two keys, because the two lookups are filed under different names. Prose
-		// is filed by the GO FIELD, which is what a doc comment documents; an
-		// example is a value in the op's own example document, so it is keyed by
-		// the name that value carries on the WIRE. They coincide for most
-		// parameters and do not for a wildcard, whose wire name is fiber's *N.
-		describe := func(decl map[string]any, docField, wire string) map[string]any {
-			if help := fields[inName+"."+docField]; help != "" {
-				decl["description"] = help
-			}
-			if v, ok := example[wire]; ok {
-				decl["example"] = v
-			}
-			return decl
-		}
-
-		// A parameter's TYPE is the type of the field it binds to, wherever the
-		// URL carried it from. bindURL is one binder over one set of fields, so
-		// the document reads that one set too — declaring every path param a
-		// string while consulting the input for query params described the same
-		// value two different ways depending on which half of the URL it rode in.
-		url := urlFields(op.InType)
-		params := pathParams(op.Path)
-		decls := make([]any, 0, len(params))
-		named := make(map[string]bool, len(params))
-		for _, p := range params {
-			// Both spellings are spoken for, so a field bound under either is not
-			// then described a second time as a query parameter.
-			named[strings.ToLower(p.Name)] = true
-			named[strings.ToLower(p.Key)] = true
-			decls = append(decls, describe(map[string]any{
-				"name": p.Name, "in": "path", "required": true,
-				"schema": url.paramSchema(p.Key),
-			}, url.docKey(p.Key), p.Key))
-		}
-		// Header parameters. A field carrying `header:"X-Foo"` is a REQUEST FACT
-		// the op declared, so the document names it — that is what makes reading
-		// a header part of the contract instead of something a middleware does
-		// off to the side where no projection can see it. Declared for every
-		// method, because a header rides a POST as readily as a GET, and excluded
-		// from the query list below so one field is never described twice.
-		hdr := headerFields(op.InType)
-		for _, h := range hdr {
-			named[strings.ToLower(h.field)] = true
-			decls = append(decls, describe(map[string]any{
-				"name": h.header, "in": "header", "required": h.required,
-				"schema": h.schema,
-			}, h.field, h.field))
-		}
-
-		// Query parameters. A bodyless method binds its input from the URL
-		// (typed.go bindURL), so every In field that is NOT already a path
-		// segment is reachable as `?field=` — and the document has to say so, or
-		// it describes a route nobody can call correctly. Declared only where
-		// there is no requestBody, because that is exactly where the binder
-		// treats the URL as the whole input.
-		if !hasBody(op.Method) {
-			for _, f := range url {
-				if named[strings.ToLower(f.name)] {
-					continue
-				}
-				decls = append(decls, describe(map[string]any{
-					"name": f.name, "in": "query", "required": f.required,
-					"schema": f.schema,
-				}, url.docKey(f.name), f.name))
-			}
-		}
-		if len(decls) > 0 {
-			opObj["parameters"] = decls
-		}
-
-		// The success response, keyed on the status the op DECLARED — the whole
-		// reason WithStatus is on the op rather than set per request: a 201 that
-		// only reached the wire would leave every generated client expecting a
-		// 200 the service never sends.
-		if op.OutType != nil && typeName(op.OutType) != "" {
-			respMedia := map[string]any{"schema": schemaOf(op.OutType, reg, docFields(hasDoc, doc))}
-			if hasDoc && len(doc.Response) > 0 {
-				respMedia["example"] = json.RawMessage(doc.Response)
-			}
-			resp := map[string]any{}
-			for _, code := range declaredStatuses(op, 200) {
-				entry := map[string]any{
-					"description": statusText(code),
-					"content":     map[string]any{"application/json": respMedia},
-				}
-				if h := responseHeaderSchemas(op); h != nil {
-					entry["headers"] = h
-				}
-				resp[strconv.Itoa(code)] = entry
-			}
-			opObj["responses"] = resp
-		} else {
-			resp := map[string]any{}
-			for _, code := range declaredStatuses(op, 204) {
-				entry := map[string]any{"description": statusText(code)}
-				if h := responseHeaderSchemas(op); h != nil {
-					entry["headers"] = h
-				}
-				resp[strconv.Itoa(code)] = entry
-			}
-			opObj["responses"] = resp
-		}
-
-		// A gated service can hold ANY op, so its document publishes the held body
-		// beside every op's success response and a generated client reads the pair
-		// rather than mistaking a held op for a finished one.
-		//
-		// The op is asked, not the app, because they can differ: a composed child
-		// answers to whatever included it (see [adopt]), and a MOUNTED op has no
-		// local rule at all — it is another service's op, forwarded, so this
-		// document must not promise an answer this app would never send. Never
-		// over a 202 the op declared itself, either, which is the op's own meaning
-		// for that code.
-		if op.rule != nil && op.rule() != nil {
-			if resp, ok := opObj["responses"].(map[string]any); ok {
-				if _, taken := resp["202"]; !taken {
-					resp["202"] = map[string]any{
-						"description": "held for approval",
-						"content": map[string]any{
-							"application/json": map[string]any{"schema": schemaOf(approvalType, reg, nil)},
-						},
-					}
-				}
-			}
-		}
-
-		// Any status the op does not declare is a refusal, written in the body its
-		// address speaks (see problem.go). Publishing that body is what lets a
-		// client generated from this document type its errors.
-		if resp, ok := opObj["responses"].(map[string]any); ok {
-			resp["default"] = refusalResponse(reg, oauth[op.Method+" "+op.Path])
-		}
-
-		paths[path][strings.ToLower(op.Method)] = opObj
-	}
-
-	return map[string]any{
-		"openapi": "3.1.0",
-		"info": map[string]any{
-			"title":       cfg.Title,
-			"description": cfg.Description,
-			"version":     cfg.Version,
-		},
-		"paths": paths,
-		"components": map[string]any{
-			"schemas": reg.defs,
-		},
-	}
-}
-
 // The schema names a refusal body is published under. Neither can be the name
 // of a Go type: a type name has no '-', and a qualified one contains a '.'.
 const (
@@ -328,8 +70,10 @@ const (
 )
 
 // refusalResponse is an op's `default` response: an RFC 9457 problem document,
-// or RFC 6749's error pair at an OAuth address.
-func refusalResponse(reg *schemaRegistry, oauth bool) map[string]any {
+// or RFC 6749's error pair at an OAuth address. A relay's refusal may also be
+// the upstream's own, relayed as sent ([Verbatim]), which the response says
+// beside this service's.
+func refusalResponse(reg *schemaRegistry, oauth, relayed bool) map[string]any {
 	name, media, schema := problemSchema, mimeProblem, problemDocument
 	if oauth {
 		name, media, schema = oauthSchema, mimeJSON, oauthError
@@ -337,10 +81,15 @@ func refusalResponse(reg *schemaRegistry, oauth bool) map[string]any {
 	if _, ok := reg.defs[name]; !ok {
 		reg.defs[name] = schema()
 	}
-	return map[string]any{
+	out := map[string]any{
 		"description": "refused",
 		"content":     map[string]any{media: map[string]any{"schema": reg.ref(name)}},
 	}
+	if relayed {
+		out["description"] = "refused, by this service or by the upstream, whose refusal is relayed as it was sent"
+		out["content"].(map[string]any)["*/*"] = map[string]any{"schema": map[string]any{}}
+	}
+	return out
 }
 
 // problemDocument is the shape [HTTPError.problem] writes. A refusal's own
@@ -369,8 +118,8 @@ func oauthError() map[string]any {
 		"type":        "object",
 		"description": "An RFC 6749 error response.",
 		"properties": map[string]any{
-			"error":             map[string]any{"type": "string"},
-			"error_description": map[string]any{"type": "string"},
+			"error":             map[string]any{"type": "string", "description": "The RFC 6749 error code, such as invalid_request or invalid_grant."},
+			"error_description": map[string]any{"type": "string", "description": "What was refused, for a person to read."},
 		},
 		"required": []string{"error"},
 	}
@@ -770,6 +519,112 @@ func typeName(t reflect.Type) string {
 	return ""
 }
 
+// componentName is the name a type is published under: its own, except an
+// instantiated generic. reflect names one Envelope[github.com/x/y.Store], which
+// no schema name may contain, so it is published as the generic's name followed
+// by its arguments' names — EnvelopeStore. A pointer argument is its element, a
+// slice argument its element's name and List, a map argument its value's name
+// and Map, a basic type its name capitalised.
+//
+// Prose stays filed under the reflect name, which is what zipdoc writes and
+// what the field lookups read, so this changes what a schema is called and
+// nothing about what it says.
+func componentName(t reflect.Type) string { return plainName(typeName(t)) }
+
+// plainName is a reflect type name with its type arguments folded in.
+func plainName(n string) string {
+	open := strings.IndexByte(n, '[')
+	if open < 0 || !strings.HasSuffix(n, "]") {
+		return n
+	}
+	var b strings.Builder
+	b.WriteString(n[:open])
+	for _, arg := range typeArgs(n[open+1 : len(n)-1]) {
+		b.WriteString(argName(arg))
+	}
+	return b.String()
+}
+
+// typeArgs splits a type-argument list at its top-level commas.
+func typeArgs(s string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[', '(', '{':
+			depth++
+		case ']', ')', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, s[start:])
+}
+
+// argName is one type argument's part of a published name.
+func argName(s string) string {
+	s = strings.TrimSpace(s)
+	switch {
+	case strings.HasPrefix(s, "*"):
+		return argName(s[1:])
+	case strings.HasPrefix(s, "[]"):
+		return argName(s[2:]) + "List"
+	case strings.HasPrefix(s, "map["):
+		depth := 0
+		for i := 3; i < len(s); i++ {
+			switch s[i] {
+			case '[':
+				depth++
+			case ']':
+				if depth--; depth == 0 {
+					return argName(s[i+1:]) + "Map"
+				}
+			}
+		}
+	case strings.HasPrefix(s, "["):
+		if i := strings.IndexByte(s, ']'); i > 0 {
+			return argName(s[i+1:]) + "Array"
+		}
+	case s == "interface {}" || s == "any":
+		return "Any"
+	case strings.HasPrefix(s, "struct"), strings.HasPrefix(s, "interface"), strings.HasPrefix(s, "func"),
+		strings.HasPrefix(s, "chan"):
+		return "Value"
+	}
+	head, rest := s, ""
+	if i := strings.IndexByte(s, '['); i >= 0 {
+		head, rest = s[:i], s[i:]
+	}
+	// A type's name follows the last dot: a package path may hold dots of its
+	// own (gopkg.in/yaml.v3.Node), a type name never does.
+	if i := strings.LastIndexByte(head, '.'); i >= 0 {
+		head = head[i+1:]
+	}
+	if head != "" {
+		head = strings.ToUpper(head[:1]) + head[1:]
+	}
+	return plainName(head + rest)
+}
+
+// declaring is the struct that declares the field at index within t: t itself
+// for its own fields, the embedded struct for a promoted one.
+func declaring(t reflect.Type, index []int) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	for _, i := range index[:len(index)-1] {
+		t = t.Field(i).Type
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+	}
+	return t
+}
+
 // Where a projection keeps the definitions its schemas refer to. An OpenAPI
 // document has one place for them; a schema sent on its own carries its own.
 const (
@@ -853,12 +708,12 @@ func (r *schemaRegistry) nameFor(t reflect.Type) string {
 	if r.origin != "" {
 		qual = r.origin + "."
 	}
-	base := qual + typeName(t)
+	base := qual + componentName(t)
 	if _, taken := r.defs[base]; !taken {
 		return base
 	}
 	if p := t.PkgPath(); p != "" {
-		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + typeName(t)
+		base = qual + p[strings.LastIndexByte(p, '/')+1:] + "." + componentName(t)
 	}
 	for name, n := base, 2; ; n++ {
 		if _, taken := r.defs[name]; !taken {
@@ -1015,6 +870,8 @@ func structSchema(into map[string]any, t reflect.Type, reg *schemaRegistry, fiel
 		}
 		fs := schemaOf(f.Type, reg, fields)
 		if d := fields[typeName(t)+"."+name]; d != "" {
+			fs["description"] = d
+		} else if d := fields[typeName(declaring(t, f.Index))+"."+name]; d != "" {
 			fs["description"] = d
 		}
 		props[name] = fs
@@ -1177,6 +1034,12 @@ func headerFieldName(f reflect.StructField) string {
 func urlFieldName(f reflect.StructField) string {
 	if tag, ok := f.Tag.Lookup("url"); ok {
 		return jsontag.Name(f.Name, tag)
+	}
+	// The body taken as sent, a form field, a file part and a cookie each ride
+	// where they are declared, and a URL that could also carry one would be a
+	// second way to say it — for a cookie, a way for a link to set a session.
+	if f.Type == bodyType || formFieldName(f) != "" || cookieFieldName(f) != "" {
+		return "-"
 	}
 	return jsonFieldName(f)
 }
@@ -1343,30 +1206,6 @@ const swaggerHTML = `<!doctype html>
 // deriving it here is that there is only one.
 func (a *App) OpenAPISpec() map[string]any { return a.buildOpenAPI() }
 
-// primaryStatus is the code an op answers with when its output states nothing —
-// the first it declared. The document keys the success response on it, and every
-// OTHER declared status gets its own entry beside it (see multiStatus), because
-// a code the service can send and the document omits is a code no generated
-// client will handle.
-// declaredStatuses is every success code an op may answer with — all of them,
-// not just the first. An op that declares 200 and 201 can send either, so the
-// document says both; publishing one would leave a generated client with no
-// branch for the other, which is precisely the hole a per-request status slot
-// left open.
-func declaredStatuses(op *registeredOp, dflt int) []int {
-	if len(op.Statuses) == 0 {
-		return []int{dflt}
-	}
-	return op.Statuses
-}
-
-func primaryStatus(op *registeredOp) int {
-	if len(op.Statuses) == 0 {
-		return 0
-	}
-	return op.Statuses[0]
-}
-
 // headerField is one declared header parameter: the header it reads, the field
 // it lands on, and the shape it carries.
 type headerField struct {
@@ -1402,27 +1241,6 @@ func headerFields(t reflect.Type) []headerField {
 			required: strings.Contains(f.Tag.Get("validate"), "required"),
 			schema:   schemaOf(f.Type, nil, nil),
 		})
-	}
-	return out
-}
-
-// responseHeaderSchemas is the `headers` object of a response, from what the op
-// declared with [WithResponseHeader].
-//
-// A response header a caller relies on — a cache directive, a payment challenge,
-// a Set-Cookie — is part of the contract, so the document names it. Without this
-// the header would be set on the wire and described nowhere, which is the same
-// invisibility that made a context slot the wrong home for it.
-func responseHeaderSchemas(op *registeredOp) map[string]any {
-	if len(op.ResponseHeaders) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(op.ResponseHeaders))
-	for _, name := range op.ResponseHeaders {
-		out[name] = map[string]any{
-			"description": "Set by " + op.Method + " " + op.Path + ".",
-			"schema":      map[string]any{"type": "string"},
-		}
 	}
 	return out
 }

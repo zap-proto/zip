@@ -654,6 +654,24 @@ func (e *extractor) fields(t types.Type, out map[string]string, seen map[*types.
 			return
 		}
 		seen[t] = true
+		// A union's alternatives are the result types of its OneOf method, and
+		// they are what its schema shows, so their fields are documented as if
+		// the op named each one.
+		for _, alt := range alternatives(t) {
+			e.fields(alt, out, seen)
+		}
+		// zip's answer and request kinds carry what reaches the wire as type
+		// arguments — the events of an Sse, the documented shape of a
+		// Verbatim, the messages of a Socket, the alternatives of an Or — and
+		// their own fields are not a wire shape at all.
+		if kinds[zipName(t)] {
+			if args := t.TypeArgs(); args != nil {
+				for i := 0; i < args.Len(); i++ {
+					e.fields(args.At(i), out, seen)
+				}
+			}
+			return
+		}
 		st, ok := t.Underlying().(*types.Struct)
 		if !ok {
 			e.fields(t.Underlying(), out, seen)
@@ -672,16 +690,48 @@ func (e *extractor) fields(t types.Type, out map[string]string, seen map[*types.
 	}
 }
 
+// kinds are zip's request and answer kinds: their type arguments are the wire
+// shapes, and their own fields are not (a Body is bytes on the wire whatever
+// it holds in the process).
+var kinds = map[string]bool{"Body": true, "Or": true, "Sse": true, "Verbatim": true, "Socket": true, "Event": true}
+
+// zipName is the name of a type declared in zip, or "".
+func zipName(t *types.Named) string {
+	if pkg := t.Obj().Pkg(); pkg != nil && pkg.Path() == ZipPkg {
+		return t.Obj().Name()
+	}
+	return ""
+}
+
+// alternatives are the result types of t's OneOf method, which is how a union
+// names what it may be. Nil when t declares none.
+func alternatives(t *types.Named) []types.Type {
+	obj, _, _ := types.LookupFieldOrMethod(types.NewPointer(t), true, t.Obj().Pkg(), "OneOf")
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return nil
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Params().Len() != 0 || sig.Results().Len() < 2 {
+		return nil
+	}
+	out := make([]types.Type, sig.Results().Len())
+	for i := range out {
+		out[i] = sig.Results().At(i).Type()
+	}
+	return out
+}
+
 // structFields pairs the type-checked fields (authoritative for names and tags)
 // with the parsed ones (which carry the comments). go/types preserves source
 // order, so index i is the same field in both.
+//
+// A type defined over another (`type legalFiling Filing`) has the fields of
+// the one it is defined over, written where that one is declared, so the
+// prose is read there and filed under the defined type's own name.
 func (e *extractor) structFields(name string, obj *types.TypeName, st *types.Struct, out map[string]string) {
-	spec := e.typeSpec(obj.Pos(), obj.Name())
-	if spec == nil {
-		return
-	}
-	lit, ok := spec.Type.(*ast.StructType)
-	if !ok {
+	lit := e.structLit(obj)
+	if lit == nil {
 		return
 	}
 	var flat []*ast.Field
@@ -714,6 +764,62 @@ func (e *extractor) structFields(name string, obj *types.TypeName, st *types.Str
 			out[name+"."+jsonName] = doc
 		}
 	}
+}
+
+// structLit is the struct literal that declares obj's fields: its own, or the
+// literal of the type it is defined over, followed through each such step —
+// within its package by name, and across an import by the file's import of
+// it.
+func (e *extractor) structLit(obj *types.TypeName) *ast.StructType {
+	for range 8 {
+		spec := e.typeSpec(obj.Pos(), obj.Name())
+		if spec == nil || obj.Pkg() == nil {
+			return nil
+		}
+		var next types.Object
+		switch x := ast.Unparen(spec.Type).(type) {
+		case *ast.StructType:
+			return x
+		case *ast.Ident:
+			next = obj.Pkg().Scope().Lookup(x.Name)
+		case *ast.SelectorExpr:
+			id, ok := x.X.(*ast.Ident)
+			if !ok {
+				return nil
+			}
+			if imp := e.imported(obj, id.Name); imp != nil {
+				next = imp.Scope().Lookup(x.Sel.Name)
+			}
+		}
+		named, ok := next.(*types.TypeName)
+		if !ok {
+			return nil
+		}
+		obj = named
+	}
+	return nil
+}
+
+// imported is the package a file refers to as name, from the file declaring
+// obj: an import that names itself so, else the import whose package is so
+// named.
+func (e *extractor) imported(obj *types.TypeName, name string) *types.Package {
+	f, _ := e.file(obj.Pos())
+	if f == nil {
+		return nil
+	}
+	path := ""
+	for _, spec := range f.Imports {
+		if spec.Name != nil && spec.Name.Name == name {
+			path = strings.Trim(spec.Path.Value, `"`)
+		}
+	}
+	for _, imp := range obj.Pkg().Imports() {
+		if path != "" && imp.Path() == path || path == "" && imp.Name() == name {
+			return imp
+		}
+	}
+	return nil
 }
 
 // reflectName is the type's name as reflect.Type.Name reports it — which is what

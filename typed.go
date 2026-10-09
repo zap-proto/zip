@@ -1,7 +1,6 @@
 package zip
 
 import (
-	"cmp"
 	"context"
 	"encoding"
 	"fmt"
@@ -56,6 +55,15 @@ type registeredOp struct {
 	Tags     []string
 	InType   reflect.Type
 	OutType  reflect.Type
+	// Consumes and Produces are the media the op's request body and answer are
+	// declared in when they are not application/json. See [Consumes] and
+	// [Produces].
+	Consumes []string
+	Produces []string
+	// req is how the input arrives and ans what the answer may be, each read
+	// once from In and Out at registration.
+	req intake
+	ans answer
 	// Pkg is the import path of the package that REGISTERED this op. It
 	// namespaces the op's entry in the process-wide documentation map, where an
 	// address alone is not unique: two chains in one node both answer
@@ -78,7 +86,7 @@ type registeredOp struct {
 	// and for the same reason as rule: composition settles it at build, and the
 	// op was registered before that.
 	result func() func(context.Context, Op, error)
-	invoke func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error)
+	invoke func(ctx context.Context, in input) (any, error)
 	// direct is invoke with the decoding removed: the In arrives as the *In the
 	// caller already holds. It exists for the one transport that is not a
 	// transport — a call whose two ends are the same process (see [Here]) —
@@ -180,14 +188,19 @@ func WithStatus(codes ...int) OpOption {
 type StatusCoder interface{ StatusCode() int }
 
 // statusOf is the code an answer carries: what the value states if it states
-// anything, else the op's first declared status, else the default.
-func statusOf(op *registeredOp, out any) (int, error) {
-	if sc, ok := out.(StatusCoder); ok {
+// anything, else the op's first declared status, else the default. A value that
+// states zero states nothing. relayed says the answer is an upstream's, whose
+// 4xx and 5xx pass through as the upstream's refusal ([Verbatim]).
+func statusOf(op *registeredOp, out any, relayed bool) (int, error) {
+	if sc, ok := out.(StatusCoder); ok && sc.StatusCode() != 0 {
 		got := sc.StatusCode()
 		for _, declared := range op.Statuses {
 			if declared == got {
 				return got, nil
 			}
+		}
+		if relayed && got >= 400 && got <= 599 {
+			return got, nil
 		}
 		// An ERROR, not a panic: this is a runtime value, so it cannot be caught
 		// at boot, and a panic on a serving goroutine is a worse answer than a
@@ -197,6 +210,13 @@ func statusOf(op *registeredOp, out any) (int, error) {
 		return 0, ErrInternal(fmt.Sprintf("%s %s answered %d, which it does not declare — "+
 			"declare it with zip.WithStatus(%d) so the document, the SDKs and the CLI publish it",
 			op.Method, op.Path, got, got))
+	}
+	if _, redirect := out.(*Redirect); redirect {
+		for _, code := range op.Statuses {
+			if code >= 300 && code < 400 {
+				return code, nil
+			}
+		}
 	}
 	if len(op.Statuses) > 0 {
 		return op.Statuses[0], nil
@@ -607,6 +627,19 @@ var mainPath = sync.OnceValue(func() string {
 	return "main"
 })
 
+// settle completes the op's declaration from what its In and Out say — the
+// media it consumes, the statuses and headers its answer states — and refuses
+// one the wire cannot carry. It runs after every set of options, at
+// registration and again after [Operation.With], so a declaration made either
+// way is checked the same.
+func (op *registeredOp) settle() {
+	if len(op.Consumes) > 0 && !hasBody(op.Method) {
+		panic(fmt.Sprintf("zip: %s %s carries no request body, so it consumes nothing", op.Method, op.Path))
+	}
+	op.Consumes = consumes(op)
+	op.ans.settle(op)
+}
+
 // registerTyped declares one typed op. depth is how many frames sit between it
 // and the line the programmer wrote, NOT counting the public door itself: zero
 // for [Get] and its four siblings, one for a scope's verb method, which reaches
@@ -633,6 +666,9 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 	for _, o := range opts {
 		o(op)
 	}
+	op.req = intakeOf(method, op.InType)
+	op.ans = answerOf(op.OutType)
+	op.settle()
 	op.readsHeaders = len(headerFields(op.InType)) > 0
 	op.rule = app.rule
 	op.result = app.result
@@ -736,33 +772,38 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		return run(ctx, v)
 	}
 
-	// The transport-agnostic core: decode raw JSON args → In, bind the URL, then
-	// the contract above. REST and MCP both call THIS — one handler, many
+	// The transport-agnostic core: decode the input the way the op takes it,
+	// bind the request's declared facts and the URL, then the contract above.
+	// REST, MCP, the CLI and the call plane all call THIS — one handler, many
 	// projections.
-	op.invoke = func(ctx context.Context, dec decoder, rawIn []byte, query, path map[string]string, header func(string) string) (any, error) {
+	op.invoke = func(ctx context.Context, wire input) (any, error) {
 		var in In
-		if len(rawIn) > 0 {
-			if err := dec(rawIn, &in); err != nil {
-				return nil, ErrBadRequest("invalid body: " + err.Error())
-			}
+		if err := op.req.decode(&in, wire, op.Consumes); err != nil {
+			return nil, err
 		}
-		// The three sources bind in increasing authority: body, then query, then
-		// path. Query beats the body because it is part of the URL; path beats
-		// query because it is the part the router MATCHED on.
+		if !wire.sent {
+			op.req.defaultBodyType(&in, op.Consumes)
+		}
+		// The sources bind in increasing authority: body, then headers and
+		// cookies, then query, then path. Query beats the body because it is
+		// part of the URL; path beats query because it is the part the router
+		// MATCHED on.
 		//
 		// The URL is the addressing authority: PATCH /users/acme/bob updates
-		// acme/bob whatever the body claims. This is also what keeps the authorizer
-		// honest — it runs below on this same decoded value, so the target
-		// authorized is the target the URL named, and a body cannot smuggle a
-		// different one past it.
-		// Headers first, then the URL: the URL is the addressing authority and
-		// must win, exactly as it does over the body. Skipped entirely unless
-		// the input declares one, so an op that reads no header pays nothing.
+		// acme/bob whatever the body claims. This is also what keeps the
+		// authorizer honest — it runs below on this same decoded value, so the
+		// target authorized is the target the URL named, and a body cannot
+		// smuggle a different one past it. Header and cookie binding is skipped
+		// entirely unless the input declares one, so an op that reads none
+		// pays nothing.
 		if op.readsHeaders {
-			bindHeaders(&in, header)
+			bindHeaders(&in, wire.header)
 		}
-		bindURL(&in, query)
-		bindURL(&in, path)
+		if op.req.cookies {
+			bindCookies(&in, wire.cookie)
+		}
+		bindURL(&in, wire.query)
+		bindURL(&in, wire.path)
 		return run(ctx, &in)
 	}
 	handler := func(c fiber.Ctx) error {
@@ -770,15 +811,18 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// by the document and the CLI's remote invoker. Reading the body for a
 		// method the document says has none is how a DELETE came to accept an
 		// input no generated client would ever send.
-		var body []byte
+		wire := input{dec: jsonenc.Unmarshal, sent: true}
 		if hasBody(method) {
-			body = c.Body()
+			wire.body = c.Body()
+			wire.media = c.Get(fiber.HeaderContentType)
+			if op.req.form {
+				wire.form = func() (formData, error) { return readForm(c, wire.media) }
+			}
 		}
-		var path map[string]string
 		if names := c.Route().Params; len(names) > 0 {
-			path = make(map[string]string, len(names))
+			wire.path = make(map[string]string, len(names))
 			for _, n := range names {
-				path[n] = segment(c.Params(n))
+				wire.path[n] = segment(c.Params(n))
 			}
 		}
 		// The query string is the OTHER half of the URL. Without it a typed GET
@@ -786,12 +830,15 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// API — so every route that carries `?q=` had to stay an untyped handler,
 		// invisible to OpenAPI and MCP. Reading it here is what makes those routes
 		// expressible as ops.
-		// The header reader is built only for an op that declares one: the
-		// closure captures c, so it is per-request, and almost every op reads no
-		// header at all.
-		var header func(string) string
+		wire.query = c.Queries()
+		// The header and cookie readers are built only for an op that declares
+		// one: each closure captures c, so it is per-request, and almost every op
+		// reads neither.
 		if op.readsHeaders {
-			header = func(k string) string { return c.Get(k) }
+			wire.header = func(k string) string { return c.Get(k) }
+		}
+		if op.req.cookies {
+			wire.cookie = func(k string) string { return c.Cookies(k) }
 		}
 		// THE MATCHED ROUTE IS THE ADDRESS. materialise mounts each occurrence at
 		// its absolute path, so the pattern fiber matched is where this op is
@@ -805,7 +852,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		if served.OperationID == "" {
 			served.OperationID = ID(meta.Method, served.Path)
 		}
-		out, err := op.invoke(withOp(callerContext(c), served), jsonenc.Unmarshal, body, c.Queries(), path, header)
+		out, err := op.invoke(withOp(callerContext(c), served), wire)
 		if err != nil {
 			return err
 		}
@@ -817,31 +864,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		if a, ok := out.(*Approval); ok {
 			return c.Status(202).JSON(a)
 		}
-		if out == nil {
-			// A void op answers with the status it DECLARED, else the 204 a nil
-			// Out has always meant.
-			code, serr := statusOf(op, nil)
-			if serr != nil {
-				return serr
-			}
-			c.Status(cmp.Or(code, 204))
-			return nil
-		}
-		hdrs, herr := responseHeadersOf(op, out)
-		if herr != nil {
-			return herr
-		}
-		for name, v := range hdrs {
-			c.Set(name, v)
-		}
-		code, serr := statusOf(op, out)
-		if serr != nil {
-			return serr
-		}
-		if code != 0 {
-			c.Status(code)
-		}
-		return c.JSON(out)
+		return writeAnswer(c, op, out)
 	}
 	// With() middleware composes around the op only when there IS any: wrapping
 	// unconditionally would materialise a *Ctx on every typed request to hand to
