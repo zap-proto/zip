@@ -854,7 +854,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 				wire.body = c.Body()
 			}
 			if op.req.form {
-				wire.form = func() (formData, error) { return readForm(c, wire.media, wire.body) }
+				wire.form = func() (formData, error) { return readForm(c, wire.media, wire.body, op.req.names) }
 			}
 		}
 		if names := c.Route().Params; len(names) > 0 {

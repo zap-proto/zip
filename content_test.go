@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -289,4 +291,114 @@ type sessionIn struct {
 type sessionOut struct {
 	// Session is the session the op read.
 	Session string `json:"session"`
+}
+
+// A url-encoded form binds the fields the op declares and no others, and one
+// of more fields than Go's own query parser takes is refused before any is
+// decoded or the handler runs. The refusal is cheap: a few kilobytes that
+// decode to millions of fields cost the decode and nothing per field.
+func TestContent_AFormKeepsItsFieldsAndIsBounded(t *testing.T) {
+	var ran atomic.Int32
+	app := contentApp(&ran)
+	const form = "application/x-www-form-urlencoded"
+
+	code, body := send(t, app, "/v1/form", form, "", []byte("other=x&note=kept&another=y"))
+	if code != 200 || !strings.Contains(body, `"got":"kept"`) {
+		t.Errorf("a form beside fields the op does not declare: %d %s", code, body)
+	}
+	at := strings.Repeat("a=1&", 9999) + "note=at the bound"
+	if code, body = send(t, app, "/v1/form", form, "", []byte(at)); code != 200 || !strings.Contains(body, `"got":"at the bound"`) {
+		t.Errorf("a form of exactly 10000 fields: %d %s, want it read", code, body)
+	}
+	ran.Store(0)
+	past := strings.Repeat("a=1&", 10000) + "note=past"
+	if code, body = send(t, app, "/v1/form", form, "", []byte(past)); code != 400 || ran.Load() != 0 {
+		t.Errorf("a form of 10001 fields: %d %s, ran %d times; want 400 and no run", code, body, ran.Load())
+	}
+
+	big := zip.New(zip.Config{AppName: "flood", DisableStartupMessage: true})
+	big.Post("/v1/form", func(_ context.Context, in *contentForm) (*contentOut, error) {
+		ran.Add(1)
+		return &contentOut{Got: in.Note}, nil
+	}, zip.Consumes(form))
+	flood := gzipped(t, bytes.Repeat([]byte("a&"), 2<<20-16))
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	code, body = send(t, big, "/v1/form", form, "gzip", flood)
+	runtime.ReadMemStats(&after)
+	if code != 400 || ran.Load() != 0 {
+		t.Errorf("a %d-byte flood of empty fields: %d %s, want 400 and no run", len(flood), code, body)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
+		t.Errorf("refusing a %d-byte flood allocated %d MiB; it should cost the decode, not a value per field", len(flood), alloc>>20)
+	}
+}
+
+// Every Content-Encoding line is a coding, as one comma-separated line is, and
+// a chain longer than any client sends is refused rather than decoded layer by
+// layer.
+func TestContent_EveryCodingLineIsUndoneAndTheChainIsBounded(t *testing.T) {
+	var ran atomic.Int32
+	app := contentApp(&ran)
+	plain := []byte("coded twice")
+	twice := gzipped(t, gzipped(t, plain))
+	lines := func(body []byte, codings ...string) (int, string) {
+		req := httptest.NewRequest("POST", "/v1/bytes", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "text/plain")
+		for _, c := range codings {
+			req.Header.Add("Content-Encoding", c)
+		}
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, body := lines(twice, "gzip", "gzip"); code != 200 || !strings.Contains(body, `"got":"coded twice"`) {
+		t.Errorf("two gzip lines: %d %s, want both undone", code, body)
+	}
+	ran.Store(0)
+	if code, body := lines(gzipped(t, plain), "gzip", "rot13"); code != 415 || ran.Load() != 0 {
+		t.Errorf("a second line naming a coding nobody undoes: %d %s, ran %d; want 415 and no run", code, body, ran.Load())
+	}
+	thrice := gzipped(t, twice)
+	if code, body := send(t, app, "/v1/bytes", "text/plain", "gzip, gzip, gzip", thrice); code != 200 || !strings.Contains(body, `"got":"coded twice"`) {
+		t.Errorf("three codings: %d %s, want all undone", code, body)
+	}
+	ran.Store(0)
+	if code, body := send(t, app, "/v1/bytes", "text/plain", "gzip, gzip, gzip, gzip", gzipped(t, thrice)); code != 415 || ran.Load() != 0 {
+		t.Errorf("four codings: %d %s, ran %d; want 415 and no run", code, body, ran.Load())
+	}
+}
+
+// Over HTTP the server has read a multipart body as a form before any handler
+// runs, so a Body field holds what a handler reading the request body holds:
+// the same bytes, typed or not.
+func TestContent_AMultipartBodyIsWhatAHandlerReads(t *testing.T) {
+	var raw []byte
+	app := zip.New(zip.Config{AppName: "multipart", DisableStartupMessage: true})
+	app.Raw("POST", "/v1/raw", func(c *zip.Ctx) error {
+		raw = append([]byte(nil), c.Body()...)
+		return c.NoContent(204)
+	})
+	app.Post("/v1/typed", func(_ context.Context, in *contentIn) (*contentOut, error) {
+		return &contentOut{Got: string(in.Body.Bytes)}, nil
+	}, zip.Consumes("multipart/form-data"))
+
+	const boundary = "b0undary"
+	body := "a preamble\r\n--" + boundary + "\r\nContent-Disposition: form-data; name=\"note\"\r\nContent-Type: text/plain\r\nX-Signed: 1\r\n\r\nsigned\r\n--" + boundary + "--\r\nan epilogue"
+	media := "multipart/form-data; boundary=" + boundary
+	if code, _ := send(t, app, "/v1/raw", media, "", []byte(body)); code != 204 {
+		t.Fatalf("raw handler answered %d", code)
+	}
+	code, got := send(t, app, "/v1/typed", media, "", []byte(body))
+	var out contentOut
+	if err := json.Unmarshal([]byte(got), &out); code != 200 || err != nil {
+		t.Fatalf("typed op: %d %s", code, got)
+	}
+	if out.Got != string(raw) {
+		t.Errorf("the typed op holds\n%q\na handler reading the body holds\n%q", out.Got, raw)
+	}
 }

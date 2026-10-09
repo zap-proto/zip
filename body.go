@@ -26,18 +26,24 @@ import (
 
 // Body is bytes and the media type that names them.
 //
-// As a field of an op's In it is the request body exactly as it arrived. The
-// REST door puts the request's bytes and its Content-Type in it and decodes
-// nothing; the input's other fields still bind from the path, the query, the
-// declared headers and the declared cookies. An upload, a pack stream, a
-// statement file and a signed webhook are typed ops this way, and the wire
-// they speak does not move:
+// As a field of an op's In it is the request body as it arrived. The REST door
+// puts the request's content (its Content-Encoding undone) and its
+// Content-Type in it and decodes nothing else; the input's other fields still
+// bind from the path, the query, the declared headers and the declared
+// cookies. An upload, a pack stream, a statement file and a signed webhook are
+// typed ops this way, and the wire they speak does not move:
 //
 //	type ScanIn struct {
 //	    Org  string   `json:"org" url:"org"`
 //	    Body zip.Body `json:"body"` // the receipt, as sent
 //	}
 //	zip.Post(app, "/v1/books/:org/scan", scan, zip.Consumes("application/pdf", "image/png"))
+//
+// One media is the exception over HTTP: the server reads a multipart/form-data
+// body as a form while it reads the request, so the field holds that form
+// written back out — the same bytes a handler reading the request body gets —
+// and not the bytes as sent. ZAP carries those as sent. A signature over a
+// multipart body's bytes cannot be checked over HTTP; check it over the parts.
 //
 // Over MCP, the CLI and the call plane the input arrives as one value, and the
 // field is its bytes as a base64 string; its Type is then the first media type
@@ -58,7 +64,8 @@ type Body struct {
 	// Type is the media type: the request's Content-Type as sent, or the
 	// answer's.
 	Type string
-	// Bytes are the bytes, exactly as received or as written.
+	// Bytes are the bytes as received (a multipart form over HTTP excepted;
+	// see Body) or as written.
 	Bytes []byte
 	// Name is the filename an answer is saved under. Empty sends no
 	// Content-Disposition.
@@ -198,6 +205,9 @@ type intake struct {
 	// form says the op reads its body as a form: it takes a part, or it has
 	// form: fields and consumes a form media type.
 	form bool
+	// names are the form keys In binds, fields and parts alike. A form is
+	// read for these and no others.
+	names map[string]bool
 	// parse says *In decodes its own body ([Parser]).
 	parse bool
 	// cookies says In declares a cookie: field.
@@ -225,8 +235,10 @@ func intakeOf(in reflect.Type) intake {
 			r.raw = f.Index
 		case isFile(f.Type):
 			r.files = true
+			r.name(formFieldName(f))
 		case formFieldName(f) != "":
 			r.fields = true
+			r.name(formFieldName(f))
 		case f.Type.Kind() == reflect.Pointer && f.Type.Elem() == bodyType:
 			panic(fmt.Sprintf("zip: %s.%s is a *zip.Body; a request body is always there, so declare zip.Body", t, f.Name))
 		}
@@ -235,6 +247,14 @@ func intakeOf(in reflect.Type) intake {
 		}
 	}
 	return r
+}
+
+// name records a form key In binds.
+func (r *intake) name(key string) {
+	if r.names == nil {
+		r.names = map[string]bool{}
+	}
+	r.names[key] = true
 }
 
 // settle decides whether the body is a form, from the media the op consumes,
@@ -600,6 +620,11 @@ func (r intake) defaultBodyType(v any, media []string) {
 // base64Text is how bytes travel inside JSON.
 func base64Text(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
+// maxCodings is how many content codings content undoes in one request. A
+// body is coded once, twice at most when a proxy codes it again; each further
+// layer would be decoded up to the body limit for nothing.
+const maxCodings = 3
+
 // content is a REST request's body with its Content-Encoding undone, each
 // coding in turn and the result held to the app's BodyLimit, for an op that
 // takes the body itself.
@@ -607,12 +632,18 @@ func base64Text(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 // It does not read through fiber's Body, which answers a coding it cannot undo
 // with the error's text in place of the bytes (and sometimes a status on the
 // response): a handler that takes the bytes as they are would run on that
-// text. Here a coding this server does not undo is 415, a body that decodes
-// past the limit is 413, and one that does not decode is 400, each before the
-// handler runs. The bytes are the op's own: the decoders allocate, and an
+// text. Here a coding this server does not undo is 415, as is a chain of more
+// than [maxCodings]; a body that decodes past the limit is 413, and one that
+// does not decode is 400, each before the handler runs. Every Content-Encoding
+// line counts, since two lines say what one comma-separated line says (RFC
+// 9110 §5.3). The bytes are the op's own: the decoders allocate, and an
 // unencoded body is fiber's copy.
 func content(c fiber.Ctx) ([]byte, error) {
-	coding := strings.TrimSpace(string(c.Request().Header.ContentEncoding()))
+	var lines []string
+	for _, v := range c.Request().Header.PeekAll(fasthttp.HeaderContentEncoding) {
+		lines = append(lines, string(v))
+	}
+	coding := strings.TrimSpace(strings.Join(lines, ","))
 	if coding == "" {
 		return c.Body(), nil
 	}
@@ -621,6 +652,9 @@ func content(c fiber.Ctx) ([]byte, error) {
 	// The last coding listed was applied last (RFC 9110 §8.4), so it is undone
 	// first.
 	codings := strings.Split(strings.ToLower(coding), ",")
+	if len(codings) > maxCodings {
+		return nil, Errorf(http.StatusUnsupportedMediaType, "the request names %d content codings; this server undoes at most %d", len(codings), maxCodings)
+	}
 	for i := len(codings) - 1; i >= 0; i-- {
 		var err error
 		if body, err = undo(strings.TrimSpace(codings[i]), body, limit); err != nil {
@@ -661,17 +695,46 @@ func undo(coding string, b []byte, limit int) ([]byte, error) {
 	return out, nil
 }
 
+// maxFormFields is the most fields a url-encoded form may carry: the bound Go's
+// own query parser holds (net/url, urlmaxqueryparams). A multipart form is held
+// to mime/multipart's own bounds on parts and part headers.
+const maxFormFields = 10000
+
+// fewFields reports whether a url-encoded form holds at most maxFormFields
+// fields, counting the non-empty pieces between its '&'s without decoding any.
+func fewFields(form []byte) bool {
+	n := 0
+	for len(form) > 0 {
+		var field []byte
+		field, form, _ = bytes.Cut(form, []byte("&"))
+		if len(field) > 0 {
+			if n++; n > maxFormFields {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // readForm reads a REST request's form from its content: url-encoded fields,
-// or a multipart form's fields and parts, each part read whole. The content is
-// already decoded and held to the body limit, and a multipart form is parsed
-// from it in memory, so no part is larger than the body that carried it.
-func readForm(c fiber.Ctx, media string, body []byte) (formData, error) {
+// or a multipart form's fields and parts, each part read whole, keeping only
+// the keys the op binds (names). The content is already decoded and held to the
+// body limit, and a multipart form is parsed from it in memory, so no part is
+// larger than the body that carried it. A url-encoded form is decoded as fiber
+// decodes one, and one of more than [maxFormFields] fields is refused before
+// any is decoded.
+func readForm(c fiber.Ctx, media string, body []byte, names map[string]bool) (formData, error) {
 	fd := formData{values: map[string][]string{}, files: map[string][]File{}}
 	if m, _, _ := mime.ParseMediaType(media); m != mimeMultipart {
+		if !fewFields(body) {
+			return fd, fmt.Errorf("a form carries more than %d fields", maxFormFields)
+		}
 		var args fasthttp.Args
 		args.ParseBytes(body)
 		for k, v := range args.All() {
-			fd.values[string(k)] = append(fd.values[string(k)], string(v))
+			if names[string(k)] {
+				fd.values[string(k)] = append(fd.values[string(k)], string(v))
+			}
 		}
 		return fd, nil
 	}
@@ -685,9 +748,14 @@ func readForm(c fiber.Ctx, media string, body []byte) (formData, error) {
 	}
 	defer func() { _ = form.RemoveAll() }()
 	for k, v := range form.Value {
-		fd.values[k] = v
+		if names[k] {
+			fd.values[k] = v
+		}
 	}
 	for k, parts := range form.File {
+		if !names[k] {
+			continue
+		}
 		for _, h := range parts {
 			f, err := h.Open()
 			if err != nil {
