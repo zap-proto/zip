@@ -395,6 +395,9 @@ func LocalInvoke(ctx context.Context, c Command, path map[string]string, body []
 	if c.op == nil || c.op.invoke == nil {
 		return nil, fmt.Errorf("%s %s is not registered in this process — give the CLI a Remote invoker", c.Service, c.Name)
 	}
+	if c.op.ans.stream == streamSocket {
+		return nil, fmt.Errorf("%s %s: %s; reach it over HTTP", c.Service, c.Name, NotACall)
+	}
 	rest, cookie, err := c.split(body)
 	if err != nil {
 		return nil, err

@@ -10,8 +10,7 @@
 //	}))
 //
 // A typed op that answers a WebSocket returns a [zip.Socket] instead; both run
-// the same upgrade (internal/ws), so a connection is accepted and refused the
-// same way at either kind of route.
+// the same upgrade (internal/ws).
 package wsx
 
 import (

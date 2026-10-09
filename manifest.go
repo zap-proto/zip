@@ -134,6 +134,10 @@ type ManifestOp struct {
 	// Verbatim says the answer is an upstream's, relayed as it was sent, so a
 	// refusal may be the upstream's own rather than this service's.
 	Verbatim bool `json:"verbatim,omitempty"`
+
+	// Redirect says the op may answer a redirect, so its 3xx statuses carry a
+	// Location and no body.
+	Redirect bool `json:"redirect,omitempty"`
 }
 
 // streams are the answers a manifest may say an op streams, by media type.
@@ -386,6 +390,7 @@ func (a *App) Manifest() Manifest {
 			Consumes:        op.Consumes,
 			Produces:        op.Produces,
 			Verbatim:        op.ans.verbatim,
+			Redirect:        op.ans.redirect,
 		}
 		if hasDoc {
 			mo.Description = doc.Description

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
@@ -63,10 +64,9 @@ func (Verbatim[T]) documents() reflect.Type { return reflect.TypeOf((*T)(nil)).E
 //	}}, nil
 //
 // Send runs after the handler returns, once the status and headers are out, on
-// a goroutine of its own. Its ctx ends when the stream does — the client has
-// gone or the server closed the connection (found by a write, so Keep finds it
-// in a quiet stream), or a tool call has collected all it will — and a producer
-// that waits on anything selects on it. An error from emit means the stream
+// a goroutine of its own. Its ctx ends when the stream does — a write found the
+// client gone (so in a quiet stream only Keep finds it), or a tool call has
+// collected all it will — and a producer that waits on anything selects on it. An error from emit means the stream
 // has ended, and Send should return it. An error Send returns ends the stream
 // where it stands: the status already went out, so it cannot be a refusal.
 //
@@ -264,49 +264,76 @@ func writeEvents(ctx context.Context, s stream, w *bufio.Writer) error {
 //
 //	return &zip.Socket[Frame]{Serve: func(conn *wsx.Conn) error { … }}, nil
 //
-// A request that does not ask to upgrade is answered 426 with Upgrade:
-// websocket; over ZAP, which carries no upgrade, 501. The document publishes
-// 101 with M as x-events and marks the op x-socket: websocket. A connection is
-// not a call, so the op is no MCP tool and has no call-plane method; the CLI
-// bridges it to stdin and stdout.
+// A request that cannot become a connection is refused before the handler
+// runs, so a handler with effects runs only for a connection it will get: over
+// ZAP, which carries no upgrade, 501; one that does not ask to upgrade, 426 with
+// Upgrade: websocket; one asking for another protocol version, 426 with
+// Sec-WebSocket-Version: 13; one with no Sec-WebSocket-Key, 400; and a browser
+// on an origin the op does not admit ([Origins]), 403 — a socket op may read a
+// cookie, which a browser sends cross-site too. The document publishes 101 with
+// M as x-events and marks the op x-socket: websocket. A connection is not a
+// call, so the op is no MCP tool and has no call-plane method; the CLI bridges
+// it to stdin and stdout.
 type Socket[M any] struct {
 	// Serve runs on the upgraded connection.
 	Serve func(conn *ws.Conn) error `zap:"-"`
-	// Config configures the upgrade (wsx.Config). A nil CheckOrigin admits a
-	// browser only from the address's own origin, since a socket op may read
-	// a cookie, which a browser sends cross-site too.
-	Config ws.Config `zap:"-"`
+	// Subprotocols are the protocols the op speaks, in its order of
+	// preference; the first the client also offers is selected.
+	Subprotocols []string `zap:"-"`
+	// Compression negotiates per-message deflate when the client offers it.
+	Compression bool `zap:"-"`
+}
+
+// Origins names the browser origins, besides the address's own, that may open
+// an op's WebSocket: "https://app.example", or "*" for any. Without it only the
+// address's own origin may; a request carrying no Origin is not a browser's
+// and is always admitted. The handler runs only for an origin admitted.
+func Origins(origins ...string) OpOption {
+	return func(op *registeredOp) { op.Origins = append([]string(nil), origins...) }
 }
 
 // frame is the type one message carries.
 func (Socket[M]) frame() reflect.Type { return reflect.TypeOf((*M)(nil)).Elem() }
 
+// serve upgrades a connection the REST door already found upgradable.
 func (s *Socket[M]) serve(c fiber.Ctx) error {
-	if err := upgradable(c); err != nil {
-		return err
-	}
 	serve := s.Serve
-	err := ws.Upgrade(c.RequestCtx(), s.Config, func(conn *ws.Conn) {
+	cfg := ws.Config{
+		Subprotocols:      s.Subprotocols,
+		EnableCompression: s.Compression,
+		// The origin was admitted before the handler ran ([upgradable]).
+		CheckOrigin: func(*fasthttp.RequestCtx) bool { return true },
+	}
+	return ws.Upgrade(c.RequestCtx(), cfg, func(conn *ws.Conn) {
 		if serve != nil {
 			_ = serve(conn)
 		}
 	})
-	if errors.Is(err, ws.ErrOrigin) {
-		return Errorf(http.StatusForbidden, "%s", ws.ErrOrigin.Error())
-	}
-	return err
 }
 
-// upgradable refuses a request that cannot become a WebSocket: one carried
-// over ZAP, which runs no upgrade (501), and one that does not ask (426, with
-// Upgrade: websocket).
-func upgradable(c fiber.Ctx) error {
-	if carriedByZAP(c.RequestCtx()) {
+// upgradable refuses a request that cannot become a WebSocket the op will
+// serve, before its handler runs: one carried over ZAP, which runs no upgrade
+// (501); one that does not ask (426, with Upgrade: websocket); one asking for
+// another protocol version (426, with the one spoken); one with no key (400);
+// and a browser on an origin the op does not admit (403).
+func upgradable(c fiber.Ctx, origins []string) error {
+	rc := c.RequestCtx()
+	if carriedByZAP(rc) {
 		return Errorf(http.StatusNotImplemented, "%s %s upgrades to a WebSocket, which does not cross ZAP; connect over HTTP", c.Method(), c.Path())
 	}
-	if !ws.Is(c.RequestCtx()) {
+	if !ws.Is(rc) {
 		c.Set("Upgrade", "websocket")
 		return Errorf(http.StatusUpgradeRequired, ws.Refusal)
+	}
+	if !ws.Speaks(rc) {
+		c.Set("Sec-WebSocket-Version", ws.Version)
+		return Errorf(http.StatusUpgradeRequired, "this address speaks WebSocket version %s", ws.Version)
+	}
+	if len(rc.Request.Header.Peek("Sec-WebSocket-Key")) == 0 {
+		return ErrBadRequest("a WebSocket handshake carries a Sec-WebSocket-Key")
+	}
+	if !ws.Admits(rc, origins) {
+		return Errorf(http.StatusForbidden, "%s may not open a connection here", rc.Request.Header.Peek("Origin"))
 	}
 	return nil
 }
@@ -614,8 +641,8 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 		}
 		c.Set(fiber.HeaderContentType, "text/event-stream")
 		// The stream outlives the handler, so its ctx is its own: it ends when a
-		// write finds the client gone — a shutdown closes the connection too —
-		// or when the producer is done.
+		// write finds the client gone, or when the producer is done. A quiet
+		// stream finds a client that left only through Keep.
 		return c.SendStreamWriter(func(w *bufio.Writer) {
 			defer func() { _ = recover() }()
 			_ = writeEvents(context.Background(), x, w)
@@ -644,9 +671,11 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 		return c.Send(b.Bytes)
 	}
 	// The framework's own JSON media (with its charset) unless the op names
-	// another: an op that declares nothing answers as it always has.
-	if len(op.Produces) > 0 {
-		return c.JSON(out, op.Produces[0])
+	// another for its JSON: an op that declares nothing answers as it always
+	// has, and one whose Produces names the media of its bytes keeps JSON for
+	// its JSON.
+	if media := produces(op, mimeJSON); media != mimeJSON {
+		return c.JSON(out, media)
 	}
 	return c.JSON(out)
 }
@@ -753,14 +782,59 @@ func collect(ctx context.Context, out any) (data []byte, media string, truncated
 		}
 		return b.Bytes, b.Type, false, nil
 	}
-	if c, ok := b.Reader.(io.Closer); ok {
+	ctx, cancel := context.WithTimeout(ctx, toolWait)
+	defer cancel()
+	data, truncated, err = readBounded(ctx, b.Reader)
+	return data, b.Type, truncated, err
+}
+
+// readBounded reads r to its end, toolBound bytes or ctx's end, whichever
+// comes first, and closes it when it can. The read runs beside the wait, so a
+// reader that never yields cannot hold the call; closing it is what ends a read
+// left blocked.
+func readBounded(ctx context.Context, r io.Reader) (data []byte, truncated bool, err error) {
+	c, closes := r.(io.Closer)
+	if closes {
 		defer func() { _ = c.Close() }()
 	}
-	data, err = io.ReadAll(io.LimitReader(b.Reader, toolBound+1))
-	if len(data) > toolBound {
-		return data[:toolBound], b.Type, true, err
+	chunks := make(chan []byte)
+	ended := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32<<10)
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				select {
+				case chunks <- append([]byte(nil), buf[:n]...):
+				case <-ctx.Done():
+					return
+				}
+			}
+			if rerr != nil {
+				if rerr == io.EOF {
+					rerr = nil
+				}
+				ended <- rerr
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case chunk := <-chunks:
+			if len(data)+len(chunk) > toolBound {
+				return append(data, chunk[:toolBound-len(data)]...), true, nil
+			}
+			data = append(data, chunk...)
+		case err := <-ended:
+			return data, false, err
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return data, true, nil
+			}
+			return data, false, ctx.Err()
+		}
 	}
-	return data, b.Type, false, err
 }
 
 // textual reports whether bytes of a media type read as text.

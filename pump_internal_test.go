@@ -6,6 +6,7 @@ package zip
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 )
@@ -63,5 +64,22 @@ func TestCollect_AStuckProducerCannotHoldTheCall(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("collect waited on a producer that never emits")
+	}
+}
+
+// A reader that never yields cannot hold a tool call: the read is bounded in
+// time as a stream is, and the reader is closed.
+func TestReadBounded_AQuietReaderEnds(t *testing.T) {
+	r, w := io.Pipe()
+	defer func() { _ = w.Close() }()
+	go func() { _, _ = w.Write([]byte("first")) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	data, truncated, err := readBounded(ctx, r)
+	if err != nil || !truncated || string(data) != "first" {
+		t.Errorf("readBounded = %q %v %v", data, truncated, err)
+	}
+	if _, err := w.Write([]byte("x")); err == nil {
+		t.Error("the reader was left open")
 	}
 }

@@ -301,20 +301,29 @@ func (p *projector) responses(op ManifestOp, reg *schemaRegistry) map[string]any
 		dflt = 204
 	}
 	codes := statuses(op.Statuses, dflt)
+	// A status that carries no body: 204 and 304 by definition, and a 3xx of
+	// an op that redirects, which carries a Location instead.
+	bodyless := func(code int) bool {
+		return code == 204 || code == 304 || op.Redirect && code >= 300 && code < 400
+	}
 	primary := codes[0]
+	var bodied []int
 	for _, code := range codes {
-		if code < 300 || code >= 400 {
-			primary = code
-			break
+		if !bodyless(code) {
+			bodied = append(bodied, code)
 		}
 	}
-	byStatus := p.alternatives(op.Out, codes)
+	if len(bodied) > 0 {
+		primary = bodied[0]
+	}
+	byStatus := p.alternatives(op.Out, bodied)
+	union := p.types[op.Out] != nil && p.types[op.Out].Kind == "union"
 	for _, code := range codes {
 		entry := map[string]any{"description": statusText(code)}
 		if h := headerDecls(op); h != nil {
 			entry["headers"] = h
 		}
-		if code >= 300 && code < 400 {
+		if bodyless(code) {
 			resp[strconv.Itoa(code)] = entry
 			continue
 		}
@@ -331,7 +340,9 @@ func (p *projector) responses(op ManifestOp, reg *schemaRegistry) map[string]any
 				schema = map[string]any{"oneOf": one}
 			}
 			media := map[string]any{"schema": schema}
-			if len(op.Response) > 0 && code == primary {
+			// The doc comment's Response example is the Out's, at every status
+			// that answers it; a union's is the primary answer's.
+			if len(op.Response) > 0 && (code == primary || !union) {
 				media["example"] = json.RawMessage(op.Response)
 			}
 			jsonMedia := []string{mimeJSON}
@@ -376,9 +387,9 @@ func (p *projector) answers(out string) bool {
 
 // alternatives files an op's JSON answer by status. An alternative of a
 // union that states its own status is filed under it; the answer, or each
-// alternative that states none, is filed under every declared status that is
-// not a redirect and that no alternative claimed — an op that declares 200 and
-// 201 answers the same value under either. A named union none of whose
+// alternative that states none, is filed under every status in codes (the
+// ones that carry a body) that no alternative claimed — an op that declares 200
+// and 201 answers the same value under either. A named union none of whose
 // alternatives states a status is its own schema at each, one component every
 // op that answers it shares.
 func (p *projector) alternatives(out string, codes []int) map[int][]TypeRef {
@@ -405,10 +416,7 @@ func (p *projector) alternatives(out string, codes []int) map[int][]TypeRef {
 		by[code] = alts
 	}
 	for _, code := range codes {
-		if code >= 300 && code < 400 || len(unstated) == 0 {
-			continue
-		}
-		if _, taken := stated[code]; taken {
+		if _, taken := stated[code]; taken || len(unstated) == 0 {
 			continue
 		}
 		by[code] = append(by[code], unstated...)

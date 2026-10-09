@@ -75,6 +75,10 @@ func TestConnMemory(t *testing.T) {
 	var baseline, peak runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&baseline)
+	// The goroutines a connection costs are the ones holding them added, as the
+	// heap a connection costs is the heap they added: what earlier tests in the
+	// process left winding down is not this server's.
+	before := runtime.NumGoroutine()
 
 	req := []byte("GET /hold HTTP/1.1\r\nHost: x\r\n\r\n")
 	conns := make([]net.Conn, 0, n)
@@ -124,7 +128,7 @@ func TestConnMemory(t *testing.T) {
 	delta := int64(peak.HeapAlloc) - int64(baseline.HeapAlloc)
 	perConn := float64(delta) / float64(n)
 	totalGoroutines := runtime.NumGoroutine()
-	goroutinesPerConn := float64(totalGoroutines) / float64(n)
+	goroutinesPerConn := float64(totalGoroutines-before) / float64(n)
 
 	fmt.Printf("\n=== Per-connection memory profile (zip) ===\n")
 	fmt.Printf("conns held       : %d\n", n)

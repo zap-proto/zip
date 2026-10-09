@@ -108,11 +108,13 @@ func TestKinds_APanickingReaderEndsOnlyItsAnswer(t *testing.T) {
 	})
 	app.Get("/v1/good", func(context.Context, *struct{}) (*mkOut, error) { return &mkOut{ID: "ok"}, nil })
 	addr := serveHTTP(t, app)
-	if resp, err := http.Get("http://" + addr + "/v1/bad"); err == nil {
+	// No keep-alive: a connection left idle would outlive the test.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	if resp, err := client.Get("http://" + addr + "/v1/bad"); err == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
-	resp, err := http.Get("http://" + addr + "/v1/good")
+	resp, err := client.Get("http://" + addr + "/v1/good")
 	if err != nil {
 		t.Fatalf("the process did not survive: %v", err)
 	}
@@ -151,15 +153,19 @@ func TestKinds_ToolBytesAreBoundedAndTyped(t *testing.T) {
 	}
 }
 
-// A WebSocket op refuses a request that cannot upgrade before its handler
-// runs, and a browser on another site cannot open it.
+// A WebSocket op refuses a request that cannot become its connection before
+// its handler runs — no upgrade, another version, no key, a browser on an
+// origin it does not admit, the in-process CLI — and admits the origins it
+// names.
 func TestKinds_ASocketRefusesBeforeItsHandler(t *testing.T) {
 	var ran atomic.Int32
-	app := zip.New(zip.Config{AppName: "ws", DisableStartupMessage: true})
-	app.Get("/v1/live", func(context.Context, *struct{}) (*zip.Socket[line], error) {
+	live := func(context.Context, *struct{}) (*zip.Socket[line], error) {
 		ran.Add(1)
 		return &zip.Socket[line]{Serve: func(*websocket.Conn) error { return nil }}, nil
-	})
+	}
+	app := zip.New(zip.Config{AppName: "ws", DisableStartupMessage: true})
+	app.Get("/v1/live", live)
+	app.Get("/v1/open", live, zip.Origins("https://app.example"))
 	resp, err := app.Test(httptest.NewRequest("GET", "/v1/live", nil))
 	if err != nil {
 		t.Fatal(err)
@@ -167,20 +173,56 @@ func TestKinds_ASocketRefusesBeforeItsHandler(t *testing.T) {
 	if resp.StatusCode != 426 || ran.Load() != 0 {
 		t.Errorf("a plain GET answered %d and ran the handler %d times", resp.StatusCode, ran.Load())
 	}
+	for _, c := range []struct {
+		name   string
+		header map[string]string
+		code   int
+	}{
+		{"version 8", map[string]string{"Sec-WebSocket-Version": "8"}, 426},
+		{"versions 8 and 7", map[string]string{"Sec-WebSocket-Version": "8, 7"}, 426},
+		{"no key", map[string]string{"Sec-WebSocket-Key": ""}, 400},
+		{"another site", map[string]string{"Origin": "https://elsewhere.example"}, 403},
+		{"opaque origin", map[string]string{"Origin": "null"}, 403},
+	} {
+		req := httptest.NewRequest("GET", "/v1/live", nil)
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		for k, v := range c.header {
+			req.Header.Set(k, v)
+		}
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != c.code || ran.Load() != 0 {
+			t.Errorf("%s answered %d, want %d; the handler ran %d times", c.name, resp.StatusCode, c.code, ran.Load())
+		}
+	}
+	if err := app.CLI().Run(context.Background(), argv(t, app.Commands(), "GET", "/v1/live")); err == nil || ran.Load() != 0 {
+		t.Errorf("the in-process CLI answered %v and ran the handler %d times", err, ran.Load())
+	}
+
 	addr := serveHTTP(t, app)
 	d := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-	h := http.Header{"Origin": {"https://elsewhere.example"}}
-	if conn, resp, err := d.Dial("ws://"+addr+"/v1/live", h); err == nil {
-		_ = conn.Close()
-		t.Error("a cross-site origin opened the socket")
-	} else if resp == nil || resp.StatusCode != 403 {
-		t.Errorf("a cross-site origin got %v, %v", resp, err)
+	for _, c := range []struct {
+		path, origin string
+		ok           bool
+	}{
+		{"/v1/live", "http://" + addr, true},
+		{"/v1/live", "https://app.example", false},
+		{"/v1/open", "https://app.example", true},
+		{"/v1/open", "https://elsewhere.example", false},
+	} {
+		conn, resp, err := d.Dial("ws://"+addr+c.path, http.Header{"Origin": {c.origin}})
+		if err == nil {
+			_ = conn.Close()
+		}
+		if c.ok != (err == nil) || !c.ok && (resp == nil || resp.StatusCode != 403) {
+			t.Errorf("%s from %s: %v, %v", c.path, c.origin, resp, err)
+		}
 	}
-	conn, _, err := d.Dial("ws://"+addr+"/v1/live", http.Header{"Origin": {"http://" + addr}})
-	if err != nil {
-		t.Fatalf("the socket's own origin was refused: %v", err)
-	}
-	_ = conn.Close()
 }
 
 // A 3xx that carries a body is read as an answer by the remote CLI; one that
@@ -228,5 +270,56 @@ func TestKinds_AValueOrStreamCrossesTheCallPlane(t *testing.T) {
 	}
 	if got.A == nil || got.A.ID != "whole" || got.B != nil {
 		t.Errorf("got %+v", got)
+	}
+}
+
+type metaOut struct {
+	// W is the width.
+	W int `json:"w"`
+}
+
+// An op that answers JSON or image bytes names the bytes' media with Produces,
+// and its JSON still goes out as JSON.
+func TestKinds_JSONBesideBytesStaysJSON(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "img", DisableStartupMessage: true})
+	app.Get("/v1/thumb", func(context.Context, *struct{}) (*zip.Or[metaOut, zip.Body], error) {
+		return &zip.Or[metaOut, zip.Body]{A: &metaOut{W: 64}}, nil
+	}, zip.Produces("image/png"))
+	resp, err := app.Test(httptest.NewRequest("GET", "/v1/thumb", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json; charset=utf-8" || string(b) != `{"w":64}` {
+		t.Errorf("answered %q %s", ct, b)
+	}
+}
+
+// A 3xx that is not a redirect carries the body it sends, 204 and 304 carry
+// none, and a redirect's 3xx carries a Location and no body. The doc comment's
+// example rides every status that answers the Out.
+func TestKinds_WhichStatusesCarryABody(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "st", DisableStartupMessage: true})
+	zip.Describe("POST /v1/see", zip.Doc{Description: "See answers.", Response: json.RawMessage(`{"id":"x"}`)})
+	app.Post("/v1/see", func(context.Context, *struct{}) (*multiOut, error) {
+		return &multiOut{ID: "x", code: 302}, nil
+	}, zip.WithStatus(200, 201, 302, 304))
+	app.Get("/v1/go", func(context.Context, *struct{}) (*zip.Redirect, error) {
+		return &zip.Redirect{To: "/"}, nil
+	}, zip.WithStatus(307))
+	see := opIn(t, app, "/v1/see", "post")["responses"].(map[string]any)
+	for code, want := range map[string]bool{"200": true, "201": true, "302": true, "304": false} {
+		entry := see[code].(map[string]any)
+		content, has := entry["content"].(map[string]any)
+		if has != want {
+			t.Errorf("%s carries content %v, want %v", code, has, want)
+			continue
+		}
+		if want && content["application/json"].(map[string]any)["example"] == nil {
+			t.Errorf("%s carries no example", code)
+		}
+	}
+	if r := opIn(t, app, "/v1/go", "get")["responses"].(map[string]any)["307"].(map[string]any); r["content"] != nil {
+		t.Errorf("a redirect's 307 carries content: %v", r)
 	}
 }

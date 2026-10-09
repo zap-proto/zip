@@ -60,6 +60,9 @@ type registeredOp struct {
 	// [Produces].
 	Consumes []string
 	Produces []string
+	// Origins are the browser origins besides its own that may open the op's
+	// WebSocket ([Origins]).
+	Origins []string
 	// req is how the input arrives and ans what the answer may be, each read
 	// once from In and Out at registration.
 	req intake
@@ -867,7 +870,7 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// before its handler runs, so a handler with effects (a one-time ticket)
 		// runs only for a connection it will get.
 		if op.ans.stream == streamSocket {
-			if err := upgradable(c); err != nil {
+			if err := upgradable(c, op.Origins); err != nil {
 				return err
 			}
 		}

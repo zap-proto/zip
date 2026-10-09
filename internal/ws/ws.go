@@ -1,10 +1,8 @@
 // Package ws is the one WebSocket upgrade zip performs. wsx.Upgrade (an untyped
-// route) and a typed op answering zip.Socket both reach it, so a connection
-// is accepted, refused and configured the same way whichever door it came in.
+// route) and a typed op answering zip.Socket both reach it.
 package ws
 
 import (
-	"errors"
 	"net/url"
 	"strings"
 
@@ -27,47 +25,55 @@ type Config struct {
 	// EnableCompression negotiates per-message deflate when the client offers it.
 	EnableCompression bool
 	// CheckOrigin decides whether a request's Origin may open a connection.
-	// Nil admits a request with no Origin, or one whose Origin is the
-	// request's own host: a browser on another site is refused.
+	// Nil is the library's: an Origin, when there is one, must name the
+	// request's own host.
 	CheckOrigin func(ctx *fasthttp.RequestCtx) bool
 }
 
 // Is reports whether the request asks to become a WebSocket.
 func Is(rc *fasthttp.RequestCtx) bool { return websocket.FastHTTPIsWebSocketUpgrade(rc) }
 
-// ErrOrigin is what Upgrade answers when the request's Origin may not open a
-// connection, before anything is written, so the caller refuses it with a
-// status of its own.
-var ErrOrigin = errors.New("this origin may not open a connection here")
-
 // Upgrade answers 101 and runs fn on the connection once the handler that
 // called it returns. The caller has already checked [Is].
 func Upgrade(rc *fasthttp.RequestCtx, cfg Config, fn func(*Conn)) error {
-	check := cfg.CheckOrigin
-	if check == nil {
-		check = sameOrigin
-	}
-	if !check(rc) {
-		return ErrOrigin
-	}
 	up := &websocket.FastHTTPUpgrader{
 		ReadBufferSize:    cfg.ReadBufferSize,
 		WriteBufferSize:   cfg.WriteBufferSize,
 		Subprotocols:      cfg.Subprotocols,
 		EnableCompression: cfg.EnableCompression,
-		CheckOrigin:       func(*fasthttp.RequestCtx) bool { return true }, // asked above
+		CheckOrigin:       cfg.CheckOrigin,
 	}
 	return up.Upgrade(rc, fn)
 }
 
-// sameOrigin admits a request with no Origin — not a browser — and one whose
-// Origin names the host the request was sent to.
-func sameOrigin(rc *fasthttp.RequestCtx) bool {
-	origin := rc.Request.Header.Peek("Origin")
-	if len(origin) == 0 {
+// Version is the protocol version a handshake must ask for (RFC 6455).
+const Version = "13"
+
+// Speaks reports whether a handshake's Sec-WebSocket-Version list names
+// [Version], read as the library reads it: comma-separated, case aside.
+func Speaks(rc *fasthttp.RequestCtx) bool {
+	for _, v := range strings.Split(string(rc.Request.Header.Peek("Sec-WebSocket-Version")), ",") {
+		if strings.EqualFold(strings.TrimSpace(v), Version) {
+			return true
+		}
+	}
+	return false
+}
+
+// Admits reports whether a request's Origin may open a connection: a request
+// with no Origin (not a browser), one whose Origin names the request's own host,
+// and one whose Origin is among origins, "*" being any.
+func Admits(rc *fasthttp.RequestCtx, origins []string) bool {
+	origin := string(rc.Request.Header.Peek("Origin"))
+	if origin == "" {
 		return true
 	}
-	u, err := url.Parse(string(origin))
+	for _, o := range origins {
+		if o == "*" || strings.EqualFold(o, origin) {
+			return true
+		}
+	}
+	u, err := url.Parse(origin)
 	return err == nil && strings.EqualFold(u.Host, string(rc.Host()))
 }
 
