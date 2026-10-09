@@ -40,6 +40,20 @@ type keepIn struct {
 
 type keepOut struct{}
 
+// keepForm is a typed op's form, cookie and header, the request kinds that do
+// not come from a JSON body.
+type keepForm struct {
+	F      string    `json:"f" form:"f"`
+	Sid    string    `json:"sid" cookie:"sid"`
+	Auth   string    `json:"auth" header:"Authorization"`
+	Upload *zip.File `json:"upload" form:"upload"`
+}
+
+// keepBytes is a typed op's raw body.
+type keepBytes struct {
+	Body zip.Body `json:"body"`
+}
+
 // keeper holds what each request's handler kept, in arrival order.
 type keeper struct {
 	mu   sync.Mutex
@@ -139,7 +153,84 @@ func keepApp(k *keeper) *zip.App {
 		}, nil)
 		return nil, nil
 	})
+	app.Post("/v1/form", func(_ context.Context, in *keepForm) (*keepOut, error) {
+		k.keep(map[string]string{
+			"form":   in.F,
+			"cookie": in.Sid,
+			"header": in.Auth,
+		}, nil)
+		return nil, nil
+	}, zip.Consumes("application/x-www-form-urlencoded"))
+	app.Post("/v1/upload", func(_ context.Context, in *keepForm) (*keepOut, error) {
+		k.keep(map[string]string{
+			"form": in.F,
+			"name": in.Upload.Name,
+			"type": in.Upload.Type,
+		}, in.Upload.Bytes)
+		return nil, nil
+	}, zip.Consumes("multipart/form-data"))
+	app.Post("/v1/bytes", func(_ context.Context, in *keepBytes) (*keepOut, error) {
+		k.keep(map[string]string{"type": in.Body.Type}, in.Body.Bytes)
+		return nil, nil
+	})
 	return app
+}
+
+// formAsk is request i to the typed form op.
+func formAsk(i int) *fasthttp.Request {
+	req := fasthttp.AcquireRequest()
+	req.Header.SetMethod("POST")
+	req.SetRequestURI("http://keep/v1/form")
+	req.Header.Set("Authorization", "Bearer "+val("header", i))
+	req.Header.SetCookie("sid", val("cookie", i))
+	req.Header.SetContentType("application/x-www-form-urlencoded")
+	req.SetBodyString("f=" + val("form", i))
+	return req
+}
+
+func formWant(i int) map[string]string {
+	return map[string]string{
+		"form":   val("form", i),
+		"cookie": val("cookie", i),
+		"header": "Bearer " + val("header", i),
+	}
+}
+
+// uploadAsk is request i to the typed multipart op: one field and one part.
+func uploadAsk(i int) *fasthttp.Request {
+	req := fasthttp.AcquireRequest()
+	req.Header.SetMethod("POST")
+	req.SetRequestURI("http://keep/v1/upload")
+	req.Header.SetContentType("multipart/form-data; boundary=keepboundary")
+	req.SetBodyString("--keepboundary\r\n" +
+		"Content-Disposition: form-data; name=\"f\"\r\n\r\n" + val("form", i) + "\r\n" +
+		"--keepboundary\r\n" +
+		"Content-Disposition: form-data; name=\"upload\"; filename=\"" + val("name", i) + "\"\r\n" +
+		"Content-Type: text/" + val("type", i) + "\r\n\r\n" + val("part", i) + "\r\n" +
+		"--keepboundary--\r\n")
+	return req
+}
+
+func uploadWant(i int) map[string]string {
+	return map[string]string{
+		"form": val("form", i),
+		"name": val("name", i),
+		"type": "text/" + val("type", i),
+	}
+}
+
+// bytesAsk is request i to the typed raw-body op.
+func bytesAsk(i int) *fasthttp.Request {
+	req := fasthttp.AcquireRequest()
+	req.Header.SetMethod("POST")
+	req.SetRequestURI("http://keep/v1/bytes")
+	req.Header.SetContentType("application/" + val("media", i))
+	req.SetBodyString(val("bytes", i))
+	return req
+}
+
+func bytesWant(i int) map[string]string {
+	return map[string]string{"type": "application/" + val("media", i)}
 }
 
 // rawAsk is request i to the untyped route: every value it carries is val(…, i).
@@ -263,6 +354,9 @@ func TestKeep_AStringKeptPastTheHandlerIsNotTheNextRequests(t *testing.T) {
 		{"raw", rawAsk, rawWant, func(i int) string { return "f=" + val("form", i) }},
 		{"json", jsonAsk, jsonWant, nil},
 		{"typed", typedAsk, typedWant, nil},
+		{"form", formAsk, formWant, nil},
+		{"upload", uploadAsk, uploadWant, func(i int) string { return val("part", i) }},
+		{"bytes", bytesAsk, bytesWant, func(i int) string { return val("bytes", i) }},
 	}
 	for _, tr := range []string{"http", "zap"} {
 		for _, tc := range cases {
