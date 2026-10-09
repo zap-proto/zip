@@ -63,10 +63,10 @@ import (
 // the argument parser read. It is the CLI's whole surface — a derivation fills
 // it in, the runner consumes it, and neither knows how the other got there.
 type Command struct {
-	// Service is the first non-version segment of the path ("billing"), and
-	// Name is the operation token under it ("invoices-list").
+	// Service is the first non-version segment of the path ("billing").
 	Service string
-	Name    string
+	// Name is the operation token under the service ("invoices-list").
+	Name string
 
 	// OperationID is the op's identity — the SAME token the OpenAPI document's
 	// operationId, the MCP tool's name and zip.Call all address it by. A command
@@ -74,15 +74,17 @@ type Command struct {
 	// is what says WHICH op it projects.
 	OperationID string
 
-	// Summary is the one-line help; Description is the full prose. Both come
-	// from the handler's doc comment when cmd/zipdoc has run.
-	Summary     string
+	// Summary is the one-line help, from the handler's doc comment when
+	// cmd/zipdoc has run.
+	Summary string
+	// Description is the full prose, from the same doc comment.
 	Description string
 
-	// Method and Path are the operation's identity — the route pattern in
-	// fiber's ":name" form, whatever the derivation read it from.
+	// Method is the operation's HTTP method.
 	Method string
-	Path   string
+	// Path is the operation's route pattern in fiber's ":name" form, whatever
+	// the derivation read it from.
+	Path string
 
 	// Args are the path parameters, in path order, as positional arguments. The
 	// URL is the addressing authority (see bindPath), so what addresses the
@@ -115,16 +117,25 @@ type Command struct {
 
 // Arg is one path parameter as a positional argument.
 type Arg struct {
-	Name string // the param name, "app"
+	// Name is the path parameter's name, "app".
+	Name string
+	// Help is the parameter's prose, from the field it binds.
 	Help string
 }
 
 // Flag is one In field as a flag.
 type Flag struct {
-	Name     string // the flag, kebab-cased and without the dashes: "organization-id"
-	Field    string // the name it is sent under: the JSON field, the header, the cookie or the form key
-	Type     string // string | integer | number | boolean | json | file
-	Help     string
+	// Name is the flag, kebab-cased and without the dashes: "organization-id".
+	Name string
+	// Field is the name it is sent under: the JSON field, the header, the
+	// cookie or the form key.
+	Field string
+	// Type is the kind of value it takes: string, integer, number, boolean,
+	// json or file.
+	Type string
+	// Help is the flag's prose, from the field it sets.
+	Help string
+	// Required says the command refuses to run without it.
 	Required bool
 	// In is where the value rides: "" the JSON body or the query, "header" or
 	// "cookie" a request header or cookie, "form" a form field, "file" a
@@ -1179,8 +1190,8 @@ func writeResult(ctx context.Context, w io.Writer, in io.Reader, res any) error 
 		return nil
 	}
 	switch x := res.(type) {
-	case *Redirect:
-		_, err := fmt.Fprintln(w, x.To)
+	case redirector:
+		_, err := fmt.Fprintln(w, x.redirect().To)
 		return err
 	case *ws.Conn:
 		return bridge(ctx, x, in, w)

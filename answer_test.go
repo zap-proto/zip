@@ -177,3 +177,70 @@ func TestAnswer_JSONWireIsUnchanged(t *testing.T) {
 		t.Errorf("%q %s", resp.Header.Get("Content-Type"), b)
 	}
 }
+
+// signIn is the callback leg of a browser sign-in: it sends the browser on and,
+// on the same answer, clears the one-use flow cookie and sets the session.
+type signIn struct {
+	zip.Redirect
+}
+
+func (signIn) Cookies() []*http.Cookie {
+	return []*http.Cookie{
+		{Name: "flow", Value: "", Path: "/", MaxAge: -1},
+		{Name: "sid", Value: "s1", Path: "/", HttpOnly: true},
+	}
+}
+
+// confirmed is a page that also sets a cookie.
+type confirmed struct {
+	zip.Body
+}
+
+func (confirmed) Cookies() []*http.Cookie {
+	return []*http.Cookie{{Name: "__Host-link", Value: "l1", Path: "/", Secure: true}}
+}
+
+// A redirect or a page that sets cookies is a type embedding Redirect or Body
+// with a Cookies method: the redirect keeps its empty body, the page its
+// bytes, and each Set-Cookie goes out on its own line.
+func TestCookies_OnARedirectAndAPage(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "s", DisableStartupMessage: true})
+	app.Get("/v1/callback", func(context.Context, *struct{}) (*signIn, error) {
+		return &signIn{zip.Redirect{To: "/home"}}, nil
+	})
+	app.Get("/v1/linked", func(context.Context, *struct{}) (*confirmed, error) {
+		return &confirmed{zip.Body{Type: "text/html; charset=utf-8", Bytes: []byte("<p>linked</p>")}}, nil
+	}, zip.Produces("text/html"))
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/v1/callback", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	got := resp.Header.Values("Set-Cookie")
+	if resp.StatusCode != 302 || resp.Header.Get("Location") != "/home" || len(b) != 0 || len(got) != 2 {
+		t.Errorf("callback: %d %q %q %q", resp.StatusCode, resp.Header.Get("Location"), b, got)
+	}
+	if _, ok := resp.Header["Content-Type"]; ok {
+		t.Errorf("callback carries Content-Type %q", resp.Header.Get("Content-Type"))
+	}
+	r302 := opIn(t, app, "/v1/callback", "get")["responses"].(map[string]any)["302"].(map[string]any)
+	h := r302["headers"].(map[string]any)
+	if _, ok := h["Set-Cookie"]; !ok || h["Location"] == nil {
+		t.Errorf("302 headers = %v, want Location and Set-Cookie", h)
+	}
+
+	resp, err = app.Test(httptest.NewRequest("GET", "/v1/linked", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(b) != "<p>linked</p>" || resp.Header.Get("Content-Type") != "text/html; charset=utf-8" ||
+		resp.Header.Get("Set-Cookie") != "__Host-link=l1; Path=/; Secure" {
+		t.Errorf("linked: %d %q %q %q", resp.StatusCode, b, resp.Header.Get("Content-Type"), resp.Header.Get("Set-Cookie"))
+	}
+	content := opIn(t, app, "/v1/linked", "get")["responses"].(map[string]any)["200"].(map[string]any)["content"].(map[string]any)
+	if m, ok := content["text/html"].(map[string]any); !ok || m["schema"].(map[string]any)["format"] != "binary" {
+		t.Errorf("linked content = %v, want binary text/html", content)
+	}
+}

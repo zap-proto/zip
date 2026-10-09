@@ -491,8 +491,9 @@ func ProjectCLI(m Manifest) []Command {
 // JSON.
 //
 // The flags come in the order the document lists them — headers, cookies,
-// then the query or the JSON body, then the form — so a command derived here
-// and one derived from the document are the same command.
+// then the query or the JSON body, then the form. The JSON body's fields come
+// in field order, which a schema's properties cannot carry, so a document
+// lists them by name.
 func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 	params := pathParams(op.Path)
 	td := p.types[op.In]
@@ -533,14 +534,10 @@ func (p *projector) bind(op ManifestOp) ([]Arg, []Flag) {
 	raw, form := p.bodyField(td), p.takesForm(td)
 	if hasBody(op.Method) && raw == nil && !form {
 		// Every field the JSON body carries, as the document's body schema
-		// lists it: a declared header or cookie rides the body too. A schema's
-		// properties have no order, so both derivations sort them by name.
-		n := len(flags)
+		// lists it: a declared header or cookie rides the body too.
 		for _, f := range td.Fields {
 			add(f.JSON, urlName(f), p.flagType(f.Type), p.doc(op.In, f.JSON), f.Required, "")
 		}
-		body := flags[n:]
-		sort.Slice(body, func(i, j int) bool { return body[i].Field < body[j].Field })
 		return args, flags
 	}
 	for _, f := range p.urlFields(op.In) {

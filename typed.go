@@ -211,7 +211,7 @@ func statusOf(op *registeredOp, out any, relayed bool) (int, error) {
 			"declare it with zip.WithStatus(%d) so the document, the SDKs and the CLI publish it",
 			op.Method, op.Path, got, got))
 	}
-	if _, redirect := out.(*Redirect); redirect {
+	if _, redirect := out.(redirector); redirect {
 		for _, code := range op.Statuses {
 			if code >= 300 && code < 400 {
 				return code, nil

@@ -43,7 +43,9 @@ import (
 // chunk by chunk as it arrives, under Type, with Name as the filename a client
 // saves it under (Content-Disposition: attachment). Status and Header are the
 // status and headers it states; each must be one the op declared
-// ([WithStatus], [WithResponseHeader]), as for any answer.
+// ([WithStatus], [WithResponseHeader]), as for any answer. An answer with no
+// bytes and no Type carries no Content-Type, so a 304 is a Body whose Status is
+// 304 and nothing else.
 //
 // The document publishes a request Body as the op's [Consumes] media with
 // {type: string, format: binary}, and an answer as its [Produces] media the
@@ -69,6 +71,13 @@ type Body struct {
 
 // StatusCode is the status the answer states; zero is the op's own.
 func (b Body) StatusCode() int { return b.Status }
+
+// body is the Body an answer is, promoted to a type that embeds one: a
+// [Verbatim], or a page that also sets a cookie.
+func (b *Body) body() *Body { return b }
+
+// answerBody is an answer that is a [Body], or embeds one.
+type answerBody interface{ body() *Body }
 
 // drain reads Reader into Bytes, for a transport whose answer is one message.
 func (b *Body) drain() error {

@@ -314,3 +314,62 @@ func opIn(t *testing.T, app *zip.App, path, method string) map[string]any {
 	}
 	return op
 }
+
+// tagIn asks for an asset the caller may already hold.
+type tagIn struct {
+	Match string `json:"match" header:"If-None-Match"`
+}
+
+// An asset answers its bytes under a tag, and a caller holding that tag gets
+// 304 with no body and no Content-Type, as a handler that wrote nothing did.
+func TestBody_NotModifiedCarriesNoType(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "tag", DisableStartupMessage: true})
+	app.Get("/v1/tag.js", func(_ context.Context, in *tagIn) (*zip.Body, error) {
+		h := map[string]string{"ETag": `"v1"`}
+		if in.Match == `"v1"` {
+			return &zip.Body{Status: 304, Header: h}, nil
+		}
+		return &zip.Body{Type: "application/javascript", Bytes: []byte("1"), Header: h}, nil
+	}, zip.WithStatus(200, 304), zip.WithResponseHeader("ETag"))
+
+	req := httptest.NewRequest("GET", "/v1/tag.js", nil)
+	req.Header.Set("If-None-Match", `"v1"`)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 304 || len(b) != 0 || resp.Header.Get("ETag") != `"v1"` {
+		t.Errorf("answered %d %q etag %q", resp.StatusCode, b, resp.Header.Get("ETag"))
+	}
+	if ct, ok := resp.Header["Content-Type"]; ok {
+		t.Errorf("304 carries Content-Type %q", ct)
+	}
+	resp, err = app.Test(httptest.NewRequest("GET", "/v1/tag.js", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(b) != "1" || resp.Header.Get("Content-Type") != "application/javascript" {
+		t.Errorf("answered %d %q as %q", resp.StatusCode, b, resp.Header.Get("Content-Type"))
+	}
+}
+
+// A filename is the handler's to choose and often a caller's to supply, so
+// one that carries a line break cannot end the header and start another.
+func TestBody_FilenameCannotSplitTheHeader(t *testing.T) {
+	app := zip.New(zip.Config{AppName: "dl", DisableStartupMessage: true})
+	app.Get("/v1/dl", func(context.Context, *struct{}) (*zip.Body, error) {
+		return &zip.Body{Type: "text/plain", Bytes: []byte("x"), Name: "a\r\nSet-Cookie: s=1\\\".txt"}, nil
+	})
+	resp, err := app.Test(httptest.NewRequest("GET", "/v1/dl", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Header.Get("Content-Disposition"); got != `attachment; filename="aSet-Cookie: s=1\\\".txt"` {
+		t.Errorf("Content-Disposition = %q", got)
+	}
+	if c := resp.Header.Get("Set-Cookie"); c != "" {
+		t.Errorf("the filename set a cookie: %q", c)
+	}
+}

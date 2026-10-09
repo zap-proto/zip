@@ -6,7 +6,6 @@ package zip
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -284,6 +283,10 @@ const NotACall = "a connection is not a call"
 // declared; zero is the first it declared, 302 when it declared none) with
 // Location set to To and no body. The document publishes the status and its
 // Location header; MCP and the CLI answer the location.
+//
+// A type that embeds Redirect is a redirect too, so one that also sets cookies
+// is a struct embedding it with a Cookies method ([CookieCoder]): the sign-in
+// leg that clears one cookie and sets another answers both.
 type Redirect struct {
 	// To is the location the client is sent to.
 	To string `json:"to"`
@@ -294,7 +297,11 @@ type Redirect struct {
 // StatusCode is the status the redirect states; zero is the op's own.
 func (r Redirect) StatusCode() int { return r.Status }
 
-var redirectType = reflect.TypeOf(Redirect{})
+// redirect is the Redirect an answer is, promoted to a type that embeds one.
+func (r *Redirect) redirect() *Redirect { return r }
+
+// redirector is an answer that is a [Redirect], or embeds one.
+type redirector interface{ redirect() *Redirect }
 
 // CookieCoder is an answer that sets cookies: one Set-Cookie per cookie, which
 // a header map cannot say. An op whose answer is one declares Set-Cookie by
@@ -380,12 +387,10 @@ func (a *answer) add(t reflect.Type, top bool) {
 	case upgrader:
 		a.setStream(streamSocket, v.(interface{ frame() reflect.Type }).frame())
 		return
-	}
-	switch {
-	case t == bodyType:
+	case answerBody:
 		a.setStream(streamBytes, nil)
 		return
-	case t == redirectType:
+	case redirector:
 		a.redirect = true
 		return
 	}
@@ -500,18 +505,12 @@ func containsInt(list []int, v int) bool {
 	return false
 }
 
-// bodyOf is the [Body] an answer carries, when it carries one: a Body or a
-// Verbatim.
+// bodyOf is the [Body] an answer carries, when it carries one: a Body, a
+// Verbatim, or any type that embeds a Body.
 func bodyOf(out any) (*Body, bool) {
-	switch b := out.(type) {
-	case *Body:
-		return b, true
-	case interface{ documents() reflect.Type }:
-		v := reflect.ValueOf(b)
-		if v.Kind() == reflect.Pointer && !v.IsNil() {
-			if f := v.Elem().FieldByName("Body"); f.IsValid() {
-				return f.Addr().Interface().(*Body), true
-			}
+	if b, ok := out.(answerBody); ok {
+		if v := reflect.ValueOf(out); v.Kind() == reflect.Pointer && !v.IsNil() {
+			return b.body(), true
 		}
 	}
 	return nil, false
@@ -566,8 +565,8 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 		c.Set(name, v)
 	}
 	switch x := out.(type) {
-	case *Redirect:
-		c.Set("Location", x.To)
+	case redirector:
+		c.Set("Location", x.redirect().To)
 		c.Status(nonZero(code, http.StatusFound))
 		return nil
 	case stream:
@@ -581,13 +580,17 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 		c.Status(code)
 	}
 	if isBody {
+		// No bytes and no stated type is no Content-Type: a 304 or an empty
+		// answer carries none, as a handler that wrote nothing never did.
 		media := b.Type
-		if media == "" {
+		if media == "" && (len(b.Bytes) > 0 || b.Reader != nil) {
 			media = produces(op, mimeOctet)
 		}
-		c.Set(fiber.HeaderContentType, media)
+		if media != "" {
+			c.Set(fiber.HeaderContentType, media)
+		}
 		if b.Name != "" {
-			c.Set(fiber.HeaderContentDisposition, `attachment; filename="`+strings.ReplaceAll(b.Name, `"`, `\"`)+`"`)
+			c.Set(fiber.HeaderContentDisposition, disposition(b.Name))
 		}
 		if b.Reader != nil {
 			r := b.Reader
@@ -596,6 +599,25 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 		return c.Send(b.Bytes)
 	}
 	return c.JSON(out, produces(op, mimeJSON))
+}
+
+// disposition is the Content-Disposition that saves an answer as name: the
+// name quoted, its quote and backslash escaped, and any control character —
+// which could end the header and start another — dropped.
+func disposition(name string) string {
+	var b strings.Builder
+	b.WriteString(`attachment; filename="`)
+	for _, r := range name {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			continue
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // copyFlushing writes r to w a read at a time, flushing each, so bytes reach
@@ -720,9 +742,3 @@ func toolContent(id string, out any) (map[string]any, error) {
 	return result, nil
 }
 
-// redirectJSON is the location a redirect answers with where there is no
-// status line to carry it.
-func redirectJSON(r *Redirect) []byte {
-	b, _ := json.Marshal(r)
-	return b
-}

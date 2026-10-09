@@ -42,8 +42,8 @@ func kindsApp() *zip.App {
 
 // hdrIn reads a declared header beside its other fields.
 type hdrIn struct {
-	Org  string `json:"org" header:"X-Org-Id"`
 	Name string `json:"name"`
+	Org  string `json:"org" header:"X-Org-Id"`
 }
 
 // meIn reads a session cookie.
