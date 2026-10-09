@@ -338,23 +338,17 @@ func (t *telemetry) drain() ([]o11y.Span, []o11y.LogRecord) {
 func (a *App) report() Handler {
 	t := a.telemetry
 	return func(c *Ctx) error {
+		// Kept past this handler, in the span and the log line, and safe to
+		// keep: the router hands out copies (see [App.fiberConfig]).
+		path, method := c.fc.Path(), c.fc.Method()
+
 		// The ops surface is not traffic. A liveness probe every second and a
 		// scrape every fifteen would otherwise dominate both the rate and the
 		// duration histogram, and make the numbers describe the monitoring rather
 		// than the service.
-		if isOps(c.fc.Path()) {
+		if isOps(path) {
 			return c.Continue()
 		}
-
-		// Every string kept past this handler is CLONED off the request.
-		// fasthttp hands out views over a connection buffer it reuses for the
-		// next request on that connection, so a value retained without copying
-		// is read back later as whatever arrived afterwards. It surfaces as a
-		// log line or a span whose path belongs to a different request — the
-		// kind of corruption that is invisible in a test and pervasive under
-		// load, because it needs concurrency on one connection to show up.
-		method := strings.Clone(c.fc.Method())
-		path := strings.Clone(c.fc.Path())
 
 		tr := traceOf(c)
 		start := time.Now()
@@ -416,7 +410,7 @@ func facts(c *Ctx, method, route, path string, status int) map[string]any {
 		"client.address": CallerOf(c.Forward()).IP,
 	} {
 		if v != "" {
-			f[k] = strings.Clone(v)
+			f[k] = v
 		}
 	}
 	return f
@@ -589,13 +583,13 @@ func describe(base luxlog.Logger, c *Ctx, tr trace, method, path string) luxlog.
 		"span", tr.span,
 	}
 	if v := c.fc.Get(HeaderRequestID); v != "" {
-		fields = append(fields, "request", strings.Clone(v))
+		fields = append(fields, "request", v)
 	}
 	if v := c.fc.Get(HeaderOrg); v != "" {
-		fields = append(fields, "org", strings.Clone(v))
+		fields = append(fields, "org", v)
 	}
 	if v := c.fc.Get(HeaderUser); v != "" {
-		fields = append(fields, "user", strings.Clone(v))
+		fields = append(fields, "user", v)
 	}
 	// Where the call came from, as [Caller.IP] resolves it — the socket peer
 	// unless this deployment has explicitly named the proxies it believes. The
@@ -653,11 +647,10 @@ type trace struct {
 // request is the one that has to begin it.
 func traceOf(c *Ctx) trace {
 	t := trace{}
-	// CLONED, because the ids are slices of it and it is a view over the header
-	// buffer: the Set below rewrites that buffer in place, which would turn the
-	// parent into this hop's own span, and the connection's next request rewrites
-	// it again before the span ships.
-	if id, parent, ok := parseTrace(strings.Clone(c.fc.Get(HeaderTrace))); ok {
+	// A copy (see [App.fiberConfig]), and it has to be: the ids are slices of
+	// it, the Set below rewrites the header in place, and a view would turn the
+	// parent into this hop's own span.
+	if id, parent, ok := parseTrace(c.fc.Get(HeaderTrace)); ok {
 		t.trace, t.parent = id, parent
 	} else {
 		t.trace = mint(16)

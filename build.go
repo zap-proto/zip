@@ -322,6 +322,13 @@ func (a *App) fiberConfig(oauth map[string]bool) fiber.Config {
 		Concurrency:     a.cfg.Concurrency,
 		ReadBufferSize:  a.cfg.ReadBufferSize,
 		WriteBufferSize: a.cfg.WriteBufferSize,
+		// Every string and body fiber hands out is a copy. Without this each is
+		// a view of the connection's RequestCtx, which the next request on the
+		// connection parses into in place, so a value kept past the handler (a
+		// map key, a cache entry, a goroutine, a usage record) silently becomes
+		// the next caller's. Not optional: zip has no knob for it, because a
+		// handler cannot know which of its values someone downstream will keep.
+		Immutable: true,
 	}
 	if a.cfg.ServerHeader != "-" {
 		fcfg.ServerHeader = a.cfg.ServerHeader

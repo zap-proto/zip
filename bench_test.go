@@ -31,8 +31,10 @@ package zip_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"testing"
 
+	luxlog "github.com/luxfi/log"
 	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
 
@@ -213,4 +215,68 @@ func Benchmark_TypedRoute(b *testing.B) {
 			b.Fatalf("handwritten: status %d", sc)
 		}
 	})
+}
+
+// requestIn is a representative typed input: a path parameter, two query
+// parameters, a declared header and a JSON body, the shape most ops take.
+type requestIn struct {
+	Org    string `json:"org"`
+	Limit  int    `json:"limit"`
+	Cursor string `json:"cursor"`
+	Auth   string `json:"auth" header:"Authorization"`
+	chatRequest
+}
+
+// requestFctx is one request carrying everything a handler reads: the
+// gateway's identity headers, a bearer, a path parameter, a query and a body.
+func requestFctx() *fasthttp.RequestCtx {
+	fctx := postFctx("/v1/orgs/o-99/chat?limit=10&cursor=c_abc123", benchReqBody)
+	fctx.Request.Header.Set("Authorization", "Bearer hk-0123456789abcdef0123456789abcdef")
+	fctx.Request.Header.Set(zip.HeaderOrg, "o-99")
+	fctx.Request.Header.Set(zip.HeaderUser, "u-42")
+	fctx.Request.Header.Set(zip.HeaderUserEmail, "z@hanzo.ai")
+	fctx.Request.Header.Set(zip.HeaderRequestID, "req-8a3f0c")
+	return fctx
+}
+
+// Benchmark_Request is a whole request as a service sees it — identity
+// headers, a path parameter, a query and a JSON body bound, a JSON answer —
+// through a typed op and through an untyped handler reading the same values.
+// It is the number that moves when what a request hands a handler changes.
+func Benchmark_Request(b *testing.B) {
+	// The request line every app writes goes nowhere, so the number is the
+	// request's and not the terminal's.
+	cfg := benchConfig()
+	cfg.Logger = luxlog.NewWriter(io.Discard)
+	ta := zip.New(cfg)
+	ta.Post("/v1/orgs/:org/chat", func(ctx context.Context, in *requestIn) (*chatResponse, error) {
+		out := makeChatResponse(in.Model)
+		out.ID = zip.CallerOf(ctx).User + in.Org + in.Cursor + in.Auth[:6]
+		return &out, nil
+	})
+	ha := zip.New(cfg)
+	ha.Raw("POST", "/v1/orgs/:org/chat", func(c *zip.Ctx) error {
+		var in chatRequest
+		if err := c.Bind(&in); err != nil {
+			return err
+		}
+		out := makeChatResponse(in.Model)
+		out.ID = c.User() + c.Org() + c.Param("org") + c.Query("cursor") + c.Query("limit") + c.Header("Authorization")[:6]
+		return c.JSON(200, &out)
+	})
+	for name, h := range map[string]fasthttp.RequestHandler{
+		"typed": ta.Fiber().Handler(), "untyped": ha.Fiber().Handler(),
+	} {
+		b.Run(name, func(b *testing.B) {
+			fctx := requestFctx()
+			b.ReportAllocs()
+			for b.Loop() {
+				fctx.ResetUserValues()
+				h(fctx)
+			}
+			if sc := fctx.Response.StatusCode(); sc != 200 {
+				b.Fatalf("%s: status %d: %s", name, sc, fctx.Response.Body())
+			}
+		})
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/url"
+	"reflect"
 	"strings"
 
 	luxlog "github.com/luxfi/log"
@@ -15,6 +16,10 @@ import (
 // Ctx wraps fiber.Ctx and adds the Hanzo identity surface (Org/User/Email
 // from gateway-minted X-* headers per HIP-0026), a per-request luxfi/log
 // logger, and typed Deps access.
+//
+// Every string and body it returns, and every value its Bind methods write, is
+// a copy the handler may keep past its return. The Ctx itself is not: it is
+// the request's, and so are the fasthttp request and context under Fiber().
 type Ctx struct {
 	fc  fiber.Ctx
 	app *App
@@ -128,35 +133,43 @@ func (c *Ctx) Host() string { return c.fc.Host() }
 // SetHeader sets a response header.
 func (c *Ctx) SetHeader(name, value string) { c.fc.Set(name, value) }
 
-// Body returns the raw request body.
+// Body returns the request body, decoded per its Content-Encoding.
 func (c *Ctx) Body() []byte { return c.fc.Body() }
 
 // Bind parses the request body into v based on Content-Type (JSON by
 // default) and runs struct-tag validation (required/min/max/minlen/maxlen).
 // Returns a *HTTPError(400) when either step fails so handlers can
-// return the error directly.
+// return the error directly. Every string it writes into v is v's own.
 func (c *Ctx) Bind(v any) error {
 	if err := c.fc.Bind().Body(v); err != nil {
 		return ErrBadRequest("invalid body: " + err.Error())
 	}
+	// JSON is decoded by jsonenc, which writes copies. Any other body went
+	// through a fiber binder, and the form binder writes views.
+	if !c.fc.Is("json") {
+		detach(v)
+	}
 	if err := validate(v); err != nil {
 		return ErrBadRequest(err.Error())
 	}
 	return nil
 }
 
-// BindQuery parses query parameters into v and runs validation.
+// BindQuery parses query parameters into v and runs validation. Every string
+// it writes into v is v's own.
 func (c *Ctx) BindQuery(v any) error {
 	if err := c.fc.Bind().Query(v); err != nil {
 		return ErrBadRequest("invalid query: " + err.Error())
 	}
+	detach(v)
 	if err := validate(v); err != nil {
 		return ErrBadRequest(err.Error())
 	}
 	return nil
 }
 
-// BindURI parses URL params into v and runs validation.
+// BindURI parses URL params into v and runs validation. It reads them
+// through fiber's Params, which hands out copies, so v owns what it is given.
 func (c *Ctx) BindURI(v any) error {
 	if err := c.fc.Bind().URI(v); err != nil {
 		return ErrBadRequest("invalid uri: " + err.Error())
@@ -165,6 +178,75 @@ func (c *Ctx) BindURI(v any) error {
 		return ErrBadRequest(err.Error())
 	}
 	return nil
+}
+
+// detach gives every string reachable from v memory of its own.
+//
+// fiber's query, form, header and cookie binders read the request through
+// views of its buffers whatever Immutable says, so a field they fill is a
+// view of the connection's RequestCtx and the next request on the connection
+// rewrites it. The walk follows pointers, structs, slices, arrays, maps (and
+// their string keys) and interfaces; a pointer it has followed it does not
+// follow again, so a cycle ends. Unexported fields are left alone: no binder
+// writes one.
+func detach(v any) { detachValue(reflect.ValueOf(v), map[followed]bool{}) }
+
+// followed is one pointer the walk took, by address and type: a struct and its
+// first field share an address and are different things to walk.
+type followed struct {
+	at uintptr
+	t  reflect.Type
+}
+
+func detachValue(v reflect.Value, done map[followed]bool) {
+	switch v.Kind() {
+	case reflect.String:
+		if v.CanSet() {
+			v.SetString(strings.Clone(v.String()))
+		}
+	case reflect.Pointer:
+		if v.IsNil() {
+			return
+		}
+		k := followed{v.Pointer(), v.Type()}
+		if done[k] {
+			return
+		}
+		done[k] = true
+		detachValue(v.Elem(), done)
+	case reflect.Interface:
+		if v.IsNil() || !v.CanSet() {
+			return
+		}
+		e := reflect.New(v.Elem().Type()).Elem()
+		e.Set(v.Elem())
+		detachValue(e, done)
+		v.Set(e)
+	case reflect.Struct:
+		for i := range v.NumField() {
+			detachValue(v.Field(i), done)
+		}
+	case reflect.Slice, reflect.Array:
+		for i := range v.Len() {
+			detachValue(v.Index(i), done)
+		}
+	case reflect.Map:
+		if v.IsNil() || !v.CanInterface() {
+			return
+		}
+		for _, k := range v.MapKeys() {
+			val := reflect.New(v.Type().Elem()).Elem()
+			val.Set(v.MapIndex(k))
+			detachValue(val, done)
+			if k.Kind() == reflect.String {
+				// Deleted and written again: the language does not say whether
+				// writing over an entry replaces the key it holds.
+				v.SetMapIndex(k, reflect.Value{})
+				k = reflect.ValueOf(strings.Clone(k.String())).Convert(k.Type())
+			}
+			v.SetMapIndex(k, val)
+		}
+	}
 }
 
 // ----- response writers ----------------------------------------------------

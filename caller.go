@@ -117,7 +117,7 @@ func callerContext(fc fiber.Ctx) context.Context {
 		// ONE value carrying both facts, because this is the only place that holds
 		// the fiber Ctx and therefore the only place that can resolve the caller's
 		// IP under the app's trust configuration.
-		in = &inflight{rc: rc, ip: strings.Clone(fc.IP())}
+		in = &inflight{rc: rc, ip: fc.IP()}
 		rc.SetUserValue(inflightKey{}, in)
 	}
 	return context.WithValue(fc.Context(), callerKey{}, in)
