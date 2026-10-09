@@ -714,7 +714,7 @@ func readForm(c fiber.Ctx, media string, body []byte, names map[string]bool) (fo
 	fd := formData{values: map[string][]string{}, files: map[string][]File{}}
 	if m, _, _ := mime.ParseMediaType(media); m != mimeMultipart {
 		if bytes.Count(body, []byte("&")) >= maxFormFields {
-			return fd, fmt.Errorf("a form carries more than %d fields", maxFormFields)
+			return fd, fmt.Errorf("a form carries more than %d pieces between its '&'s", maxFormFields)
 		}
 		var args fasthttp.Args
 		args.ParseBytes(body)
