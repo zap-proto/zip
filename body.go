@@ -5,15 +5,19 @@
 package zip
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
+	"net/http"
 	"reflect"
 	"strings"
 
+	"github.com/valyala/fasthttp"
 	"github.com/zap-proto/fiber/v3"
 
 	"github.com/zap-proto/zip/internal/jsonenc"
@@ -89,6 +93,18 @@ func (b *Body) drain() error {
 	got, err := io.ReadAll(r)
 	b.Bytes = got
 	return err
+}
+
+// release closes Reader, when it is an io.Closer, for an answer refused after
+// its handler ran: a relay's Reader is an upstream body, and nothing else will
+// read it. A nil Body releases nothing.
+func (b *Body) release() {
+	if b == nil {
+		return
+	}
+	if c, ok := b.Reader.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 // ResponseHeaders are the headers the answer states.
@@ -239,6 +255,10 @@ func (r *intake) settle(method string, in reflect.Type, media []string) {
 		panic(fmt.Sprintf("zip: %s carries no request body, so %s cannot take one", method, in))
 	}
 }
+
+// whole says the op takes the request body itself — as bytes, as a form or
+// through a Parser — rather than as one JSON value the seam decodes.
+func (r intake) whole() bool { return r.raw != nil || r.form || r.parse }
 
 // formMedia reports whether a media list names a form encoding.
 func formMedia(media []string) bool {
@@ -580,20 +600,90 @@ func (r intake) defaultBodyType(v any, media []string) {
 // base64Text is how bytes travel inside JSON.
 func base64Text(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
-// readForm reads a REST request's form: its url-encoded fields, or a multipart
-// form's fields and parts, each part read whole.
-func readForm(c fiber.Ctx, media string) (formData, error) {
+// content is a REST request's body with its Content-Encoding undone, each
+// coding in turn and the result held to the app's BodyLimit, for an op that
+// takes the body itself.
+//
+// It does not read through fiber's Body, which answers a coding it cannot undo
+// with the error's text in place of the bytes (and sometimes a status on the
+// response): a handler that takes the bytes as they are would run on that
+// text. Here a coding this server does not undo is 415, a body that decodes
+// past the limit is 413, and one that does not decode is 400, each before the
+// handler runs. The bytes are the op's own: the decoders allocate, and an
+// unencoded body is fiber's copy.
+func content(c fiber.Ctx) ([]byte, error) {
+	coding := strings.TrimSpace(string(c.Request().Header.ContentEncoding()))
+	if coding == "" {
+		return c.Body(), nil
+	}
+	limit := c.App().Config().BodyLimit
+	body := c.Request().Body()
+	// The last coding listed was applied last (RFC 9110 §8.4), so it is undone
+	// first.
+	codings := strings.Split(strings.ToLower(coding), ",")
+	for i := len(codings) - 1; i >= 0; i-- {
+		var err error
+		if body, err = undo(strings.TrimSpace(codings[i]), body, limit); err != nil {
+			return nil, err
+		}
+	}
+	return append([]byte(nil), body...), nil
+}
+
+// undo removes one content coding from b, held to limit bytes.
+func undo(coding string, b []byte, limit int) ([]byte, error) {
+	var r fasthttp.Request
+	r.SetBodyRaw(b)
+	var (
+		out []byte
+		err error
+	)
+	switch coding {
+	case "identity":
+		return b, nil
+	case "gzip", "x-gzip":
+		out, err = r.BodyGunzipWithLimit(limit)
+	case "deflate":
+		out, err = r.BodyInflateWithLimit(limit)
+	case "br":
+		out, err = r.BodyUnbrotliWithLimit(limit)
+	case "zstd":
+		out, err = r.BodyUnzstdWithLimit(limit)
+	default:
+		return nil, Errorf(http.StatusUnsupportedMediaType, "Content-Encoding %q is not one this server undoes; send gzip, deflate, br, zstd or none", coding)
+	}
+	switch {
+	case errors.Is(err, fasthttp.ErrBodyTooLarge):
+		return nil, Errorf(http.StatusRequestEntityTooLarge, "the request body decodes to more than %d bytes", limit)
+	case err != nil:
+		return nil, ErrBadRequest(fmt.Sprintf("invalid body: its %s coding does not decode: %v", coding, err))
+	}
+	return out, nil
+}
+
+// readForm reads a REST request's form from its content: url-encoded fields,
+// or a multipart form's fields and parts, each part read whole. The content is
+// already decoded and held to the body limit, and a multipart form is parsed
+// from it in memory, so no part is larger than the body that carried it.
+func readForm(c fiber.Ctx, media string, body []byte) (formData, error) {
 	fd := formData{values: map[string][]string{}, files: map[string][]File{}}
 	if m, _, _ := mime.ParseMediaType(media); m != mimeMultipart {
-		for k, v := range c.Request().PostArgs().All() {
+		var args fasthttp.Args
+		args.ParseBytes(body)
+		for k, v := range args.All() {
 			fd.values[string(k)] = append(fd.values[string(k)], string(v))
 		}
 		return fd, nil
 	}
-	form, err := c.RequestCtx().MultipartForm()
+	boundary := string(c.Request().Header.MultipartFormBoundary())
+	if boundary == "" {
+		return fd, errors.New("a multipart form names no boundary")
+	}
+	form, err := multipart.NewReader(bytes.NewReader(body), boundary).ReadForm(int64(len(body)) + 1)
 	if err != nil {
 		return fd, err
 	}
+	defer func() { _ = form.RemoveAll() }()
 	for k, v := range form.Value {
 		fd.values[k] = v
 	}

@@ -25,9 +25,12 @@ package zip
 //
 // # What is not served, by name
 //
-// Subscriptions, because no op is a stream. Introspection, because the schema is
-// published whole at GET [GraphPath], which is what a code generator reads.
-// Both are refused in words rather than answered with a confusing nothing.
+// Subscriptions, and every op that is not one JSON value in and one out (see
+// registeredOp.plain): a field resolves to a value, so bytes, a form, a stream,
+// an upgrade, a redirect and a union are no field. Introspection, because the
+// schema is published whole at GET [GraphPath], which is what a code generator
+// reads. Each is refused in words rather than answered with a confusing
+// nothing.
 
 import (
 	"context"
@@ -130,7 +133,7 @@ func (a *App) graph(ctx context.Context, req GraphRequest, foreign Resolver) Gra
 func (a *App) graphFields(kind string) map[string]*registeredOp {
 	out := map[string]*registeredOp{}
 	for _, op := range a.Registry() {
-		if op.OperationID == "" {
+		if op.OperationID == "" || !op.plain() {
 			continue
 		}
 		if (kind == "query") != (op.Method == http.MethodGet) {
@@ -367,7 +370,7 @@ func (e *graph) input(op *registeredOp, args map[string]any) (any, error) {
 func graphArgs(t reflect.Type) map[string]string {
 	out := map[string]string{}
 	for _, f := range wireFields(t) {
-		if headerFieldName(f) != "" {
+		if headerFieldName(f) != "" || cookieFieldName(f) != "" {
 			continue // ambient; see this file's header
 		}
 		n := jsonFieldName(f)

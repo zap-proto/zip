@@ -55,6 +55,12 @@ func (a *App) GraphQLSDL() string {
 			// the first time the path did.
 			continue
 		}
+		if !op.plain() {
+			// A field is one JSON value in and one out. Bytes, a form, a
+			// stream, an upgrade, a redirect and a union are not that, so they
+			// are absent rather than published as a shape they do not have.
+			continue
+		}
 		f := g.field(op)
 		if op.Method == "GET" {
 			query = append(query, f)
@@ -124,11 +130,13 @@ func (g *sdl) field(op *registeredOp) string {
 func (g *sdl) args(t reflect.Type) string {
 	var out []string
 	for _, f := range wireFields(t) {
-		if headerFieldName(f) != "" {
-			// A header is AMBIENT, not an argument. Over REST its value comes from
-			// the request — set by whatever runs in front of the handler — so
-			// publishing it as an argument would invite a client to supply its own
-			// instead. The executor refuses it by the same rule.
+		if headerFieldName(f) != "" || cookieFieldName(f) != "" {
+			// A header or a cookie is AMBIENT, not an argument. Over REST its
+			// value comes from the request — set by whatever runs in front of the
+			// handler, or by the browser — so publishing it as an argument would
+			// invite a client to supply its own instead. The executor refuses it
+			// by the same rule, and binds no cookie: the graph, like MCP, carries
+			// no browser credential.
 			continue
 		}
 		name := jsonFieldName(f)

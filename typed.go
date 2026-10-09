@@ -103,6 +103,15 @@ type registeredOp struct {
 	direct func(ctx context.Context, in any) (any, error)
 }
 
+// plain says the op takes one JSON value and answers one: no body taken as
+// bytes, as a form or by a Parser, and no answer that is bytes, a relay, a
+// stream, an upgrade, a redirect or a union. It is the shape a graph field
+// resolves to.
+func (op *registeredOp) plain() bool {
+	return !op.req.whole() && !op.req.files && op.ans.stream == "" && !op.ans.verbatim &&
+		!op.ans.redirect && op.ans.union == nil && len(op.ans.json) <= 1
+}
+
 // decoder reads a request body into an op's In. It is a PARAMETER rather than a
 // property of the op because the encoding belongs to the transport, not to the
 // contract: the same op answers a browser over JSON and a sibling service over
@@ -782,6 +791,11 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		if !ok {
 			return nil, ErrBadRequest(fmt.Sprintf("%s takes %T, not %T", opName(op), (*In)(nil), in))
 		}
+		// No connection reaches an op this way, so a socket op is refused
+		// before its handler runs, as over the call plane and MCP.
+		if op.ans.stream == streamSocket {
+			return nil, Errorf(fiber.StatusNotImplemented, "%s: %s", opName(op), NotACall)
+		}
 		return run(ctx, v)
 	}
 
@@ -827,10 +841,20 @@ func registerTyped[In, Out any](depth int, on *App, method, path string, fn Type
 		// input no generated client would ever send.
 		wire := input{dec: jsonenc.Unmarshal, sent: true}
 		if hasBody(method) {
-			wire.body = c.Body()
 			wire.media = c.Get(fiber.HeaderContentType)
+			if op.req.whole() {
+				// An op that takes the body itself takes its content or a
+				// refusal, never fiber's text for a coding it could not undo.
+				body, err := content(c)
+				if err != nil {
+					return err
+				}
+				wire.body = body
+			} else {
+				wire.body = c.Body()
+			}
 			if op.req.form {
-				wire.form = func() (formData, error) { return readForm(c, wire.media) }
+				wire.form = func() (formData, error) { return readForm(c, wire.media, wire.body) }
 			}
 		}
 		if names := c.Route().Params; len(names) > 0 {

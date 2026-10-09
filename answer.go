@@ -611,10 +611,12 @@ func writeAnswer(c fiber.Ctx, op *registeredOp, out any) error {
 	b, isBody := bodyOf(out)
 	hdrs, err := responseHeadersOf(op, out)
 	if err != nil {
+		b.release()
 		return err
 	}
 	code, err := statusOf(op, out, op.ans.verbatim)
 	if err != nil {
+		b.release()
 		return err
 	}
 	if cc, ok := out.(CookieCoder); ok {
