@@ -294,7 +294,7 @@ type sessionOut struct {
 }
 
 // A url-encoded form binds the fields the op declares and no others, and one
-// of more fields than Go's own query parser takes is refused before any is
+// of more pieces than Go's own query parser takes is refused before any is
 // decoded or the handler runs. The refusal is cheap: a few kilobytes that
 // decode to millions of fields cost the decode and nothing per field.
 func TestContent_AFormKeepsItsFieldsAndIsBounded(t *testing.T) {
@@ -332,6 +332,18 @@ func TestContent_AFormKeepsItsFieldsAndIsBounded(t *testing.T) {
 	}
 	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
 		t.Errorf("refusing a %d-byte flood allocated %d MiB; it should cost the decode, not a value per field", len(flood), alloc>>20)
+	}
+
+	// Empty pieces count: a form of nothing but separators is refused in the
+	// same one pass, not split piece by piece.
+	ran.Store(0)
+	seps := gzipped(t, bytes.Repeat([]byte("&"), 4<<20-16))
+	if code, body = send(t, big, "/v1/form", form, "gzip", seps); code != 400 || ran.Load() != 0 {
+		t.Errorf("a %d-byte flood of separators: %d %s, want 400 and no run", len(seps), code, body)
+	}
+	padded := strings.Repeat("a=1&&", 5000) + "note=padded"
+	if code, body = send(t, big, "/v1/form", form, "", []byte(padded)); code != 400 {
+		t.Errorf("5001 fields padded past 10000 pieces: %d %s, want 400", code, body)
 	}
 }
 

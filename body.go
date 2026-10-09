@@ -695,38 +695,25 @@ func undo(coding string, b []byte, limit int) ([]byte, error) {
 	return out, nil
 }
 
-// maxFormFields is the most fields a url-encoded form may carry: the bound Go's
-// own query parser holds (net/url, urlmaxqueryparams). A multipart form is held
-// to mime/multipart's own bounds on parts and part headers.
+// maxFormFields is the most pieces a url-encoded form may carry between its
+// '&'s, a field or empty: the bound Go's own query parser holds (net/url,
+// urlmaxqueryparams). Counting separators rather than fields keeps the check
+// one pass over the bytes, so a form of nothing but '&' costs no more to refuse
+// than any other. A multipart form is held to mime/multipart's own bounds on
+// parts and part headers.
 const maxFormFields = 10000
-
-// fewFields reports whether a url-encoded form holds at most maxFormFields
-// fields, counting the non-empty pieces between its '&'s without decoding any.
-func fewFields(form []byte) bool {
-	n := 0
-	for len(form) > 0 {
-		var field []byte
-		field, form, _ = bytes.Cut(form, []byte("&"))
-		if len(field) > 0 {
-			if n++; n > maxFormFields {
-				return false
-			}
-		}
-	}
-	return true
-}
 
 // readForm reads a REST request's form from its content: url-encoded fields,
 // or a multipart form's fields and parts, each part read whole, keeping only
 // the keys the op binds (names). The content is already decoded and held to the
 // body limit, and a multipart form is parsed from it in memory, so no part is
 // larger than the body that carried it. A url-encoded form is decoded as fiber
-// decodes one, and one of more than [maxFormFields] fields is refused before
+// decodes one, and one of more than [maxFormFields] pieces is refused before
 // any is decoded.
 func readForm(c fiber.Ctx, media string, body []byte, names map[string]bool) (formData, error) {
 	fd := formData{values: map[string][]string{}, files: map[string][]File{}}
 	if m, _, _ := mime.ParseMediaType(media); m != mimeMultipart {
-		if !fewFields(body) {
+		if bytes.Count(body, []byte("&")) >= maxFormFields {
 			return fd, fmt.Errorf("a form carries more than %d fields", maxFormFields)
 		}
 		var args fasthttp.Args
