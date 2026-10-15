@@ -750,7 +750,7 @@ func start(spec Plugin) (*instance, error) {
 	switch {
 	case len(spec.Bin) > 0:
 		path = filepath.Join(dir, spec.Name)
-		if err := os.WriteFile(path, spec.Bin, 0o700); err != nil {
+		if err := place(path, bytes.NewReader(spec.Bin), spec.Name); err != nil {
 			_ = os.RemoveAll(dir)
 			return nil, fmt.Errorf("write binary: %w", err)
 		}

@@ -45,24 +45,39 @@ import (
 // consensus — every validator then verifies the same statement without
 // trusting an operator, a registry or a URL.
 
-// binary is a private, verified copy of a plugin executable, held open. It is
-// executed THROUGH this descriptor, so no path is resolved a second time.
+// binary is a plugin executable held open read-only. It is executed THROUGH this
+// descriptor, so no path is resolved a second time.
 type binary struct {
 	f    *os.File
 	name string // for argv[0] and messages
 }
 
-// openVerified copies src into priv — a directory only the host can write —
-// and, when want is non-empty, refuses unless the COPY's SHA-256 matches.
+// openVerified opens the executable a plugin runs from src.
 //
-// The copy is the point. Verifying the original in place and then running it
-// leaves whoever can write that file free to change it afterwards, and holding
-// a descriptor does not close that: a write to the SAME INODE is visible
-// through an already-open descriptor, so only a rename would be defended
-// against and the cheaper attack would not be. Copying first moves the bytes
-// somewhere the attacker has no write access, so "what was checked" and "what
-// runs" are one object for the whole of its life.
+// With a digest (want non-empty) it copies src into priv — a directory only the
+// host can write — and refuses unless the COPY's SHA-256 matches. The copy is
+// the point there. Verifying the original in place and then running it leaves
+// whoever can write that file free to change it afterwards, and holding a
+// descriptor does not close that: a write to the SAME INODE is visible through
+// an already-open descriptor, so only a rename would be defended against and
+// the cheaper attack would not be. Copying first moves the bytes somewhere the
+// attacker has no write access, so "what was checked" and "what runs" are one
+// object for the whole of its life.
+//
+// Without a digest nothing is checked, so there is no checked object for a copy
+// to keep equal to what runs: the bytes at src when a copy would be taken are
+// the bytes that run either way. src is opened read-only and executed through
+// that descriptor. A start then writes nothing — where the copy wrote the whole
+// binary, tens to hundreds of megabytes, every time a lazy plugin woke — and
+// every instance of one binary shares its pages.
 func openVerified(src, priv, name, want string) (*binary, error) {
+	if want == "" {
+		f, err := os.Open(src)
+		if err != nil {
+			return nil, err
+		}
+		return &binary{f: f, name: name}, nil
+	}
 	staged := filepath.Join(priv, name+".bin")
 	if err := stage(src, staged, name); err != nil {
 		return nil, err
@@ -76,45 +91,49 @@ func openVerified(src, priv, name, want string) (*binary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if want != "" {
-		sum := sha256.New()
-		if _, err := io.Copy(sum, f); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("plugin %s: read for verification: %w", name, err)
-		}
-		if got := hex.EncodeToString(sum.Sum(nil)); got != want {
-			f.Close()
-			return nil, fmt.Errorf("plugin %s: sha256 %s does not match Sum %s — refusing to run it", name, got, want)
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			f.Close()
-			return nil, err
-		}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("plugin %s: read for verification: %w", name, err)
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+		f.Close()
+		return nil, fmt.Errorf("plugin %s: sha256 %s does not match Sum %s — refusing to run it", name, got, want)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
 	}
 	return &binary{f: f, name: name}, nil
 }
 
 // stage copies src to dst, which lives in a directory only the host can write.
-//
-// The write handle is open under syscall.ForkLock. A child forked by another
-// goroutine holds a copy of every descriptor this process has open until it
-// execs, O_CLOEXEC or not, and Linux refuses to exec a file anyone holds open for
-// writing. So two plugins starting at once could each fail the other's exec with
-// "text file busy". Holding the read side of ForkLock keeps any fork out while
-// the copy is written; the exec that follows runs with no writer left.
 func stage(src, dst, name string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	return place(dst, in, name)
+}
+
+// place writes an executable's bytes from r to dst, a new file in a directory
+// only the host can write.
+//
+// The write handle is open under syscall.ForkLock. A child forked by another
+// goroutine holds a copy of every descriptor this process has open until it
+// execs, O_CLOEXEC or not, and Linux refuses to exec a file anyone holds open for
+// writing. So two plugins starting at once could each fail the other's exec with
+// "text file busy". Holding the read side of ForkLock keeps any fork out while
+// the file is written; the exec that follows runs with no writer left.
+func place(dst string, r io.Reader, name string) error {
 	syscall.ForkLock.RLock()
 	defer syscall.ForkLock.RUnlock()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
 	if err != nil {
 		return fmt.Errorf("plugin %s: stage binary: %w", name, err)
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, r); err != nil {
 		out.Close()
 		return fmt.Errorf("plugin %s: stage binary: %w", name, err)
 	}

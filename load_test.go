@@ -691,7 +691,7 @@ func TestUnload_LazyStaysDown(t *testing.T) {
 }
 
 // TestStart_TogetherAllRun starts many plugins at once, as a host does when it
-// brings its pinned set up together. Each start copies its binary before it
+// brings its pinned set up together. Each start writes its binary before it
 // execs it, and a child forked meanwhile by another start inherits that write
 // handle until it execs in turn; an exec of a file someone holds open for writing
 // fails with "text file busy". Every start must succeed.

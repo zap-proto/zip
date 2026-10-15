@@ -97,3 +97,26 @@ func TestNoSumStillLoads(t *testing.T) {
 	}
 	b.Close()
 }
+
+// With no Sum there is nothing to keep equal to what runs, so the start writes
+// nothing: the descriptor executed is src's own, and the private directory a
+// copy would have filled stays empty.
+func TestNoSumRunsInPlace(t *testing.T) {
+	path, _ := writeBin(t, t.TempDir(), "svc", "whatever")
+	priv := t.TempDir()
+	b, err := openVerified(path, priv, "svc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if b.f.Name() != path {
+		t.Fatalf("opened %q, want the binary itself at %q", b.f.Name(), path)
+	}
+	left, err := os.ReadDir(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("a start with no Sum wrote %d file(s) into the private directory", len(left))
+	}
+}
