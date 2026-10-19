@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -937,7 +938,8 @@ func TestQueriesRunAtOnceAndMutationsInOrder(t *testing.T) {
 	}
 }
 
-// A field that panics on its own goroutine fails that field, not the process.
+// A field that panics on its own goroutine fails that field, not the process,
+// and what it panicked with stays in the log.
 func TestAPanickingFieldFailsAlone(t *testing.T) {
 	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
 		if s.Key() == "bad" {
@@ -946,7 +948,8 @@ func TestAPanickingFieldFailsAlone(t *testing.T) {
 		return "ok", nil
 	})
 	r := askAt(t, app, "/v1/g", `{ good: a bad: a }`)
-	if r.Data["good"] != "ok" || r.Data["bad"] != nil || !strings.Contains(r.messages(), "boom") {
+	if r.Data["good"] != "ok" || r.Data["bad"] != nil || !strings.Contains(r.messages(), "internal error (request ") ||
+		strings.Contains(r.messages(), "boom") {
 		t.Fatalf("data %#v, errors %s", r.Data, r.messages())
 	}
 }
@@ -991,7 +994,7 @@ func (n gnode) Field(ctx context.Context, s Selection) (any, error) {
 	case "data":
 		return map[string]any{"x": 1, "y": 2}, nil
 	}
-	return nil, fmt.Errorf("no field %q on Node", s.Name)
+	return nil, ErrBadRequest(fmt.Sprintf("no field %q on Node", s.Name))
 }
 
 // ★ Nesting is traversal: each object is asked for the fields selected on it,
@@ -1061,7 +1064,7 @@ func TestAnObjectsFailuresAreItsFieldsAlone(t *testing.T) {
 			t.Errorf("error %q is at %v, want under root", e.Message, e.Path)
 		}
 	}
-	if !strings.Contains(r.messages(), `"step" is required`) {
+	if !strings.Contains(r.messages(), `"step" of "next" is required`) {
 		t.Errorf("Bind did not apply the validate tag: %s", r.messages())
 	}
 
@@ -1070,7 +1073,7 @@ func TestAnObjectsFailuresAreItsFieldsAlone(t *testing.T) {
 		`{ root { next(step: 1) } }`:                   "needs a selection",
 		`{ root { key { x } } }`:                       "cannot have a selection",
 		`{ root { next(step: 1, extra: 2) { key } } }`: `unknown argument "extra"`,
-		`{ root { next(step: "x") { key } } }`:         "invalid arguments",
+		`{ root { next(step: "x") { key } } }`:         "takes Int",
 	} {
 		if got := askAt(t, app, "/v1/g", q); !strings.Contains(got.messages(), want) {
 			t.Errorf("%s: errors %q, want one saying %q", q, got.messages(), want)
@@ -1105,7 +1108,8 @@ func TestTheSchemaIsRenderedForTheCaller(t *testing.T) {
 	}
 }
 
-// A schema that cannot render is a 500 that says so, not an empty schema.
+// A schema that cannot render is a 500 that says so, not an empty schema, and
+// why it could not is the log's, under the id the answer names.
 func TestASchemaThatFailsSaysSo(t *testing.T) {
 	app := New(Config{AppName: "host", DisableStartupMessage: true})
 	app.MountGraphFor("/v1/g", func(context.Context) (string, error) {
@@ -1120,8 +1124,10 @@ func TestASchemaThatFailsSaysSo(t *testing.T) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(b), "the composition failed") {
-		t.Fatalf("answered %d: %s", resp.StatusCode, b)
+	rid := resp.Header.Get(HeaderRequestID)
+	if resp.StatusCode != http.StatusInternalServerError || rid == "" || !strings.Contains(string(b), rid) ||
+		strings.Contains(string(b), "the composition failed") {
+		t.Fatalf("answered %d (request %q): %s", resp.StatusCode, rid, b)
 	}
 }
 
@@ -1174,5 +1180,263 @@ func TestHeadersRelaysTheRequest(t *testing.T) {
 	}
 	if Headers(context.Background()) != nil {
 		t.Error("a context with no request behind it reported headers")
+	}
+}
+
+// ── what one request may cost, and what a failure tells the caller ───────────
+
+// hub is a node of a fully connected graph: every hub's `next` is every hub.
+// Each Field call is counted, which is the work a real Object would do.
+type hub struct {
+	id    int
+	all   int
+	calls *atomic.Int64
+}
+
+func (h hub) Type() string { return "Hub" }
+
+func (h hub) Field(ctx context.Context, s Selection) (any, error) {
+	h.calls.Add(1)
+	switch s.Name {
+	case "id":
+		return h.id, nil
+	case "next":
+		out := make([]hub, h.all)
+		for i := range out {
+			out[i] = hub{id: i, all: h.all, calls: h.calls}
+		}
+		return out, nil
+	}
+	return nil, ErrBadRequest("no field " + s.Name)
+}
+
+// ★ A small request must not be able to make the engine resolve without end.
+// Thirteen fully connected hubs, `next` nested four deep, is 13^4 = 28,561
+// objects from a document of a few dozen bytes: the static bounds cannot see it,
+// because the fan-out is in the data. The engine counts what it resolves and
+// refuses the request whole once the count passes the bound, so the work spent is
+// the bound's, not the graph's.
+func TestAFanOutPastTheBudgetIsRefused(t *testing.T) {
+	var calls atomic.Int64
+	app := mountFor(t, "type Query { root: Hub }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return hub{all: 13, calls: &calls}, nil
+	})
+	deep := askAt(t, app, "/v1/g", `{ root { next { next { next { next { id } } } } } }`)
+	if deep.code != http.StatusBadRequest || deep.Data != nil {
+		t.Fatalf("a 28,561-object answer was given (%d)", deep.code)
+	}
+	if !strings.Contains(deep.messages(), "resolutions") {
+		t.Errorf("the refusal does not say which bound: %s", deep.messages())
+	}
+	if n := calls.Load(); n > fieldLimit {
+		t.Errorf("the objects were asked %d times; the bound is %d", n, fieldLimit)
+	}
+
+	calls.Store(0)
+	ok := askAt(t, app, "/v1/g", `{ root { next { next { id } } } }`)
+	if len(ok.Errors) != 0 || ok.code != http.StatusOK {
+		t.Fatalf("a 169-object answer was refused: %s", ok.messages())
+	}
+}
+
+// Every query root field is a resolver's call — for a host, a hop to another
+// process — so at most rootParallel run at once, however many are selected.
+func TestRootFieldsRunAFewAtATime(t *testing.T) {
+	var now, most atomic.Int64
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		n := now.Add(1)
+		for {
+			m := most.Load()
+			if n <= m || most.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		now.Add(-1)
+		return "ok", nil
+	})
+	var b strings.Builder
+	b.WriteString("{")
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&b, " f%d: a", i)
+	}
+	b.WriteString(" }")
+	if r := askAt(t, app, "/v1/g", b.String()); len(r.Errors) != 0 {
+		t.Fatalf("errors: %s", r.messages())
+	}
+	if m := most.Load(); m > rootParallel || m < 2 {
+		t.Errorf("%d root fields ran at once; want between 2 and %d", m, rootParallel)
+	}
+}
+
+// ★ What a resolver meant the caller to read — a refusal with a 4xx status —
+// is what the caller reads. Anything else is the server's own business: an
+// address, a path, a panic's value. It is logged with the request's id, and the
+// caller is given the id to quote.
+func TestAnInternalFailureIsAnIDNotItsDetail(t *testing.T) {
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		switch s.Key() {
+		case "meant":
+			return nil, ErrForbidden("not yours to read")
+		case "boom":
+			panic("secret panic value")
+		}
+		return nil, errors.New("dial unix /run/secret/graph.sock: connection refused")
+	})
+	body, _ := json.Marshal(GraphRequest{Query: `{ meant: a internal: a boom: a }`})
+	req := httptest.NewRequest(http.MethodPost, "/v1/g", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Fiber().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	rid := resp.Header.Get(HeaderRequestID)
+	if rid == "" {
+		t.Fatal("the answer carries no request id to quote")
+	}
+	got := string(raw)
+	for _, leak := range []string{"secret", "dial unix", "/run/"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("the answer leaks %q: %s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "not yours to read") {
+		t.Errorf("a refusal meant for the caller was hidden: %s", got)
+	}
+	if strings.Count(got, rid) != 2 {
+		t.Errorf("the two internal failures do not name request %s: %s", rid, got)
+	}
+
+	// A request that brings its own id keeps it, so the caller's trace holds.
+	req = httptest.NewRequest(http.MethodPost, "/v1/g", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(HeaderRequestID, "trace-123")
+	resp, _ = app.Fiber().Test(req)
+	raw, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.Header.Get(HeaderRequestID) != "trace-123" || !strings.Contains(string(raw), "trace-123") {
+		t.Errorf("the caller's own request id was replaced: %s %s", resp.Header.Get(HeaderRequestID), raw)
+	}
+}
+
+// An argument of the wrong type is named with the type it takes, in the
+// schema's words, not the decoder's.
+func TestBindSaysWhatAnArgumentTakes(t *testing.T) {
+	var asked []string
+	app := mountFor(t, "type Query { root: Node }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return gnode{key: "r", asked: &asked}, nil
+	})
+	r := askAt(t, app, "/v1/g", `{ root { next(step: "x") { key } } }`)
+	msg := r.messages()
+	if !strings.Contains(msg, `argument "step" of "next" takes Int`) || strings.Contains(msg, "Go") ||
+		strings.Contains(msg, "unmarshal") {
+		t.Errorf("message = %q", msg)
+	}
+	r = askAt(t, app, "/v1/g", `{ root { next { key } } }`)
+	if !strings.Contains(r.messages(), `argument "step" of "next" is required`) {
+		t.Errorf("message = %q", r.messages())
+	}
+}
+
+// A graph mounted on a group is the group's: its middleware runs in front of
+// the graph, and the address the schema is said to live at is the whole one.
+func TestAGroupMountsAGraphBehindItsMiddleware(t *testing.T) {
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	saw := 0
+	g := app.Group("/v1/kg", func(c *Ctx) error {
+		saw++
+		return c.Next()
+	})
+	g.MountGraphFor("/graphql", func(context.Context) (string, error) { return "type Query { a: JSON }", nil },
+		func(context.Context, string, Selection) (any, error) { return "ok", nil })
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	r := askAt(t, app, "/v1/kg/graphql", `{ a __schema { types { name } } }`)
+	if r.Data["a"] != "ok" || saw != 1 {
+		t.Fatalf("data %#v, middleware ran %d times", r.Data, saw)
+	}
+	if !strings.Contains(r.messages(), "GET /v1/kg/graphql") {
+		t.Errorf("the schema's address is not the whole one: %s", r.messages())
+	}
+	if !app.Declares(http.MethodGet, "/v1/kg/graphql") || !app.Declares(http.MethodPost, "/v1/kg/graphql") {
+		t.Error("the group's graph is not declared at its whole address")
+	}
+}
+
+// Identity is what a Call made with the context would carry: the caller the
+// gateway asserted, or the org an ActingAs re-points it to, and nothing a
+// relayed request could add beside it.
+func TestIdentityIsWhatACallCarries(t *testing.T) {
+	var plain, acting http.Header
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		plain = Identity(ctx)
+		as, err := ActingAs(ctx, "other")
+		if err != nil {
+			return nil, err
+		}
+		acting = Identity(as)
+		return "ok", nil
+	})
+	rawAt(t, app, "/v1/g", GraphRequest{Query: `{ a }`},
+		HeaderOrg, "acme", HeaderUser, "acme/z", HeaderRequestID, "rid-1", "X-Workspace-Id", "w")
+	if plain.Get(HeaderOrg) != "acme" || plain.Get(HeaderUser) != "acme/z" || plain.Get(HeaderRequestID) != "rid-1" {
+		t.Fatalf("identity = %v", plain)
+	}
+	if plain.Get("X-Workspace-Id") != "" {
+		t.Errorf("a header that is not zip's identity rode along: %v", plain)
+	}
+	if acting.Get(HeaderOrg) != "other" || acting.Get(HeaderActedBy) == "" {
+		t.Errorf("an ActingAs identity = %v", acting)
+	}
+	if len(Identity(context.Background())) != 0 {
+		t.Error("a context with no caller carries an identity")
+	}
+}
+
+type shelf struct {
+	Books []book `json:"books"`
+}
+
+type book struct {
+	Title string  `json:"title"`
+	Note  *string `json:"note,omitempty"`
+}
+
+// A list of objects is projected member by member against its element's type, on
+// a local op's answer and on a resolver's. A resolver's typed answer is checked
+// like a local one: a field the type does not have is named, and __typename is
+// the type's.
+func TestAListOfObjectsProjects(t *testing.T) {
+	app := New(Config{AppName: "svc", DisableStartupMessage: true})
+	app.Get("/v1/shelf", func(ctx context.Context, _ *struct{}) (*shelf, error) {
+		return &shelf{Books: []book{{Title: "a"}, {Title: "b"}}}, nil
+	}, WithOperationID("shelf"))
+	app.MountGraphFor("/v1/g", func(context.Context) (string, error) { return "", nil },
+		func(context.Context, string, Selection) (any, error) { return []book{{Title: "c"}}, nil })
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	local := app.GraphQL(context.Background(), GraphRequest{Query: `{ shelf { books { title } } }`})
+	if len(local.Errors) != 0 {
+		t.Fatalf("a list of objects in a local answer: %v", local.Errors)
+	}
+	books := local.Data.(map[string]any)["shelf"].(map[string]any)["books"].([]any)
+	if len(books) != 2 || books[1].(map[string]any)["title"] != "b" {
+		t.Fatalf("books = %#v", books)
+	}
+	if r := app.GraphQL(context.Background(), GraphRequest{Query: `{ shelf { books } }`}); len(r.Errors) != 1 {
+		t.Errorf("a list of objects with nothing selected: %v, want one error", r.Errors)
+	}
+
+	r := askAt(t, app, "/v1/g", `{ a { title note __typename } }`)
+	row := r.Data["a"].([]any)[0].(map[string]any)
+	if len(r.Errors) != 0 || row["title"] != "c" || row["note"] != nil || row["__typename"] != "Book" {
+		t.Fatalf("a typed resolver answer: %#v %s", row, r.messages())
+	}
+	if bad := askAt(t, app, "/v1/g", `{ a { titel } }`); !strings.Contains(bad.messages(), "titel") {
+		t.Errorf("a field the type does not have was answered: %s", bad.messages())
 	}
 }

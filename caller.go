@@ -245,18 +245,39 @@ func (c *Ctx) Forward() context.Context { return callerContext(c.fc) }
 // process reads. It is written whole from the derived caller rather than merged
 // onto the request's headers, so no field of the original request rides beside it.
 func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
+	identity(ctx, req.Header.Set)
+}
+
+// Identity is the identity a [Call] made with ctx would carry, as headers: the
+// caller the gateway asserted on the request behind ctx — or the org an
+// [ActingAs] re-points it to, with the actor — together with the request id and
+// the trace context, and nothing else.
+//
+// It is for a caller that relays a request by hand rather than through Call: it
+// takes the relayed request's identity headers OUT, whatever they say, and puts
+// these in, so the next hop is told who is calling by the rule Call follows and
+// never by a header that happened to be on the request.
+func Identity(ctx context.Context) http.Header {
+	h := http.Header{}
+	identity(ctx, h.Set)
+	return h
+}
+
+// identity writes the caller's identity through set: the rule [Call] and
+// [Identity] share, so a hand relay and a Call cannot carry different callers.
+func identity(ctx context.Context, set func(name, value string)) {
 	// The request's headers are copied while it is held. A request that has ended
 	// forwards no identity at all: it is not this call's to state, and stating
 	// nothing is what an unattributed call should look like.
-	var trace []byte
-	var ids [][2][]byte
+	var trace string
+	var ids [][2]string
 	behind, ended := request(ctx, func(rc *fasthttp.RequestCtx) {
 		if v := rc.Request.Header.Peek(HeaderTrace); len(v) > 0 {
-			trace = append([]byte(nil), v...)
+			trace = string(v)
 		}
 		for _, h := range identityHeaders {
 			if v := rc.Request.Header.Peek(h); len(v) > 0 {
-				ids = append(ids, [2][]byte{[]byte(h), append([]byte(nil), v...)})
+				ids = append(ids, [2]string{h, string(v)})
 			}
 		}
 	})
@@ -267,23 +288,23 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 	// this hop's position in a trace, forwarded so the next hop can say it came from
 	// here. Folding it into the identity list would make "what may a caller assert
 	// about itself" a question with two different answers.
-	if len(trace) > 0 {
-		req.Header.SetBytesV(HeaderTrace, trace)
+	if trace != "" {
+		set(HeaderTrace, trace)
 	}
 	if Traceparent != nil {
 		if v := Traceparent(ctx); v != "" {
-			req.Header.Set(HeaderTrace, v)
+			set(HeaderTrace, v)
 		}
 	}
 	if acting, ok := ctx.Value(actingKey{}).(Caller); ok {
 		for h, v := range acting.headers() {
-			req.Header.Set(h, v)
+			set(h, v)
 		}
 		return
 	}
 	if live {
 		for _, kv := range ids {
-			req.Header.SetBytesKV(kv[0], kv[1])
+			set(kv[0], kv[1])
 		}
 		return
 	}
@@ -295,7 +316,7 @@ func forwardIdentity(ctx context.Context, req *fasthttp.Request) {
 		return
 	}
 	for h, v := range stated.headers() {
-		req.Header.Set(h, v)
+		set(h, v)
 	}
 }
 
