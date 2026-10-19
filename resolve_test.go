@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // The claim under test: a GraphQL field reaches an op through the SAME contract
@@ -542,12 +545,12 @@ func foreignApp(t *testing.T, r Resolver) *App {
 	app.Get("/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) {
 		return &resUser{ID: "local"}, nil
 	}, WithOperationID("local"))
+	app.MountGraphFor("/v1/fleet", func(context.Context) (string, error) {
+		return "type Query {\n  farUser(id: String!): FarUser\n}\n\ntype FarUser {\n  id: String\n  email: String\n}\n", nil
+	}, r)
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	app.MountGraphFor("/v1/fleet", func() string {
-		return "type Query {\n  farUser(id: String!): FarUser\n}\n\ntype FarUser {\n  id: String\n  email: String\n}\n"
-	}, r)
 	return app
 }
 
@@ -575,8 +578,8 @@ func askAt(t *testing.T, app *App, path, query string, vars ...map[string]any) r
 }
 
 func TestAForeignFieldIsResolvedAndProjected(t *testing.T) {
-	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
-		return map[string]any{"id": args["id"], "email": "far@example.com", "secret": "no"}, nil
+	app := foreignApp(t, func(ctx context.Context, kind string, s Selection) (any, error) {
+		return map[string]any{"id": s.Args["id"], "email": "far@example.com", "secret": "no"}, nil
 	})
 	r := askAt(t, app, "/v1/fleet", `{ farUser(id: "u1") { id email } }`)
 	if len(r.Errors) != 0 {
@@ -597,7 +600,7 @@ func TestAForeignFieldIsResolvedAndProjected(t *testing.T) {
 // reachable as a read has to be enforceable where the knowledge is.
 func TestAForeignResolverIsToldTheOperationKind(t *testing.T) {
 	var kinds []string
-	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+	app := foreignApp(t, func(ctx context.Context, kind string, s Selection) (any, error) {
 		kinds = append(kinds, kind)
 		if kind != "mutation" {
 			return nil, errors.New("that field is a write and this is a query")
@@ -622,8 +625,8 @@ func TestAForeignResolverIsToldTheOperationKind(t *testing.T) {
 // resolver sees plain arguments and answers a plain value.
 func TestAForeignResolverSeesResolvedArguments(t *testing.T) {
 	var seen map[string]any
-	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
-		seen = args
+	app := foreignApp(t, func(ctx context.Context, kind string, s Selection) (any, error) {
+		seen = s.Args
 		return map[string]any{"id": "x", "boss": map[string]any{"id": "y", "email": "b@e"}}, nil
 	})
 	r := askAt(t, app, "/v1/fleet", `query F($who: String!) { a: farUser(id: $who) { boss { id } } }`,
@@ -644,7 +647,7 @@ func TestAForeignResolverSeesResolvedArguments(t *testing.T) {
 // absent field is null rather than an invented error. (A LOCAL field still names
 // it — see TestAFieldTheTypeDoesNotHaveIsNamed.)
 func TestAnAbsentForeignFieldIsNullNotAnError(t *testing.T) {
-	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+	app := foreignApp(t, func(ctx context.Context, kind string, s Selection) (any, error) {
 		return map[string]any{"id": "x"}, nil
 	})
 	r := askAt(t, app, "/v1/fleet", `{ farUser(id: "u1") { id email } }`)
@@ -663,13 +666,13 @@ func TestTheForeignSchemaIsRenderedPerRequest(t *testing.T) {
 	n := 0
 	app := New(Config{AppName: "host", DisableStartupMessage: true})
 	app.Get("/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) { return nil, nil }, WithOperationID("local"))
+	app.MountGraphFor("/v1/fleet", func(context.Context) (string, error) {
+		n++
+		return "type Query {\n  n" + strings.Repeat("x", n) + ": String\n}\n", nil
+	}, nil)
 	if err := app.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	app.MountGraphFor("/v1/fleet", func() string {
-		n++
-		return "type Query {\n  n" + strings.Repeat("x", n) + ": String\n}\n"
-	}, nil)
 
 	first, _ := io.ReadAll(mustGet(t, app, "/v1/fleet"))
 	second, _ := io.ReadAll(mustGet(t, app, "/v1/fleet"))
@@ -691,7 +694,7 @@ func mustGet(t *testing.T, app *App, path string) io.Reader {
 
 // The local graph is unchanged by any of this: same app, same door, same answer.
 func TestTheLocalGraphStillAnswers(t *testing.T) {
-	app := foreignApp(t, func(ctx context.Context, kind, field string, args map[string]any) (any, error) {
+	app := foreignApp(t, func(ctx context.Context, kind string, s Selection) (any, error) {
 		return nil, errors.New("should not be asked")
 	})
 	app.MountGraph("/v1/own")
@@ -701,5 +704,475 @@ func TestTheLocalGraphStillAnswers(t *testing.T) {
 	}
 	if r.Data["local"].(map[string]any)["id"] != "local" {
 		t.Fatalf("local op did not run: %#v", r.Data)
+	}
+}
+
+// ── what a resolver is handed, and what it may hand back ─────────────────────
+
+// mountFor builds an app serving one foreign graph at /v1/g, mounted before the
+// app is built — the routes are the app's own, so they are composed with it.
+func mountFor(t *testing.T, sdl string, r Resolver) *App {
+	t.Helper()
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	app.MountGraphFor("/v1/g", func(context.Context) (string, error) { return sdl, nil }, r)
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	return app
+}
+
+// rawAt posts a request and returns the status and the bytes, for assertions
+// about the wire itself.
+func rawAt(t *testing.T, app *App, path string, req GraphRequest, header ...string) (int, string) {
+	t.Helper()
+	body, _ := json.Marshal(req)
+	r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(header); i += 2 {
+		r.Header.Set(header[i], header[i+1])
+	}
+	resp, err := app.Fiber().Test(r)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
+}
+
+// ★ A resolver holds the whole of what was asked below its field: fragments
+// spread, skipped fields gone, variables in place, aliases kept. That is what
+// lets one that fronts a planner fetch only what is selected.
+func TestAResolverReceivesTheGatheredSelection(t *testing.T) {
+	var got Selection
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		got = s
+		return map[string]any{}, nil
+	})
+	q := `query Q($n: Int, $off: Boolean!) {
+		top: a(x: 1) {
+			...F
+			b(n: $n) { c }
+			gone @skip(if: $off)
+			... @skip(if: $off) { also }
+		}
+	}
+	fragment F on A { first: d e }`
+	r := askAt(t, app, "/v1/g", q, map[string]any{"n": 7, "off": true})
+	if len(r.Errors) != 0 {
+		t.Fatalf("unexpected errors: %s", r.messages())
+	}
+	if got.Name != "a" || got.Alias != "top" || got.Key() != "top" {
+		t.Fatalf("the field is named %q under %q, want a under top", got.Name, got.Key())
+	}
+	if got.Args["x"] != int64(1) {
+		t.Fatalf("args = %#v", got.Args)
+	}
+	var keys []string
+	for _, f := range got.Fields {
+		keys = append(keys, f.Key())
+	}
+	if strings.Join(keys, ",") != "first,e,b" {
+		t.Fatalf("selection = %v, want the fragment spread, the skipped field and the inline fragment gone", keys)
+	}
+	b := got.Fields[2]
+	if b.Args["n"] != float64(7) || len(b.Fields) != 1 || b.Fields[0].Name != "c" {
+		t.Fatalf("the nested field lost its variable or its selection: %#v", b)
+	}
+	if got.Depth() != 3 {
+		t.Errorf("Depth = %d, want 3 (a, b, c)", got.Depth())
+	}
+}
+
+// A declared variable that was given nothing leaves its argument out, as the
+// specification says; a reference to one the operation never declared is
+// refused before anything runs; and a variable given and never declared is
+// ignored, because nothing can refer to it.
+func TestVariablesTheRequestDidNotSettle(t *testing.T) {
+	var got Selection
+	app := mountFor(t, "type Query { a(n: Int): JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		got = s
+		return "ok", nil
+	})
+	if r := askAt(t, app, "/v1/g", `query($n: Int) { a(n: $n) }`); len(r.Errors) != 0 {
+		t.Fatalf("an optional variable left unset failed: %s", r.messages())
+	}
+	if _, present := got.Args["n"]; present {
+		t.Errorf("the unset variable reached the resolver as %#v", got.Args)
+	}
+	r := askAt(t, app, "/v1/g", `{ a(n: $nope) }`)
+	if r.code != http.StatusBadRequest || r.Data != nil {
+		t.Errorf("an undeclared variable was run (%d): %#v", r.code, r.Data)
+	}
+	if r := askAt(t, app, "/v1/g", `{ a }`, map[string]any{"extra": 1}); len(r.Errors) != 0 {
+		t.Errorf("a variable the operation does not declare was refused: %s", r.messages())
+	}
+	if r := askAt(t, app, "/v1/g", `query($n: Int = 3) { a(n: $n) }`); len(r.Errors) != 0 || got.Args["n"] != int64(3) {
+		t.Errorf("the default did not apply: %v %s", got.Args, r.messages())
+	}
+}
+
+// Fields answering under one key are one field: their selections join, and the
+// resolver runs once. Two different fields under one key cannot both answer and
+// are refused rather than resolved by whichever came last.
+func TestFieldsUnderOneKeyMerge(t *testing.T) {
+	calls := 0
+	var got Selection
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		calls++
+		got = s
+		return map[string]any{"x": 1, "y": 2}, nil
+	})
+	r := askAt(t, app, "/v1/g", `{ a { x } ...F } fragment F on Query { a { y } }`)
+	if len(r.Errors) != 0 {
+		t.Fatalf("unexpected errors: %s", r.messages())
+	}
+	if calls != 1 || len(got.Fields) != 2 {
+		t.Fatalf("calls = %d, selection = %#v; want one call selecting x and y", calls, got.Fields)
+	}
+	if m := r.Data["a"].(map[string]any); m["x"] != float64(1) || m["y"] != float64(2) {
+		t.Fatalf("the merged field lost half its selection: %#v", m)
+	}
+	clash := askAt(t, app, "/v1/g", `{ a: a { x } a: b }`)
+	if clash.code != http.StatusBadRequest || len(clash.Errors) == 0 {
+		t.Fatalf("two fields under one key were run (%d): %#v", clash.code, clash.Data)
+	}
+}
+
+// A fragment that reaches itself, through any chain, and a spread of a fragment
+// nobody wrote are refused before any field resolves.
+func TestABrokenFragmentNeverRuns(t *testing.T) {
+	ran := false
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		ran = true
+		return map[string]any{}, nil
+	})
+	for _, q := range []string{
+		`{ a { ...A } } fragment A on T { ...B } fragment B on T { x ...A }`,
+		`{ a { ...Missing } }`,
+		`{ a } fragment A on T { ...A }`,
+	} {
+		r := askAt(t, app, "/v1/g", q)
+		if r.code != http.StatusBadRequest || r.Data != nil || len(r.Errors) == 0 {
+			t.Errorf("%s: answered %d with %#v", q, r.code, r.Data)
+		}
+	}
+	if ran {
+		t.Error("a field resolved for a document that cannot be expanded")
+	}
+}
+
+// Fragments that double at every link would be a small document asking for an
+// enormous answer. The count is taken while the request is gathered, so the
+// refusal comes before anything is spent.
+func TestAnExpansionPastTheBoundIsRefused(t *testing.T) {
+	ran := false
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		ran = true
+		return map[string]any{}, nil
+	})
+	var b strings.Builder
+	b.WriteString("{ a { ...F0 } }\n")
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&b, "fragment F%d on T { l { ...F%d } r { ...F%d } }\n", i, i+1, i+1)
+	}
+	b.WriteString("fragment F20 on T { leaf }\n")
+	r := askAt(t, app, "/v1/g", b.String())
+	if r.code != http.StatusBadRequest || ran {
+		t.Fatalf("a 2^20 expansion was run (%d, ran=%v): %s", r.code, ran, r.messages())
+	}
+}
+
+// The width of a request is bounded, and the bound refuses rather than truncates.
+func TestTheRootIsBounded(t *testing.T) {
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return "ok", nil
+	})
+	query := func(n int) string {
+		var b strings.Builder
+		b.WriteString("{")
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, " f%d: a", i)
+		}
+		return b.String() + " }"
+	}
+	if r := askAt(t, app, "/v1/g", query(rootLimit)); len(r.Errors) != 0 || len(r.Data) != rootLimit {
+		t.Fatalf("%d root fields: %s", rootLimit, r.messages())
+	}
+	r := askAt(t, app, "/v1/g", query(rootLimit+1))
+	if r.code != http.StatusBadRequest || r.Data != nil {
+		t.Fatalf("%d root fields were run (%d)", rootLimit+1, r.code)
+	}
+}
+
+// ★ The root fields of a query resolve at once, so a request costs its slowest
+// field; a mutation's run one after another, in the order written.
+func TestQueriesRunAtOnceAndMutationsInOrder(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		time.Sleep(150 * time.Millisecond)
+		mu.Lock()
+		order = append(order, s.Key())
+		mu.Unlock()
+		return s.Key(), nil
+	})
+	start := time.Now()
+	if r := askAt(t, app, "/v1/g", `{ a1: a a2: a a3: a a4: a }`); len(r.Errors) != 0 {
+		t.Fatalf("query: %s", r.messages())
+	}
+	if took := time.Since(start); took > 450*time.Millisecond {
+		t.Errorf("four 150ms fields took %v: the query ran them one after another", took)
+	}
+	order = nil
+	start = time.Now()
+	if r := askAt(t, app, "/v1/g", `mutation { m1: a m2: a m3: a }`); len(r.Errors) != 0 {
+		t.Fatalf("mutation: %s", r.messages())
+	}
+	if took := time.Since(start); took < 450*time.Millisecond {
+		t.Errorf("three 150ms mutation fields took %v: they overlapped", took)
+	}
+	if strings.Join(order, ",") != "m1,m2,m3" {
+		t.Errorf("mutation fields ran as %v, want the order written", order)
+	}
+}
+
+// A field that panics on its own goroutine fails that field, not the process.
+func TestAPanickingFieldFailsAlone(t *testing.T) {
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		if s.Key() == "bad" {
+			panic("boom")
+		}
+		return "ok", nil
+	})
+	r := askAt(t, app, "/v1/g", `{ good: a bad: a }`)
+	if r.Data["good"] != "ok" || r.Data["bad"] != nil || !strings.Contains(r.messages(), "boom") {
+		t.Fatalf("data %#v, errors %s", r.Data, r.messages())
+	}
+}
+
+// ★ An answer's keys come in the order the request selected them, as the
+// specification asks — not sorted, which is what a map would give.
+func TestTheAnswerKeepsTheSelectionsOrder(t *testing.T) {
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return map[string]any{"z": 1, "m": map[string]any{"b": 1, "a": 2}, "a": 3}, nil
+	})
+	_, raw := rawAt(t, app, "/v1/g", GraphRequest{Query: `{ second: a { z m { b a } a } first: a { a } }`})
+	want := `{"data":{"second":{"z":1,"m":{"b":1,"a":2},"a":3},"first":{"a":3}}}`
+	if raw != want {
+		t.Fatalf("wire:\n got %s\nwant %s", raw, want)
+	}
+}
+
+// ── objects: a value that answers its own fields ─────────────────────────────
+
+type gnode struct {
+	key   string
+	asked *[]string
+}
+
+func (n gnode) Type() string { return "Node" }
+
+func (n gnode) Field(ctx context.Context, s Selection) (any, error) {
+	*n.asked = append(*n.asked, n.key+"."+s.Key())
+	switch s.Name {
+	case "key":
+		return n.key, nil
+	case "next":
+		var in struct {
+			Step int `json:"step" validate:"required"`
+		}
+		if err := s.Bind(&in); err != nil {
+			return nil, err
+		}
+		return []*gnode{{key: fmt.Sprintf("%s+%d", n.key, in.Step), asked: n.asked}}, nil
+	case "none":
+		return (*gnode)(nil), nil
+	case "data":
+		return map[string]any{"x": 1, "y": 2}, nil
+	}
+	return nil, fmt.Errorf("no field %q on Node", s.Name)
+}
+
+// ★ Nesting is traversal: each object is asked for the fields selected on it,
+// with that field's own arguments, so two aliases of one field with different
+// arguments are two answers, and a field nobody selected is never computed.
+func TestAnObjectAnswersItsOwnFields(t *testing.T) {
+	var asked []string
+	app := mountFor(t, "type Query { root: Node }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return gnode{key: "r", asked: &asked}, nil
+	})
+	r := askAt(t, app, "/v1/g", `{ root {
+		__typename
+		key
+		one: next(step: 1) { key }
+		two: next(step: 2) { key next(step: 3) { key } }
+		none { key }
+		data { y }
+	} }`)
+	if len(r.Errors) != 0 {
+		t.Fatalf("unexpected errors: %s", r.messages())
+	}
+	root := r.Data["root"].(map[string]any)
+	if root["__typename"] != "Node" || root["key"] != "r" {
+		t.Fatalf("root = %#v", root)
+	}
+	one := root["one"].([]any)[0].(map[string]any)
+	two := root["two"].([]any)[0].(map[string]any)
+	if one["key"] != "r+1" || two["key"] != "r+2" {
+		t.Fatalf("the aliases did not keep their arguments apart: one=%#v two=%#v", one, two)
+	}
+	if deep := two["next"].([]any)[0].(map[string]any); deep["key"] != "r+2+3" {
+		t.Fatalf("the second hop did not resolve: %#v", deep)
+	}
+	if root["none"] != nil {
+		t.Errorf("a nil object answered %#v, want null", root["none"])
+	}
+	if d := root["data"].(map[string]any); d["y"] != float64(2) || d["x"] != nil {
+		t.Errorf("plain data under an object was not projected: %#v", d)
+	}
+	for _, a := range asked {
+		if strings.HasSuffix(a, ".__typename") {
+			t.Errorf("__typename was asked of the object (%s) rather than read off its Type", a)
+		}
+	}
+	if len(asked) != 9 {
+		t.Errorf("the objects were asked %d times (%v), want once per selected field", len(asked), asked)
+	}
+}
+
+// An object's field failing fails that field, at its own path, and its siblings
+// answer. An object with nothing selected on it, and a scalar with a selection,
+// are named rather than answered.
+func TestAnObjectsFailuresAreItsFieldsAlone(t *testing.T) {
+	var asked []string
+	app := mountFor(t, "type Query { root: Node }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return gnode{key: "r", asked: &asked}, nil
+	})
+	r := askAt(t, app, "/v1/g", `{ root { key nope next { key } } }`)
+	if root := r.Data["root"].(map[string]any); root["key"] != "r" || root["nope"] != nil || root["next"] != nil {
+		t.Fatalf("root = %#v", root)
+	}
+	if len(r.Errors) != 2 {
+		t.Fatalf("errors = %s, want the unknown field and the missing argument", r.messages())
+	}
+	for _, e := range r.Errors {
+		if len(e.Path) != 2 || e.Path[0] != "root" {
+			t.Errorf("error %q is at %v, want under root", e.Message, e.Path)
+		}
+	}
+	if !strings.Contains(r.messages(), `"step" is required`) {
+		t.Errorf("Bind did not apply the validate tag: %s", r.messages())
+	}
+
+	for q, want := range map[string]string{
+		`{ root }`:                                     "needs a selection",
+		`{ root { next(step: 1) } }`:                   "needs a selection",
+		`{ root { key { x } } }`:                       "cannot have a selection",
+		`{ root { next(step: 1, extra: 2) { key } } }`: `unknown argument "extra"`,
+		`{ root { next(step: "x") { key } } }`:         "invalid arguments",
+	} {
+		if got := askAt(t, app, "/v1/g", q); !strings.Contains(got.messages(), want) {
+			t.Errorf("%s: errors %q, want one saying %q", q, got.messages(), want)
+		}
+	}
+}
+
+// ── where the graph lives, and what it is told about the caller ─────────────
+
+// ★ The schema is rendered for the caller asking, so a schema may differ by who
+// is asking — an org's own fields are that org's schema.
+func TestTheSchemaIsRenderedForTheCaller(t *testing.T) {
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	app.MountGraphFor("/v1/g", func(ctx context.Context) (string, error) {
+		return "type Query { for_" + CallerOf(ctx).Org + ": String }", nil
+	}, nil)
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, org := range []string{"acme", "zeta"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/g", nil)
+		req.Header.Set(HeaderOrg, org)
+		resp, err := app.Fiber().Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if !strings.Contains(string(b), "for_"+org) {
+			t.Errorf("the schema %s was asked for did not see the caller: %s", org, b)
+		}
+	}
+}
+
+// A schema that cannot render is a 500 that says so, not an empty schema.
+func TestASchemaThatFailsSaysSo(t *testing.T) {
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	app.MountGraphFor("/v1/g", func(context.Context) (string, error) {
+		return "", errors.New("the composition failed")
+	}, nil)
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	resp, err := app.Fiber().Test(httptest.NewRequest(http.MethodGet, "/v1/g", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(b), "the composition failed") {
+		t.Fatalf("answered %d: %s", resp.StatusCode, b)
+	}
+}
+
+// A foreign graph's routes are the app's own and are declared, so a host routes
+// to them and a document describes them; zip's projection of the app's own ops
+// is control plane and is not.
+func TestAForeignGraphIsDeclaredAndTheProjectionIsNot(t *testing.T) {
+	app := New(Config{AppName: "host", DisableStartupMessage: true})
+	app.Get("/v1/local", func(ctx context.Context, _ *resGet) (*resUser, error) { return nil, nil }, WithOperationID("local"))
+	app.MountGraphFor("/v1/g", func(context.Context) (string, error) { return "", nil }, nil)
+	app.MountGraph("/v1/own")
+	if err := app.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, m := range []string{http.MethodGet, http.MethodPost} {
+		if !app.Declares(m, "/v1/g") {
+			t.Errorf("%s /v1/g is not declared", m)
+		}
+		if app.Declares(m, "/v1/own") {
+			t.Errorf("%s /v1/own, zip's projection, is declared", m)
+		}
+	}
+}
+
+// Introspection is refused with the address the schema IS at — the mount's own,
+// not zip's control plane, which a foreign graph does not live at.
+func TestIntrospectionNamesTheMountsAddress(t *testing.T) {
+	app := mountFor(t, "type Query { a: JSON }", func(context.Context, string, Selection) (any, error) { return nil, nil })
+	r := askAt(t, app, "/v1/g", `{ __schema { types { name } } __typename }`)
+	if !strings.Contains(r.messages(), "GET /v1/g") {
+		t.Errorf("the refusal does not say where the schema is: %s", r.messages())
+	}
+	if r.Data["__typename"] != "Query" {
+		t.Errorf("__typename = %#v, want Query", r.Data["__typename"])
+	}
+}
+
+// Headers is the request whole, for a resolver that relays it: the credential,
+// the cookies, and what the edge set.
+func TestHeadersRelaysTheRequest(t *testing.T) {
+	var got http.Header
+	app := mountFor(t, "type Query { a: JSON }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		got = Headers(ctx)
+		return "ok", nil
+	})
+	rawAt(t, app, "/v1/g", GraphRequest{Query: `{ a }`},
+		"Authorization", "Bearer t", "Cookie", "s=1", HeaderOrg, "acme")
+	if got.Get("Authorization") != "Bearer t" || got.Get("Cookie") != "s=1" || got.Get(HeaderOrg) != "acme" {
+		t.Fatalf("headers = %v", got)
+	}
+	if Headers(context.Background()) != nil {
+		t.Error("a context with no request behind it reported headers")
 	}
 }

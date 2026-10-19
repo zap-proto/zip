@@ -3,6 +3,7 @@ package zip
 import (
 	"cmp"
 	"context"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,6 +181,24 @@ func Header(ctx context.Context, name string) string {
 		return ""
 	}
 	return get(name)
+}
+
+// Headers is every header of the request behind a handler's context, copied, and
+// nil when there is no request behind it.
+//
+// It is [Header] for the caller that relays the request whole: a host that
+// answers one address by asking the process that owns the operation, and must
+// present the caller to that process exactly as the caller presented itself —
+// the credential, the cookies, and whatever the edge in front of it set.
+func Headers(ctx context.Context) http.Header {
+	var h http.Header
+	request(ctx, func(rc *fasthttp.RequestCtx) {
+		h = http.Header{}
+		for k, v := range rc.Request.Header.All() {
+			h.Add(string(k), string(v))
+		}
+	})
+	return h
 }
 
 // headerOf is the declared-header reader an op's invoke seam takes, resolved

@@ -54,13 +54,15 @@ type gqlVar struct {
 	def  any
 }
 
-// gqlSel is one selected thing: a field, or a spread of a named fragment.
+// gqlSel is one selected thing: a field, a spread of a named fragment, or an
+// inline fragment.
 type gqlSel struct {
 	alias     string
 	name      string
 	args      map[string]any
 	sel       []*gqlSel
 	spread    string // non-empty: spread this fragment here instead
+	inline    bool   // an inline fragment: sel is its body
 	skipIf    any
 	includeIf any
 }
@@ -361,7 +363,63 @@ func parseGraph(src string) (*gqlDoc, error) {
 			return nil, p.err
 		}
 	}
-	return d, p.err
+	if p.err != nil {
+		return nil, p.err
+	}
+	if err := d.check(); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// check refuses a document whose fragments cannot be expanded: a spread of a
+// fragment nobody defined, and a fragment that reaches itself through any chain
+// of spreads. Both are found here, before anything runs, because a cycle found
+// during execution has already spent the work up to it.
+func (d *gqlDoc) check() error {
+	const (
+		open = 1 // on the path being walked
+		done = 2 // walked, and reaches no cycle
+	)
+	state := map[string]int{}
+	var walk func(sel []*gqlSel) error
+	walk = func(sel []*gqlSel) error {
+		for _, s := range sel {
+			if s.spread == "" {
+				if err := walk(s.sel); err != nil {
+					return err
+				}
+				continue
+			}
+			body, ok := d.frags[s.spread]
+			if !ok {
+				return fmt.Errorf("unknown fragment %q", s.spread)
+			}
+			switch state[s.spread] {
+			case open:
+				return fmt.Errorf("fragment %q spreads itself", s.spread)
+			case done:
+				continue
+			}
+			state[s.spread] = open
+			if err := walk(body); err != nil {
+				return err
+			}
+			state[s.spread] = done
+		}
+		return nil
+	}
+	for _, o := range d.ops {
+		if err := walk(o.sel); err != nil {
+			return err
+		}
+	}
+	for _, body := range d.frags {
+		if err := walk(body); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *gqlParser) operation() (*gqlOp, error) {
@@ -510,7 +568,7 @@ func (p *gqlParser) selection() ([]*gqlSel, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, inner...)
+			out = append(out, inner)
 			continue
 		}
 		f, err := p.field()
@@ -528,24 +586,22 @@ func (p *gqlParser) selection() ([]*gqlSel, error) {
 
 // spread reads `...Name` or `... on Type { ... }`.
 //
-// An inline fragment is flattened into the selection that holds it, and its type
-// condition carries no meaning here: every type this schema publishes is a
-// concrete object, no field answers with an interface or a union, so a condition
-// can only ever name the type the field already has.
-func (p *gqlParser) spread() ([]*gqlSel, error) {
+// An inline fragment keeps its own directives, so `... @include(if: $v) { a b }`
+// decides both fields at once. Its type condition carries no meaning here: every
+// type a graph publishes is a concrete object, no field answers with an
+// interface or a union, so a condition can only ever name the type the field
+// already has.
+func (p *gqlParser) spread() (*gqlSel, error) {
 	p.advance() // "..."
 	if p.tok.kind == 'n' && p.tok.text == "on" {
 		p.advance()
 		if _, ok := p.name(); !ok {
 			return nil, fmt.Errorf("expected a type after `on`")
 		}
-		if _, _, err := p.directives(); err != nil {
-			return nil, err
-		}
-		return p.selection()
+		return p.inline()
 	}
-	if p.is("{") {
-		return p.selection()
+	if p.is("{") || p.is("@") {
+		return p.inline()
 	}
 	name, ok := p.name()
 	if !ok {
@@ -557,7 +613,20 @@ func (p *gqlParser) spread() ([]*gqlSel, error) {
 		return nil, err
 	}
 	s.skipIf, s.includeIf = skip, incl
-	return []*gqlSel{s}, nil
+	return s, nil
+}
+
+// inline reads an inline fragment's directives and body.
+func (p *gqlParser) inline() (*gqlSel, error) {
+	skip, incl, err := p.directives()
+	if err != nil {
+		return nil, err
+	}
+	sel, err := p.selection()
+	if err != nil {
+		return nil, err
+	}
+	return &gqlSel{inline: true, sel: sel, skipIf: skip, includeIf: incl}, nil
 }
 
 func (p *gqlParser) field() (*gqlSel, error) {
