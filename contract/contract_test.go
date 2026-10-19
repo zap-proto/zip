@@ -80,7 +80,7 @@ func serveOneRequest(t *testing.T, spans, logs string, req *http.Request) {
 		DisableStartupMessage: true,
 		Telemetry:             zip.Telemetry{Spans: spans, Logs: logs},
 	})
-	app.Get("/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
+	app.Raw("GET", "/v1/orders/:id", func(c *zip.Ctx) error { return c.String(200, "ok") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {
@@ -238,7 +238,7 @@ func TestAFailedRequestArrivesAsAFailure(t *testing.T) {
 		DisableStartupMessage: true,
 		Telemetry:             zip.Telemetry{Spans: spanAddr, Logs: logAddr},
 	})
-	app.Get("/x", func(c *zip.Ctx) error { return c.String(500, "boom") })
+	app.Raw("GET", "/x", func(c *zip.Ctx) error { return c.String(500, "boom") })
 
 	h, err := zip.Serve(app, "http://"+free(t))
 	if err != nil {

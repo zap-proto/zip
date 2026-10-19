@@ -82,8 +82,8 @@ github.com/zap-proto/fiber/v3 v3.2.1 h1:k45oKyTwySPtGt8sPz2Ao8OUHc7pDEhai8Np2Ym6
 github.com/zap-proto/fiber/v3 v3.2.1/go.mod h1:eDm2z+ufJrkuE4MeX0Mea4oc/p7/HpXiZjVB+BXCKOA=
 github.com/zap-proto/go v1.8.3 h1:GWhb8y7ylgVcaVOR8XN/It56Xovm5Mkv+nQqiblnnoA=
 github.com/zap-proto/go v1.8.3/go.mod h1:fbNeWcssRRbTkQEDCrmUmzqJA1gKcAlgi1z4QrtEFZg=
-github.com/zap-proto/http v0.3.5 h1:ezSuUbF05jxFGpfmScBnzIVTeH1ZGhcDSm7d5yL8Byc=
-github.com/zap-proto/http v0.3.5/go.mod h1:UYfGhDDCetgxs65XSev8Lpf65COg5vKQK+cWwZGh4zQ=
+github.com/zap-proto/http v0.3.12 h1:74EvTeTZxikxctOLKno3UvGWVv3hiaE35UleAU5Nrc0=
+github.com/zap-proto/http v0.3.12/go.mod h1:Gw4Kn/PpF1P+CHJyBQQ3aoFDI3P4p0wsjURFwjPnHzE=
 github.com/zap-proto/mcp v1.0.5 h1:1Hi0KNi4YlWW2zkQUMDK9n3jP3wZaRJ1rseMW9p9F0c=
 github.com/zap-proto/mcp v1.0.5/go.mod h1:cYOsq+33NyW4X8nUVtIs/qtezVovYazw1s0V7mrQBYA=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
