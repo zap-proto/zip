@@ -1440,3 +1440,63 @@ func TestAListOfObjectsProjects(t *testing.T) {
 		t.Errorf("a field the type does not have was answered: %s", bad.messages())
 	}
 }
+
+// shelfHub is an object whose `rows` answer a plain list of a size the caller
+// names: the shape that let an answer grow without a resolver call to count.
+type shelfHub struct{ all int }
+
+func (h shelfHub) Type() string { return "Hub" }
+
+func (h shelfHub) Field(ctx context.Context, s Selection) (any, error) {
+	switch s.Name {
+	case "next":
+		out := make([]shelfHub, h.all)
+		for i := range out {
+			out[i] = shelfHub{all: h.all}
+		}
+		return out, nil
+	case "rows":
+		var in struct {
+			Limit int `json:"limit"`
+		}
+		if err := s.Bind(&in); err != nil {
+			return nil, err
+		}
+		rows := make([]book, in.Limit)
+		for i := range rows {
+			rows[i] = book{Title: fmt.Sprint(i)}
+		}
+		return rows, nil
+	}
+	return nil, ErrBadRequest("no field " + s.Name)
+}
+
+// ★ The budget counts the ANSWER, not only the calls. A plain list a resolver
+// returns costs no further call, so a handful of calls can answer an enormous
+// body: red's measurement was 12,513 objects and 1.16 MB from ~14 counted
+// resolutions. Every member of a list answered — plain or object — is counted.
+func TestTheBudgetCountsWhatIsAnswered(t *testing.T) {
+	app := mountFor(t, "type Query { root: Hub }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		return shelfHub{all: 5}, nil
+	})
+	big := askAt(t, app, "/v1/g", `{ root { next { rows(limit: 2500) { title } } } }`)
+	if big.code != http.StatusBadRequest || big.Data != nil || !strings.Contains(big.messages(), "list members") {
+		t.Fatalf("12,500 rows under five calls were answered (%d): %s", big.code, big.messages())
+	}
+	small := askAt(t, app, "/v1/g", `{ root { next { rows(limit: 100) { title } } } }`)
+	if len(small.Errors) != 0 || len(small.Data["root"].(map[string]any)["next"].([]any)) != 5 {
+		t.Fatalf("500 rows were refused: %s", small.messages())
+	}
+
+	// One resolver answering one long plain list is the same answer, and the same bound.
+	flat := mountFor(t, "type Query { a: [Book] }", func(ctx context.Context, kind string, s Selection) (any, error) {
+		rows := make([]map[string]any, fieldLimit+1)
+		for i := range rows {
+			rows[i] = map[string]any{"title": "x"}
+		}
+		return rows, nil
+	})
+	if r := askAt(t, flat, "/v1/g", `{ a { title } }`); r.code != http.StatusBadRequest || r.Data != nil {
+		t.Fatalf("a %d-member list was answered (%d)", fieldLimit+1, r.code)
+	}
+}

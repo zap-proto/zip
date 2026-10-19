@@ -86,10 +86,11 @@ const (
 	// of them doubles at every link — so the selection is counted as the request
 	// is gathered. And data makes the selection a poor guide to the work: a list
 	// of objects whose field answers more objects grows by the list's length at
-	// every level, from a few dozen bytes of query. So while it runs, every
-	// resolver call (a root field, an object's field) and every object reached
-	// (an answer, each member of a list) is counted against the same bound, and
-	// the request is refused whole once the count passes it.
+	// every level, and a field answering a long plain list costs one call and a
+	// body of any size, from a few dozen bytes of query. So while it runs, every
+	// resolver call (a root field, an object's field), every object reached and
+	// every list member answered, plain or object, is counted against the same
+	// bound, and the request is refused whole once the count passes it.
 	fieldLimit = 10000
 	// rootParallel bounds how many root fields of a query resolve at once. They
 	// are independent, so they overlap; each may be a hop to another process, so
@@ -349,8 +350,8 @@ func (a *App) graph(ctx context.Context, path, rid string, req GraphRequest, for
 	if b.over.Load() {
 		// Refused whole: what was resolved before the bound is a fragment of an
 		// answer, and a client reading it could not tell what is missing.
-		return refuse(fmt.Errorf("the request needs more than %d resolutions; select fewer fields, "+
-			"or less below a list", fieldLimit))
+		return refuse(fmt.Errorf("the request needs more than %d resolutions (resolver calls, objects "+
+			"and list members answered); select fewer fields, or ask a list for fewer members", fieldLimit))
 	}
 
 	data := make(map[string]any, len(roots))
@@ -931,7 +932,7 @@ func (e *graph) value(ctx context.Context, v any, t reflect.Type, sel []Selectio
 		}
 		out := make([]any, rv.Len())
 		for i := range out {
-			if e.b.over.Load() {
+			if !e.b.spend() {
 				return nil
 			}
 			out[i] = e.value(ctx, rv.Index(i).Interface(), nil, sel, sub(path, i))
@@ -1083,6 +1084,11 @@ func (e *graph) project(node any, t reflect.Type, sel []Selection, path []any) a
 		}
 		out := make([]any, len(n))
 		for i, el := range n {
+			// Each member answered is counted, plain or not: a list a resolver
+			// already returned costs no further call, and it is still answer.
+			if !e.b.spend() {
+				return nil
+			}
 			out[i] = e.project(el, elem, sel, sub(path, i))
 		}
 		return out
