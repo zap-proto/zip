@@ -72,6 +72,11 @@ func (a *App) GraphQLSDL() string {
 	var b strings.Builder
 	b.WriteString("# Generated from this app's typed ops. Do not edit.\n")
 	b.WriteString("# Every field below is one op; there is no separate schema to drift from it.\n\n")
+	if g.json {
+		// Declared because it is used: a schema naming a type it never defines
+		// is one no client can build against.
+		b.WriteString("scalar JSON\n\n")
+	}
 	writeBlock(&b, "Query", query)
 	writeBlock(&b, "Mutation", mutation)
 
@@ -107,6 +112,14 @@ func writeBlock(b *strings.Builder, name string, fields []string) {
 type sdl struct {
 	types    map[string]string
 	building map[string]bool
+	json     bool // a field is published as the JSON scalar, which must then be declared
+}
+
+// opaque names a value the schema cannot describe, and records that the JSON
+// scalar it is named by is in use.
+func (g *sdl) opaque() string {
+	g.json = true
+	return "JSON"
 }
 
 func (g *sdl) field(op *registeredOp) string {
@@ -170,7 +183,7 @@ func (g *sdl) typeRef(t reflect.Type, hint string) string {
 		// The type writes its own JSON, so its Go fields say nothing about the
 		// shape that arrives. JSON is the honest name for a value only the type
 		// itself can describe.
-		return "JSON"
+		return g.opaque()
 	}
 	switch t.Kind() {
 	case reflect.Bool:
@@ -193,9 +206,9 @@ func (g *sdl) typeRef(t reflect.Type, hint string) string {
 		// GraphQL has no untyped node. Naming this JSON is honest about what it
 		// is — an opaque blob the schema cannot describe — rather than inventing
 		// a shape a client would then rely on.
-		return "JSON"
+		return g.opaque()
 	}
-	return "JSON"
+	return g.opaque()
 }
 
 // define writes a named object type once and returns its name.
@@ -224,7 +237,7 @@ func (g *sdl) define(t reflect.Type, hint string) string {
 	if n == 0 {
 		// A type with no exported fields is not expressible: `type X {}` is
 		// invalid SDL. It becomes JSON rather than an empty type nobody can query.
-		return "JSON"
+		return g.opaque()
 	}
 	b.WriteString("}\n\n")
 	g.types[name] = b.String()

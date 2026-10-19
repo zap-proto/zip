@@ -46,7 +46,7 @@ Patch tags, one above the highest `v*` on GitHub. Push the commit to main, read 
 | `compose.go`, `walk.go`, `build.go`, `generation.go`, `host.go` | the program (`Use`, `Group`), the walk every projection reduces, generations, `Serve` and `Host` |
 | `transport.go` | `Listen`, `RegisterTransport`, `NetworkOf` |
 | `load.go`, `remote.go`, `status.go`, `idle.go` | plugins (`Load`, `Plugin`, `Reload`, `Unload`), `Proxy`, `Plugins`, `Evict` |
-| `document.go`, `resolve.go`, `graphql.go`, `docs_gen.go` | the GraphQL engine: the parser, `GraphQL`, `MountGraph`, `MountGraphFor`, `Resolver`, `Selection`, `Object`, and `GraphQLSDL`; `DocsMarkdown` |
+| `document.go`, `resolve.go`, `graphql.go`, `sdl.go`, `docs_gen.go` | the GraphQL engine: the parser, `GraphQL`, `MountGraph`, `MountGraphFor`, `Resolver`, `Selection`, `Object`; `GraphQLSDL` and `CheckSchema`; `DocsMarkdown` |
 | `middleware/`, `wsx/`, `js/` | middleware; WebSocket upgrades; goja handlers |
 | `contract/` | collector contract tests, a module of its own |
 | `examples/local-service/` | the README's service, a module of its own |
@@ -87,6 +87,7 @@ zip's is the only GraphQL parser and executor in the estate. `document.go` parse
 - `MountGraphFor` registers two declared routes (GET schema, POST run) where it is called, so mount it before `Build`; a host routes to them and a document describes them. `MountGraph` is control plane and undeclared.
 - Introspection is refused and names GET of the address the graph answers at. On the wire an answer's keys follow the selection (`GraphResponse.MarshalJSON`); in Go `Data` is plain maps.
 - `Headers(ctx)` is every header of the request behind a context, for a resolver that relays the request whole (cloud's fleet hop).
+- `CheckSchema(sdl)` reads the type-system half (`sdl.go`) and says whether a client can build against a schema: every named type defined, nothing defined twice, outputs and inputs where each belongs, roots present. Nothing on a request runs it; a graph's tests do (zip's own `GraphQLSDL`, cloud's fleet and knowledge-graph schemas). `GraphQLSDL` declares `scalar JSON` when a field uses it.
 
 ## Rust
 
